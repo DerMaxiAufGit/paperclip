@@ -3,9 +3,10 @@ import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The cheap host-local authentication-signal route. It reads no sandbox and
-// runs no shell command or model process, so every test drives it through a
-// plain in-process Express app with fake services -- no database, no
-// sandbox provider, and no adapter execution.
+// runs no model process; for claude_local it asks the local `claude` binary for
+// its own sign-in status (`claude auth status`), which the test mocks. Every test
+// drives the route through a plain in-process Express app with fake services --
+// no database, no sandbox provider, and no adapter execution.
 
 const COMPANY_1 = "company-1";
 const OTHER_COMPANY = "company-2";
@@ -34,7 +35,6 @@ const mockSecretService = vi.hoisted(() => ({
     secretKeys: new Set<string>(),
     manifest: [],
   })),
-  readClaudeOAuthUserSecretStatus: vi.fn(async () => null as { secretId: string; latestVersion: number } | null),
 }));
 
 const mockEnvironmentService = vi.hoisted(() => ({
@@ -59,6 +59,24 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
 // controls its resolved value and its failure, so it stays independent of a
 // real Codex home on disk.
 const mockEvaluateCodexCredentialReadiness = vi.hoisted(() => vi.fn());
+
+// The `claude auth status` reader. The route calls it for claude_local on this
+// server (no environment or a local-driver environment). The test controls its
+// resolved value, so no real `claude` binary runs.
+type ClaudeAuthStatusResult = {
+  loggedIn: boolean;
+  authMethod: string | null;
+  subscriptionType: string | null;
+} | null;
+const mockReadClaudeAuthStatus = vi.hoisted(() => vi.fn(async (): Promise<ClaudeAuthStatusResult> => null));
+// The route calls `probeClaudeCliAuth`, which also says whether the binary is
+// missing. By default it wraps the status mock above with the binary present.
+const mockProbeClaudeCliAuth = vi.hoisted(() =>
+  vi.fn(async (): Promise<{ status: ClaudeAuthStatusResult; binaryMissing: boolean }> => ({
+    status: await mockReadClaudeAuthStatus(),
+    binaryMissing: false,
+  })),
+);
 
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
@@ -103,6 +121,15 @@ vi.mock("../services/environment-execution-target.js", () => ({
 vi.mock("../services/instance-settings.js", () => ({
   instanceSettingsService: () => mockInstanceSettingsService,
 }));
+
+vi.mock("@paperclipai/adapter-claude-local/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/adapter-claude-local/server")>();
+  return {
+    ...actual,
+    readClaudeAuthStatus: mockReadClaudeAuthStatus,
+    probeClaudeCliAuth: mockProbeClaudeCliAuth,
+  };
+});
 
 vi.mock("@paperclipai/adapter-codex-local/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@paperclipai/adapter-codex-local/server")>();
@@ -168,7 +195,7 @@ describe("adapter auth-signal route", () => {
       secretKeys: new Set<string>(),
       manifest: [],
     });
-    mockSecretService.readClaudeOAuthUserSecretStatus.mockResolvedValue(null);
+    mockReadClaudeAuthStatus.mockResolvedValue(null);
     mockEvaluateCodexCredentialReadiness.mockResolvedValue({
       managed: true,
       authMode: "subscription",
@@ -301,7 +328,92 @@ describe("adapter auth-signal route", () => {
     );
   });
 
-  it("returns present for claude_local when the environment holds a non-empty token", async () => {
+  it("returns present for claude_local when the local claude CLI reports it is signed in", async () => {
+    mockReadClaudeAuthStatus.mockResolvedValueOnce({
+      loggedIn: true,
+      authMethod: "claude.ai",
+      subscriptionType: "max",
+    });
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "present" });
+    expect(mockReadClaudeAuthStatus).toHaveBeenCalledOnce();
+    // The route reads no stored credential and resolves no secret for the host.
+    expect(mockSecretService.resolveEnvBindings).not.toHaveBeenCalled();
+  });
+
+  it("returns absent for claude_local when the local claude CLI reports it is not signed in", async () => {
+    mockReadClaudeAuthStatus.mockResolvedValueOnce({
+      loggedIn: false,
+      authMethod: null,
+      subscriptionType: null,
+    });
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "absent" });
+  });
+
+  it("returns unknown for claude_local when the claude binary is missing or its output is unreadable", async () => {
+    mockReadClaudeAuthStatus.mockResolvedValueOnce(null);
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "unknown" });
+  });
+
+  it("returns unknown with reason cli_missing for claude_local when the claude binary is not installed", async () => {
+    mockProbeClaudeCliAuth.mockResolvedValueOnce({ status: null, binaryMissing: true });
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "unknown", reason: "cli_missing" });
+  });
+
+  it("returns unknown for claude_local when the claude CLI status read throws", async () => {
+    mockReadClaudeAuthStatus.mockRejectedValueOnce(new Error("boom"));
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "unknown" });
+  });
+
+  it("uses the local claude CLI status for claude_local on a local-driver environment", async () => {
+    mockEnvironmentService.getById.mockResolvedValue({
+      id: ENVIRONMENT_1,
+      companyId: COMPANY_1,
+      name: "Local host",
+      driver: "local",
+      status: "active",
+      config: {},
+      envVars: {},
+    });
+    mockReadClaudeAuthStatus.mockResolvedValueOnce({
+      loggedIn: true,
+      authMethod: "claude.ai",
+      subscriptionType: null,
+    });
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local", ENVIRONMENT_1));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "present" });
+    expect(mockReadClaudeAuthStatus).toHaveBeenCalledOnce();
+  });
+
+  it("returns present for claude_local on a sandbox environment that holds its own Anthropic API key", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: ENVIRONMENT_1,
       companyId: COMPANY_1,
@@ -310,12 +422,12 @@ describe("adapter auth-signal route", () => {
       status: "active",
       config: { provider: "fake-plugin" },
       envVars: {
-        CLAUDE_CODE_OAUTH_TOKEN: { type: "secret_ref", secretId: "secret-1" },
+        ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "secret-1" },
       },
     });
     mockSecretService.resolveEnvBindings.mockResolvedValueOnce({
-      env: { CLAUDE_CODE_OAUTH_TOKEN: "resolved-token" },
-      secretKeys: new Set(["CLAUDE_CODE_OAUTH_TOKEN"]),
+      env: { ANTHROPIC_API_KEY: "resolved-key" },
+      secretKeys: new Set(["ANTHROPIC_API_KEY"]),
       manifest: [],
     });
     const app = await createApp();
@@ -324,30 +436,53 @@ describe("adapter auth-signal route", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body).toEqual({ status: "present" });
-    expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+    expect(mockSecretService.resolveEnvBindings).toHaveBeenCalledWith(
+      COMPANY_1,
+      { ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "secret-1" } },
+      expect.anything(),
+    );
+    // A remote environment cannot use this server's claude sign-in.
+    expect(mockReadClaudeAuthStatus).not.toHaveBeenCalled();
   });
 
-  it("returns present for claude_local when the owner holds a stored login and the environment holds no key", async () => {
-    mockSecretService.readClaudeOAuthUserSecretStatus.mockResolvedValueOnce({
-      secretId: "secret-1",
-      latestVersion: 1,
+  it("returns unknown for claude_local on a sandbox environment with no Anthropic API key, even when this server's claude CLI is signed in", async () => {
+    mockReadClaudeAuthStatus.mockResolvedValue({
+      loggedIn: true,
+      authMethod: "claude.ai",
+      subscriptionType: "max",
     });
     const app = await createApp();
 
     const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local", ENVIRONMENT_1));
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body).toEqual({ status: "present" });
-    expect(mockSecretService.readClaudeOAuthUserSecretStatus).toHaveBeenCalledWith(COMPANY_1, OWNER_A);
+    expect(res.body).toEqual({ status: "unknown" });
+    expect(mockReadClaudeAuthStatus).not.toHaveBeenCalled();
   });
 
-  it("returns absent for claude_local when neither source holds a value", async () => {
+  it("returns unknown for claude_local on a sandbox environment whose Anthropic API key resolves empty", async () => {
+    mockEnvironmentService.getById.mockResolvedValue({
+      id: ENVIRONMENT_1,
+      companyId: COMPANY_1,
+      name: "Sandbox QA",
+      driver: "sandbox",
+      status: "active",
+      config: { provider: "fake-plugin" },
+      envVars: {
+        ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "secret-1" },
+      },
+    });
+    mockSecretService.resolveEnvBindings.mockResolvedValueOnce({
+      env: { ANTHROPIC_API_KEY: "" },
+      secretKeys: new Set(["ANTHROPIC_API_KEY"]),
+      manifest: [],
+    });
     const app = await createApp();
 
-    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local", ENVIRONMENT_1));
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body).toEqual({ status: "absent" });
+    expect(res.body).toEqual({ status: "unknown" });
   });
 
   it("returns unknown for an adapter type that has no cheap signal", async () => {
@@ -358,7 +493,7 @@ describe("adapter auth-signal route", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body).toEqual({ status: "unknown" });
     expect(mockEvaluateCodexCredentialReadiness).not.toHaveBeenCalled();
-    expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+    expect(mockReadClaudeAuthStatus).not.toHaveBeenCalled();
   });
 
   it("rejects an environment that belongs to another company", async () => {
@@ -369,7 +504,7 @@ describe("adapter auth-signal route", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(mockSecretService.resolveEnvBindings).not.toHaveBeenCalled();
-    expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+    expect(mockReadClaudeAuthStatus).not.toHaveBeenCalled();
   });
 
   it("rejects a caller who cannot create agents for the company", async () => {
@@ -384,7 +519,7 @@ describe("adapter auth-signal route", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(mockEnvironmentService.getById).not.toHaveBeenCalled();
-    expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+    expect(mockReadClaudeAuthStatus).not.toHaveBeenCalled();
   });
 
   it("returns a response body that holds only the status field", async () => {

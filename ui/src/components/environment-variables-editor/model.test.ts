@@ -170,6 +170,14 @@ describe("validateName", () => {
     expect(validateName("DUP", new Set(["DUP"]), reserved)).toEqual({ level: "error", message: "Duplicate name" });
   });
 
+  it("rejects the Claude subscription token key in any letter case", () => {
+    const message =
+      "CLAUDE_CODE_OAUTH_TOKEN is not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.";
+    expect(validateName("CLAUDE_CODE_OAUTH_TOKEN", new Set(), reserved)).toEqual({ level: "error", message });
+    expect(validateName("claude_code_oauth_token", new Set(), reserved)).toEqual({ level: "error", message });
+    expect(validateName("ANTHROPIC_API_KEY", new Set(), reserved)).toBeNull();
+  });
+
   it("flags reserved prefixes as warnings", () => {
     const issue = validateName("PAPERCLIP_HOME", new Set(), reserved);
     expect(issue?.level).toBe("warn");

@@ -88,4 +88,27 @@ describe("AI connection authentication presentation", () => {
     expect(container.querySelector("input")).toBeNull();
     expect(props.onStart).not.toHaveBeenCalled();
   });
+  it("never offers a Claude subscription sign-in or a code field", () => {
+    const { container, props } = mount({
+      provider: "anthropic",
+      method: "subscription",
+      state: { phase: "waiting", authorizationUrl: "https://provider.example/authorize" },
+    });
+    expect(container.textContent).toContain(
+      "Claude subscriptions are used through the claude CLI signed in on this server.",
+    );
+    expect(container.querySelector("input")).toBeNull();
+    expect(container.querySelector("a")).toBeNull();
+    expect(props.onStart).not.toHaveBeenCalled();
+  });
+  it("shows the displayed code for an OpenAI subscription sign-in", () => {
+    const { container } = mount({
+      provider: "openai",
+      method: "subscription",
+      state: { phase: "waiting", authorizationUrl: "https://provider.example/device", code: "WFK7-4GA3U" },
+    });
+    expect(container.textContent).toContain("WFK7-4GA3U");
+    expect(container.textContent).toContain("Waiting for sign-in");
+    expect(container.querySelector("input")).toBeNull();
+  });
 });

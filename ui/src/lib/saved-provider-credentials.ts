@@ -1,4 +1,4 @@
-import type { AiConnectionBinding, AiManagedConnectionSummary, AiProvider, CompanySecret, EnvBinding } from "@paperclipai/shared";
+import { AI_CONNECTION_CAPABILITIES, type AiConnectionBinding, type AiManagedConnectionSummary, type AiProvider, type CompanySecret, type EnvBinding } from "@paperclipai/shared";
 import type { MyUserSecretEntry } from "../api/secrets";
 
 export type SavedProviderKey = { id: string; label: string } & (
@@ -12,6 +12,8 @@ export function savedManagedProviderAccounts(
 ): SavedProviderKey[] {
   return connections.flatMap<SavedProviderKey>((account) => {
     if (account.companyId !== companyId || account.provider !== provider || account.status !== "connected") return [];
+    // Never reuse a connection whose method was withdrawn (a Claude subscription).
+    if (!AI_CONNECTION_CAPABILITIES[provider].methods[account.method]) return [];
     if (account.ownership === "personal" && account.ownerUserId === currentUserId && account.isDefault) {
       return [{ id: `ai:${account.grantId}`, label: `${account.name} (Your default)`, aiConnection: { provider, method: account.method, mode: "responsible_user" as const } }];
     }

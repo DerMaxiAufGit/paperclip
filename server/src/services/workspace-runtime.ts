@@ -17,6 +17,7 @@ import {
   listWorkspaceServiceCommandDefinitions,
   RUNTIME_EXPOSURE_BIND_HOST,
   RUNTIME_EXPOSURE_BIND_MODE,
+  isClaudeSubscriptionTokenEnvKey,
   rewriteUrlHostToLoopback,
   readRuntimeExposureIntent,
   resolveDeclaredRuntimeExposureConfig,
@@ -677,7 +678,8 @@ export async function ensureServerWorkspaceLinksCurrent(
 export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
+    // A Claude subscription credential never reaches a spawned process.
+    if (key.startsWith("PAPERCLIP_") || isClaudeSubscriptionTokenEnvKey(key)) {
       delete env[key];
     }
   }

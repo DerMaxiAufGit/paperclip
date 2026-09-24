@@ -47,7 +47,11 @@ in the selected organization. A saved subscription is the default when available
 otherwise a saved API key is selected automatically. Personal keys appear before
 organization keys. You can still choose a new key or another account:
 
-- Claude can use your saved subscription login without another sign-in.
+- Claude has no saved subscription. The subscription option uses the `claude`
+  CLI signed in on the Paperclip server and shows whether that CLI is signed
+  in. Paperclip does not store the sign-in. See
+  [Running Claude on a server](/adapters/claude-local#running-claude-on-a-server).
+  Saved Anthropic API keys can be reused like other provider keys.
 - OpenAI lists ChatGPT accounts saved by Paperclip's Codex sign-in flow. Choose
   an account or select **Sign in to another account**.
 - In API-key mode, choose a saved personal or organization provider key, or

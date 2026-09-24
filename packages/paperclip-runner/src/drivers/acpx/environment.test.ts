@@ -10,6 +10,7 @@ describe("ACPX launch environment", () => {
       HTTPS_PROXY: "https://proxy.example",
       OPENAI_API_KEY: "openai-secret",
       ANTHROPIC_API_KEY: "anthropic-secret",
+      CLAUDE_CODE_OAUTH_TOKEN: "claude-subscription-secret",
       OPENROUTER_API_KEY: "openrouter-secret",
       PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET:
         '{"tokens":{"access_token":"managed-secret"}}',
@@ -37,6 +38,9 @@ describe("ACPX launch environment", () => {
       HTTPS_PROXY: "https://proxy.example",
       OPENROUTER_API_KEY: "openrouter-secret",
     });
+    expect(createSanitizedAcpxSpawnInput(source, "claude").env).not.toHaveProperty(
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    );
     expect(codex.env).not.toHaveProperty("PAPERCLIP_NATIVE_MCP_TOKEN");
     expect(codex.env).not.toHaveProperty(
       "PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET",

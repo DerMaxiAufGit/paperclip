@@ -7,10 +7,11 @@ import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLea
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "./connector-runtime.js";
+import { resolvePersistedClaudeLocalEngine } from "./claude-local-engine.js";
 import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from "./explicit-native-continuation.js";
 import { connectionIntentService } from "./connection-intents.js";
-import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
-import { aiConnectionBindingSchema } from "@paperclipai/shared";
+import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS, resolveRunAiConnectionBinding } from "./ai-connection-runtime.js";
+import { aiConnectionBindingSchema, isClaudeSubscriptionTokenEnvKey } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
@@ -1481,6 +1482,8 @@ function stripForbiddenEnvBindings(
     Object.entries(record).filter(
       ([key]) =>
         !FORBIDDEN_ENV_BINDING_KEYS.has(key) &&
+        // A Claude subscription credential never reaches a run, in any letter case.
+        !isClaudeSubscriptionTokenEnvKey(key) &&
         !(managedGitHubCredentials && MANAGED_GITHUB_TOKEN_KEYS.has(key)),
     ),
   );
@@ -14316,6 +14319,7 @@ export function heartbeatService(
     run: typeof heartbeatRuns.$inferSelect;
     adapterType: string;
     adapterConfig: unknown;
+    runtimeConfig?: unknown;
   }) {
     const context = parseObject(input.run.contextSnapshot);
     if (
@@ -14337,9 +14341,16 @@ export function heartbeatService(
     ) {
       return false;
     }
-    return (
-      readNonEmptyString(parseObject(input.adapterConfig).engine) !== "cli"
-    );
+    const engine = readNonEmptyString(parseObject(input.adapterConfig).engine);
+    // claude_local defaults to ACP only with an API credential and otherwise to
+    // the CLI engine; the others default to ACP.
+    if (input.adapterType === "claude_local") {
+      return resolvePersistedClaudeLocalEngine({
+        adapterConfig: input.adapterConfig,
+        runtimeConfig: input.runtimeConfig,
+      }) === "acp";
+    }
+    return engine !== "cli";
   }
 
   async function prepareHotRestartShutdown(
@@ -14395,6 +14406,7 @@ export function heartbeatService(
         run: heartbeatRuns,
         adapterType: agents.adapterType,
         adapterConfig: agents.adapterConfig,
+        runtimeConfig: agents.runtimeConfig,
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
@@ -21130,7 +21142,14 @@ export function heartbeatService(
         ["local", "ssh"].includes(
           selectedEnvironmentForConfig?.driver ?? "local",
         );
-      const aiBinding = agent.runtimeConfig?.aiConnection ? aiConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
+      // A responsible user without an Anthropic default runs a claude_local
+      // agent on the claude CLI signed in on this server (see the helper).
+      const aiBinding = await resolveRunAiConnectionBinding(db, {
+        companyId: agent.companyId,
+        adapterType: agent.adapterType,
+        binding: agent.runtimeConfig?.aiConnection ? aiConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined,
+        responsibleUserId,
+      });
       const { resolvedConfig, secretKeys, secretManifest } =
         await resolveExecutionRunAdapterConfig({
           managedAiCredentials: Boolean(aiBinding),
@@ -21238,7 +21257,9 @@ export function heartbeatService(
       const connectorSkillConfig = await applyConnectorSkills(effectiveResolvedConfig, runtimeSkillEntries, connectorAssignments);
       // Both CLI adapters and native context materialization use the same resolved set.
       runtimeSkillEntries.splice(0, runtimeSkillEntries.length, ...connectorSkillConfig.paperclipRuntimeSkills);
-      const connectorDelivery = await prepareConnectorSkillDelivery(connectorSkillConfig, agent.adapterType);
+      const connectorDelivery = await prepareConnectorSkillDelivery(connectorSkillConfig, agent.adapterType, {
+        targetIsRemote: (selectedEnvironmentForConfig?.driver ?? "local") !== "local",
+      });
       // Always replace this runtime-only field; caller wake data cannot supply skills.
       context.paperclipWake = { ...parseObject(context.paperclipWake), connectorSkillInstructions: connectorDelivery.instructions };
       let runtimeConfig: Record<string, unknown> = connectorDelivery.config;

@@ -758,7 +758,7 @@ describe("worker execute.log emitter", () => {
   });
 });
 
-describe("worker setup-token pseudo-terminal dispatch", () => {
+describe("worker device-login pseudo-terminal dispatch", () => {
   it("dispatches open, input, stop, and close, and streams output and exit as notifications", async () => {
     const hostToWorker = new PassThrough();
     const workerToHost = new PassThrough();
@@ -786,7 +786,7 @@ describe("worker setup-token pseudo-terminal dispatch", () => {
         // validated session home. The worker returns a worker session id for the
         // output binding only. The open carries no command string.
         expect(params.hostRouteId).toBe("route-1");
-        expect(params.loginCommandKey).toBe("claude");
+        expect(params.loginCommandKey).toBe("codex");
         expect(params.sessionHome).toBe(
           "/tmp/paperclip-adapter-login/11111111-2222-4333-8444-555555555555",
         );
@@ -873,14 +873,14 @@ describe("worker setup-token pseudo-terminal dispatch", () => {
           companyId: "company-1",
           environmentId: "env-1",
           providerLeaseId: "lease-1",
-          loginCommandKey: "claude",
+          loginCommandKey: "codex",
           sessionHome: "/tmp/paperclip-adapter-login/11111111-2222-4333-8444-555555555555",
         }),
       ).resolves.toEqual({ workerSessionId: "ws-1" });
 
       // The worker streams output as a notification bound to the worker session id.
       emitOutput?.("prompt output");
-      await callWorker("loginPtyInput", { workerSessionId: "ws-1", data: "browser-code" });
+      await callWorker("loginPtyInput", { workerSessionId: "ws-1", data: "input" });
       await callWorker("loginPtyStop", { workerSessionId: "ws-1" });
       resolveWait?.({ exitCode: 0 });
       await expect(
@@ -889,7 +889,7 @@ describe("worker setup-token pseudo-terminal dispatch", () => {
 
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(inputs).toEqual(["browser-code"]);
+      expect(inputs).toEqual(["input"]);
       expect(killed).toBe(1);
       expect(closed).toBe(1);
       const outputNotes = notifications.filter(

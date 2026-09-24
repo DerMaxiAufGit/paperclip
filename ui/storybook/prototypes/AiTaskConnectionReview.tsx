@@ -33,7 +33,7 @@ export function AiTaskConnectionReview({ reuse = false }: { reuse?: boolean }) {
         if (path.endsWith("/phase")) interaction = { ...interaction, payload: { ...interaction.payload, phase: payload.phase } };
         return Response.json(path.endsWith("setup-options") ? {
           version: 1, interaction, service: { service: "anthropic", name: "Claude", methods: [], state: "needs_user_action", connectionId: null },
-          aiConnection: { provider: "anthropic", method: "subscription", mode: "responsible_user" }, requestedAgentId: "nova", existingConnections: reuse ? [{ id: "claude-dotta", applicationId: "app-anthropic", name: AI_REVIEW_CONNECTIONS[0].name, status: "active", enabled: true }] : [],
+          aiConnection: { provider: "anthropic", method: "api_key", mode: "responsible_user" }, requestedAgentId: "nova", existingConnections: reuse ? [{ id: "claude-dotta", applicationId: "app-anthropic", name: AI_REVIEW_CONNECTIONS[0].name, status: "active", enabled: true }] : [],
         } : interaction);
       }
       if (path === "/api/companies/company-storybook/tools/gallery") return Response.json({ apps: [{ ...app, name: "Claude" }], capabilities: { canCreateOrganizationGrant: false, canSetCompanyInstall: false } });
@@ -56,10 +56,11 @@ function TaskCard() {
     {interaction && <AiReviewBoundary label="Existing app component: ConnectionIntentInteractionBody"><ConnectionIntentInteractionBody interaction={interaction} currentUserId="dotta" addresseeLabel="Dotta" renderSetup={(props) => <TaskSetup {...props} />} /></AiReviewBoundary>}
   </main>;
 }
+/** Claude connects with an API key; a Claude subscription is used only through the claude CLI on the server. */
 function TaskSetup(props: ConnectionSetupFlowProps) {
   const [state, setState] = useState<AiAuthState>({ phase: "idle" });
-  return <ConnectionSetupFlow {...props} renderCredentialStep={() => <AiReviewBoundary label="Simulated authentication controller · Existing login cards"><AiConnectionAuth provider="anthropic" method="subscription" state={state}
-    onStart={() => setState({ phase: "waiting", authorizationUrl: "https://example.test/review-login" })}
+  return <ConnectionSetupFlow {...props} renderCredentialStep={() => <AiReviewBoundary label="Simulated authentication controller · Existing login cards"><AiConnectionAuth provider="anthropic" method="api_key" state={state}
+    onStart={() => {}}
     onSubmit={() => setState({ phase: "connected" })}
     onCancel={() => props.onCancel?.()}
     onDone={() => props.onComplete?.({ connectionId: "review-task-claude" })}

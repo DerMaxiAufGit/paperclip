@@ -1,8 +1,6 @@
 import { aiConnectionsApi } from "@/api/ai-connections";
 import type { AiProvider } from "@paperclipai/shared";
 import { useQuery } from "@tanstack/react-query";
-import { agentsApi } from "@/api/agents";
-import { ApiError } from "@/api/client";
 import { secretsApi } from "@/api/secrets";
 import { queryKeys } from "@/lib/queryKeys";
 import {
@@ -37,23 +35,7 @@ export function useSavedProviderKeys(
     enabled: Boolean(companyId) && enabled,
     retry: false,
   });
-  const storedLogin = useQuery({
-    // Disabled queries still return cached data. Keep other providers away
-    // from the shared Claude login cache.
-    queryKey: ["claude-oauth-token-status", envKey === "ANTHROPIC_API_KEY" ? companyId : null],
-    queryFn: async () => {
-      try {
-        return await agentsApi.getClaudeOAuthTokenStatus(companyId!);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 404) return null;
-        throw error;
-      }
-    },
-    enabled: Boolean(companyId) && enabled && envKey === "ANTHROPIC_API_KEY",
-    retry: false,
-  });
   return {
-    storedLogin,
     options: [...managedAccounts.filter(account => account.aiConnection?.method === "api_key"), ...savedProviderKeys(
       companyId ?? "",
       envKey,
@@ -65,7 +47,7 @@ export function useSavedProviderKeys(
       organization.data ?? [],
     ) : [])],
     // Background refreshes must not unmount an active login panel sharing this query.
-    loading: personal.isLoading || organization.isLoading || storedLogin.isLoading || managed.isLoading,
+    loading: personal.isLoading || organization.isLoading || managed.isLoading,
     error: personal.isError || organization.isError || managed.isError,
   };
 }

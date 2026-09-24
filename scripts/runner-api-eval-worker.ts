@@ -103,9 +103,9 @@ try {
           if (providerVersion !== "1.18.29") throw new Error("OpenCode profile requires version 1.18.29");
         }
         const providerEnvironment = isOpenRouter ? openRouterEnvironment() : request.model === "claude-sonnet-5" ? (() => {
-            const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-            if (!token) throw new Error("Controller must inject CLAUDE_CODE_OAUTH_TOKEN");
-            return { PATH: process.env.PATH, CLAUDE_CODE_OAUTH_TOKEN: token };
+            const apiKey = process.env.ANTHROPIC_API_KEY;
+            if (!apiKey) throw new Error("Controller must inject ANTHROPIC_API_KEY");
+            return { PATH: process.env.PATH, ANTHROPIC_API_KEY: apiKey };
           })() : undefined;
         bundle = createRunnerdCodexTransport({
           provider, acpxAgent: "claude", acpxPermissionMode: "approve-reads",

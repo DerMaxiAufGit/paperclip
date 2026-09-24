@@ -11,6 +11,7 @@ import {
   type PaperclipSkillEntry,
 } from "@paperclipai/adapter-utils/server-utils";
 import { forbidden } from "../errors.js";
+import { resolveClaudeLocalEngine } from "./claude-local-engine.js";
 import { emailChannelService } from "./email-channels.js";
 import {
   AGENTMAIL_TOOLS,
@@ -203,11 +204,17 @@ export async function applyConnectorSkills(
 export async function prepareConnectorSkillDelivery(
   config: Record<string, unknown> & Awaited<ReturnType<typeof applyConnectorSkills>>,
   adapterType: string,
+  options: { targetIsRemote?: boolean } = {},
 ) {
+  // claude_local picks its default engine from the credential (see
+  // resolveClaudeDefaultEngine); codex_local and kimi_local default to ACP and
+  // use the CLI engine only when it is set explicitly.
   const scopedFiles =
     adapterType === "paperclip_runner" ||
+    (adapterType === "claude_local" &&
+      resolveClaudeLocalEngine(config, options.targetIsRemote === true) === "cli") ||
     (config.engine === "cli" &&
-      ["codex_local", "claude_local", "kimi_local"].includes(adapterType));
+      ["codex_local", "kimi_local"].includes(adapterType));
   if (scopedFiles) return { config, instructions: "" };
   const assigned = config.paperclipRuntimeSkills.filter((entry) =>
     isConnectorSkill(entry.key),

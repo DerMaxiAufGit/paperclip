@@ -21,7 +21,7 @@ import { ModelSourceTiles } from "../onboarding/ModelSourceTiles";
 import { CredentialModeLink } from "../onboarding/CredentialModeLink";
 import { FooterNav } from "../onboarding/FooterNav";
 import { MAKE_ROOM, CARD_ENTER } from "../onboarding/onboarding-motion";
-import { buildFixedClaudeOAuthBinding } from "../environment-variables-editor/model";
+import { ClaudeCliSignInStatus } from "../ClaudeCliSignInStatus";
 import type { EnvBinding } from "@paperclipai/shared";
 
 export type ProviderConnection = {
@@ -29,8 +29,6 @@ export type ProviderConnection = {
   aiConnection?: AiConnectionBinding;
   /** Kept in memory until the user finishes setup. */
   credentials?: Record<string, string>;
-  storedSessionId?: string;
-  applyStoredClaudeLogin?: boolean;
 };
 export function AgentProviderConnection({
   companyId,
@@ -43,6 +41,7 @@ export function AgentProviderConnection({
   testConnection,
   testError,
   managedAccount,
+  apiKeyOnly = false,
 }: {
   companyId: string;
   adapterType: "claude_local" | "codex_local" | "grok_local";
@@ -53,7 +52,11 @@ export function AgentProviderConnection({
   onBack: () => void;
   testConnection: (connection: ProviderConnection) => Promise<boolean>;
   testError?: string | null;
-  /** Connections supplies its access intent; presentation and login controllers stay shared. */
+  /**
+   * Connections supplies its access intent; presentation and login controllers
+   * stay shared. Codex and Grok only: a Claude connection is an API key and
+   * uses the API key step, because a Claude subscription is never saved.
+   */
   managedAccount?: {
     intent: AiConnectionLoginIntent;
     initialMethod?: "subscription" | "api_key";
@@ -61,6 +64,11 @@ export function AgentProviderConnection({
     disabled?: boolean;
     onComplete: (result: { connectionId: string; grantId: string; method: "subscription" | "api_key" }) => void;
   };
+  /**
+   * Offer only the API key step. A Paperclip Runner's Claude (ACPX / Agent SDK)
+   * lane never runs on a Claude subscription, so it always needs an API key.
+   */
+  apiKeyOnly?: boolean;
 }) {
   const health = useQuery({ queryKey: queryKeys.health, queryFn: healthApi.get, enabled: localEnvironment });
   const canUseLocalLogin = localEnvironment && (health.data?.localAiLoginSupported ?? health.data?.deploymentMode === "local_trusted");
@@ -78,11 +86,10 @@ export function AgentProviderConnection({
     setAuthorizationUrl(null);
     setLoginPhase("preparing");
   };
-  const [methodChoice, setMethod] = useState<"subscription" | "api" | null>(managedAccount?.initialMethod === "api_key" ? "api" : managedAccount ? "subscription" : null);
+  const [methodChoice, setMethod] = useState<"subscription" | "api" | null>(apiKeyOnly || managedAccount?.initialMethod === "api_key" ? "api" : managedAccount ? "subscription" : null);
   const [opened, setOpened] = useState(false);
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
   const [loginPhase, setLoginPhase] = useState<"preparing" | "ready" | "waiting" | "connecting">("preparing");
-  const phaseBeforeSubmit = useRef<"ready" | "waiting">("ready");
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,19 +117,25 @@ export function AgentProviderConnection({
   const selectedKey = savedKeys.options.find(
     (option) => option.id === (selectedKeyId ?? savedKeys.options[0]?.id),
   );
-  const storedLogin = managedAccount
-    ? { ...savedKeys.storedLogin, data: undefined, isPending: false, isError: false }
-    : savedKeys.storedLogin;
   const savedManagedAccount = useRef<{ connectionId: string; grantId: string } | null>(null);
-  const method = methodChoice ?? (
-    (savedKeys.subscriptions.length > 0 || (adapterType === "claude_local" && !savedSubscription && storedLogin.data))
-      ? "subscription" : savedKeys.options.length ? "api" : "subscription"
+  // The claude CLI signed in on this server can serve only a target that is this
+  // server: no environment, or a local-driver environment. Every other target
+  // (SSH, sandbox, runner) runs Claude only with an Anthropic API key.
+  const claudeLocalTarget = !environmentId || localEnvironment;
+  const method = apiKeyOnly ? "api" : methodChoice ?? (
+    adapterType === "claude_local" && !claudeLocalTarget
+      ? "api"
+      : savedKeys.subscriptions.length > 0
+        ? "subscription" : savedKeys.options.length ? "api" : "subscription"
   );
+  // A Claude subscription is the claude CLI signed in on the server itself.
+  // Paperclip never signs in to Claude, stores the sign-in, or injects it: the
+  // agent runs with no Claude credential env and the CLI uses its own login.
+  const claudeCli = !apiKeyOnly && adapterType === "claude_local" && method === "subscription";
   const localLogin = useLocalAiLogin(companyId, managedAccount?.intent ?? {
     provider: aiProvider, method: "subscription", name: `My ${provider} subscription`,
     ownership: "personal", agentIds: [], allAgents: true,
-  }, canUseLocalLogin && method === "subscription" && !savedSubscription && !storedLogin.data,
-  { allowHostClaude: health.data?.deploymentMode === "local_trusted" });
+  }, canUseLocalLogin && method === "subscription" && !savedSubscription && !claudeCli);
   const auth = useQuery({
     queryKey: queryKeys.agents.authSignal(
       companyId,
@@ -167,14 +180,8 @@ export function AgentProviderConnection({
               env: savedSubscription?.binding
                 ? { CODEX_HOME: savedSubscription.binding }
                 : {},
-              ...(adapterType === "claude_local" && !savedSubscription && storedLogin.data
-                ? {
-                    env: buildFixedClaudeOAuthBinding(),
-                    applyStoredClaudeLogin: true,
-                  }
-                : {}),
             };
-      if (method === "subscription" && canUseLocalLogin && !savedSubscription && !storedLogin.data) {
+      if (method === "subscription" && canUseLocalLogin && !savedSubscription && !claudeCli) {
         savedManagedAccount.current ??= await localLogin.connect();
         connection = { env: {}, aiConnection: { provider: aiProvider, method: "subscription", mode: "responsible_user" } };
       }
@@ -208,11 +215,11 @@ export function AgentProviderConnection({
   }
   const needsLogin =
     method === "subscription" &&
+    !claudeCli &&
     canLogin &&
     environmentId &&
     !savedSubscription &&
     !savedKeys.loading &&
-    !storedLogin.data &&
     (Boolean(managedAccount) || auth.data?.status !== "present" || subscriptionId === "");
   return (
     <div className="min-w-0 max-w-full">
@@ -236,7 +243,7 @@ export function AgentProviderConnection({
         collapsed={opened}
         onSelect={() => { if (!managedAccount?.disabled) setOpened(true); }}
       />
-      {!opened && !managedAccount?.fixedMethod && (
+      {!opened && !managedAccount?.fixedMethod && !apiKeyOnly && (
         <div className="-ml-3 mt-1">
           <CredentialModeLink
             mode={method}
@@ -322,17 +329,9 @@ export function AgentProviderConnection({
                 chrome="onboarding"
                 aiConnection={managedAccount?.intent ?? { provider: aiProvider, method: "subscription", name: `My ${provider} subscription`, ownership: "personal", agentIds: [], allAgents: true }}
                 autoStart
-                onStored={() => {}}
                 onPromptReady={(url) => {
                   setAuthorizationUrl(url);
                   setLoginPhase((phase) => url ? (phase === "preparing" ? "ready" : phase) : "preparing");
-                }}
-                onCodeSubmitted={() => {
-                  phaseBeforeSubmit.current = loginPhase === "waiting" ? "waiting" : "ready";
-                  setLoginPhase("connecting");
-                }}
-                onSubmitFailed={() => {
-                  setLoginPhase((phase) => phase === "connecting" ? phaseBeforeSubmit.current : phase);
                 }}
                 onConnected={(sessionId) => {
                   if (managedAccount) {
@@ -353,25 +352,26 @@ export function AgentProviderConnection({
                   onConnected(connection);
                 }}
               />
-            ) : savedSubscription ? null : canUseLocalLogin && !storedLogin.data ? (
+            ) : savedSubscription ? null : claudeCli ? (
+              claudeLocalTarget ? (
+                <ClaudeCliSignInStatus companyId={companyId} environmentId={environmentId} />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Claude on this environment needs an Anthropic API key. A Claude subscription works only through the claude CLI signed in on this server.
+                </p>
+              )
+            ) : canUseLocalLogin ? (
               <LocalProviderLoginInstructions adapterType={adapterType} login={{ ...localLogin, retry: () => { setError(null); localLogin.retry(); } }} />
             ) : (
               <p className="text-sm text-muted-foreground">
-                {storedLogin.data
-                  ? "Use your saved Claude subscription for this agent."
-                  : canLogin
-                    ? "Use the existing provider connection for this environment."
-                    : "This environment does not support browser sign-in. Choose a sign-in environment or connect with an API key."}
+                {canLogin
+                  ? "Use the existing provider connection for this environment."
+                  : "This environment does not support browser sign-in. Choose a sign-in environment or connect with an API key."}
               </p>
             )}
           </div>
         )}
       </motion.div>
-      {method === "subscription" && storedLogin.isError && (
-        <p role="alert" className="mt-4 text-sm text-destructive">
-          Could not check your saved Claude subscription. Try again.
-        </p>
-      )}
       {error && (
         <p role="alert" className="mt-4 text-sm text-destructive">
           {testError ?? error}
@@ -392,8 +392,7 @@ export function AgentProviderConnection({
               : `Sign in to ${provider}`
             : busy
             ? "Connecting"
-            : method === "subscription" &&
-                (storedLogin.data || savedSubscription)
+            : method === "subscription" && savedSubscription
               ? "Use saved subscription"
               : method === "api" && selectedKey
                 ? "Use saved API key"
@@ -402,10 +401,11 @@ export function AgentProviderConnection({
         primaryDisabled={
           managedAccount?.disabled ||
           (Boolean(managedAccount) && method === "subscription" && !canLogin && !canUseLocalLogin) ||
+          (Boolean(managedAccount) && claudeCli) ||
+          (claudeCli && !claudeLocalTarget) ||
           (localEnvironment && health.isPending) || localLogin.preparing || Boolean(localLogin.error) ||
           (!managedAccount && auth.isPending) ||
           savedKeys.loading ||
-          (adapterType === "claude_local" && storedLogin.isPending) ||
           !opened ||
           (Boolean(needsLogin) && (!authorizationUrl || loginPhase !== "ready")) ||
           (method === "api" &&

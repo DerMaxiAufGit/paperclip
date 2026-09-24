@@ -23,10 +23,10 @@ function stubLogger() {
 }
 
 describe("finalizeServerShutdown", () => {
-  it("awaits the setup-token cleanup before the database stop and the process exit", async () => {
+  it("awaits the application service cleanup before the database stop and the process exit", async () => {
     const order: string[] = [];
-    // The held promise models the setup-token session cancellation and its
-    // sandbox lease release. The teardown must not continue while it is pending.
+    // The held promise models a slow application service teardown. The
+    // teardown must not continue while it is pending.
     const release = deferred();
     const shutdownAppServices = vi.fn(async () => {
       order.push("appServices:start");
@@ -92,13 +92,13 @@ describe("finalizeServerShutdown", () => {
     ]);
   });
 
-  it("keeps the teardown durable and still exits when the setup-token release fails", async () => {
+  it("logs a failed application service cleanup and still exits", async () => {
     const order: string[] = [];
-    // The held promise rejects, which models a lease release that failed. The
-    // reaper owns the durable retry, so the teardown must log the failure and
-    // continue rather than swallow it or block the exit.
+    // The held promise rejects, which models a service cleanup that failed. The
+    // teardown must log the failure and continue rather than swallow it or
+    // block the exit.
     const release = deferred();
-    const releaseError = new Error("lease release failed");
+    const releaseError = new Error("service cleanup failed");
     const shutdownAppServices = vi.fn(async () => {
       await release.promise;
     });

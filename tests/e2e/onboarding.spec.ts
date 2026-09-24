@@ -1,5 +1,4 @@
 import { test, expect } from "@playwright/test";
-import { mockOnboardingLocalAiConnection } from "./helpers/onboarding-ai-connection";
 
 /**
  * E2E: Onboarding wizard flow (NUX Phase 2 expanded wizard).
@@ -192,52 +191,46 @@ test.describe("Onboarding wizard", () => {
       }),
     );
 
-    // The sign-in Connect now starts. Stubbed so the card is deterministic:
-    // the session start answers, and the guarded prompt read hands back an
-    // authorization URL for the card's link row.
-    await page.route("**/setup-token-login-sessions", (route) =>
+    // The Codex device login choosing the source starts. Stubbed so the card
+    // is deterministic: no session is running yet, the start answers, and the
+    // status read hands back the code and the address for the card's link.
+    await page.route("**/adapters/codex_local/login-sessions/active", (route) =>
       route.fulfill({
+        status: 404,
         contentType: "application/json",
-        body: JSON.stringify({
-          sessionId: "e2e-setup-token-session",
-          status: "pending",
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
-        }),
+        body: JSON.stringify({ error: "Login session not found." }),
       }),
     );
-    await page.route("**/setup-token-login-sessions/*/prompt", (route) =>
+    await page.route("**/adapters/codex_local/login-sessions", (route) =>
       route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({
-          authorizationUrl: "https://claude.ai/oauth/authorize?code=true&client=e2e",
-          transportAdvisory: null,
-        }),
+        body: JSON.stringify({ sessionId: "e2e-device-session", status: "pending" }),
       }),
     );
-    await page.route("**/setup-token-login-sessions/e2e-setup-token-session", (route) =>
+    await page.route("**/adapters/codex_local/login-sessions/e2e-device-session", (route) =>
       route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
-          sessionId: "e2e-setup-token-session",
+          sessionId: "e2e-device-session",
           status: "pending",
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          prompt: { url: "https://auth.openai.com/codex/device", code: "E2E1-CODE" },
         }),
       }),
     );
 
-    // Fail the adapter test the "Connect" button runs, so the hire gate
-    // blocks the create and this test can prove no agent is hired.
+    // Fail the adapter test a hire would run, so the hire gate blocks the
+    // create and this test can prove no agent is hired.
     await page.route("**/test-environment", (route) =>
       route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
-          adapterType: "claude_local",
+          adapterType: "codex_local",
           status: "fail",
           checks: [
             {
-              code: "claude_cli_not_found",
+              code: "codex_cli_not_found",
               level: "fail",
-              message: "The claude CLI was not found on this host.",
+              message: "The codex CLI was not found on this host.",
             },
           ],
           testedAt: new Date().toISOString(),
@@ -274,14 +267,14 @@ test.describe("Onboarding wizard", () => {
     await page.locator("#onboarding-agent-name").fill("Ada");
     await page.getByRole("button", { name: "Next" }).click();
 
-    // Step 4 (Connect a model). By role rather than by label, because which
-    // adapters the row offers depends on the registry this environment reports.
-    const source = page.getByRole("radio").first();
+    // Step 4 (Connect a model). OpenAI, whose subscription signs in with a
+    // device code; a Claude subscription has no sign-in here at all.
+    const source = page.getByRole("radio", { name: /OpenAI/ });
     await source.waitFor({ timeout: 30_000 });
 
     // Nothing before the row is answered: the card is the answer to the tile,
     // and the button has nothing to do until there is a source to do it with.
-    const cardInstruction = page.getByText("then come back and enter authorization code");
+    const cardInstruction = page.getByText("by providing the authorization code below");
     await expect(cardInstruction).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Next", exact: true })).toBeDisabled();
 
@@ -296,12 +289,11 @@ test.describe("Onboarding wizard", () => {
     // finishing in another browser, and the step's button for the flow.
     const cardLink = page.getByRole("link", { name: /^Sign in to / });
     await expect(cardLink).toBeVisible({ timeout: 15_000 });
-    await expect(cardLink).toHaveAttribute("href", /claude\.ai\/oauth\/authorize/);
+    await expect(cardLink).toHaveAttribute("href", /auth\.openai\.com/);
+    await expect(page.getByText("E2E1-CODE")).toBeVisible({ timeout: 15_000 });
     await expect(
       page.getByRole("button", { name: /^Sign in to / }),
     ).toBeEnabled({ timeout: 15_000 });
-    // No "Use saved login" here: the hire step applies a stored login itself.
-    await expect(page.getByRole("button", { name: "Use saved login" })).toHaveCount(0);
     expect(hireCalled).toBe(false);
 
     expect(pageErrors, pageErrors.join("\n")).toHaveLength(0);
@@ -382,8 +374,8 @@ test.describe("Onboarding wizard", () => {
       }),
     );
 
-    const SESSION_ID = "e2e-reload-setup-token-session";
-    const AUTHORIZATION_URL = "https://claude.ai/oauth/authorize?code=true&client=e2e-reload";
+    const SESSION_ID = "e2e-reload-device-session";
+    const PROMPT = { url: "https://auth.openai.com/codex/device", code: "E2E2-CODE" };
     let startCalls = 0;
     // Flips once the login actually starts, so the owner-scoped resume read
     // below answers "no active session" until then — matching the real
@@ -391,7 +383,7 @@ test.describe("Onboarding wizard", () => {
     // ordinary sign-in test above.
     let sessionStarted = false;
     let aiConnection: Record<string, unknown> | undefined;
-    await page.route("**/setup-token-login-sessions", (route) => {
+    await page.route("**/adapters/codex_local/login-sessions", (route) => {
       if (route.request().method() === "POST") {
         startCalls += 1;
         sessionStarted = true;
@@ -399,46 +391,25 @@ test.describe("Onboarding wizard", () => {
       }
       return route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({
-          sessionId: SESSION_ID,
-          environmentId: FAKE_SANDBOX_ENVIRONMENT_ID,
-          aiConnection,
-          status: "pending",
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
-        }),
+        body: JSON.stringify({ sessionId: SESSION_ID, status: "pending" }),
       });
     });
-    await page.route(`**/setup-token-login-sessions/${SESSION_ID}/prompt`, (route) =>
-      route.fulfill({
-        contentType: "application/json",
-        body: JSON.stringify({
-          authorizationUrl: AUTHORIZATION_URL,
-          transportAdvisory: null,
-        }),
-      }),
-    );
-    await page.route(`**/setup-token-login-sessions/${SESSION_ID}`, (route) => {
+    await page.route(`**/adapters/codex_local/login-sessions/${SESSION_ID}`, (route) => {
       if (route.request().method() !== "GET") return route.continue();
       return route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({
-          sessionId: SESSION_ID,
-          environmentId: FAKE_SANDBOX_ENVIRONMENT_ID,
-          aiConnection,
-          status: "pending",
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
-        }),
+        body: JSON.stringify({ sessionId: SESSION_ID, status: "pending", prompt: PROMPT }),
       });
     });
     // The owner-scoped resume read. Both the wizard's own step-restore effect
     // and the panel's own resume-on-mount read use this, with no session id
     // in the URL — the caller rediscovers its own session.
-    await page.route("**/setup-token-login-sessions/active", (route) => {
+    await page.route("**/adapters/codex_local/login-sessions/active", (route) => {
       if (!sessionStarted) {
         return route.fulfill({
           status: 404,
           contentType: "application/json",
-          body: JSON.stringify({ error: "Setup-token login session not found." }),
+          body: JSON.stringify({ error: "Login session not found." }),
         });
       }
       return route.fulfill({
@@ -448,9 +419,10 @@ test.describe("Onboarding wizard", () => {
           environmentId: FAKE_SANDBOX_ENVIRONMENT_ID,
           aiConnection,
           status: "pending",
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
-          panelMode: "submitted_browser_code",
-          prompt: { authorizationUrl: AUTHORIZATION_URL, transportAdvisory: null },
+          expiresAt: null,
+          failure: null,
+          panelMode: "displayed_code",
+          prompt: PROMPT,
         }),
       });
     });
@@ -478,19 +450,19 @@ test.describe("Onboarding wizard", () => {
     await page.locator("#onboarding-agent-name").fill("Ada");
     await page.getByRole("button", { name: "Next" }).click();
 
-    const source = page.getByRole("radio").first();
+    const source = page.getByRole("radio", { name: /OpenAI/ });
     await source.waitFor({ timeout: 30_000 });
 
     // Answering the row is what starts the sign-in now — there is no separate
     // Connect press between choosing a source and being signed in.
     await source.click();
 
-    const cardInstruction = page.getByText("then come back and enter authorization code");
+    const cardInstruction = page.getByText("by providing the authorization code below");
     const authorizationLink = page.getByRole("link", { name: /^Sign in to / });
 
     await expect(cardInstruction).toBeVisible({ timeout: 30_000 });
     await expect(authorizationLink).toBeVisible({ timeout: 15_000 });
-    await expect(authorizationLink).toHaveAttribute("href", /claude\.ai\/oauth\/authorize/);
+    await expect(authorizationLink).toHaveAttribute("href", /auth\.openai\.com/);
     expect(startCalls).toBe(1);
 
     const companiesRes = await page.request.get("/api/companies");
@@ -521,12 +493,12 @@ test.describe("Onboarding wizard", () => {
     expect(pageErrors, pageErrors.join("\n")).toHaveLength(0);
   });
 
-  test("connect step blocks the hire when the environment probe fails after account connection", async ({
+  test("a Claude subscription shows the server's claude CLI status and still gates the hire on the environment probe", async ({
     page,
   }) => {
-    // A successful local account connection still requires a passing
-    // environment probe before the wizard may hire the agent.
-    await mockOnboardingLocalAiConnection(page);
+    // A Claude subscription is the claude CLI signed in on this server:
+    // nothing is connected here, and no Claude credential is sent. Continue
+    // still requires a passing environment probe before the wizard may hire.
     const pageErrors: string[] = [];
     page.on("pageerror", (err) => pageErrors.push(err.message));
 
@@ -582,13 +554,19 @@ test.describe("Onboarding wizard", () => {
     await page.locator("#onboarding-agent-name").fill("Ada");
     await page.getByRole("button", { name: "Next" }).click();
 
-    const source = page.getByRole("radio").first();
+    const source = page.getByRole("radio", { name: /Claude/ });
     await source.waitFor({ timeout: 30_000 });
     await source.click();
 
-    const connect = page.getByRole("button", { name: "Connect", exact: true });
-    await expect(connect).toBeEnabled({ timeout: 30_000 });
-    await connect.click();
+    // The status of the server's own claude CLI, not a sign-in.
+    await expect(page.getByText("Uses the claude CLI signed in on this server")).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.getByRole("link", { name: /^Sign in to / })).toHaveCount(0);
+
+    const continueButton = page.getByRole("button", { name: "Continue", exact: true });
+    await expect(continueButton).toBeEnabled({ timeout: 30_000 });
+    await continueButton.click();
 
     // The failed probe blocks the hire and shows its own checks.
     await expect(page.getByText("The claude CLI was not found on this host.")).toBeVisible({

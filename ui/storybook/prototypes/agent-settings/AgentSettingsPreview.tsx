@@ -405,11 +405,7 @@ function SettingsPage() {
                         onTest={() => test.current?.()}
                       />
                       {feedback.login && (
-                        <AdapterLoginPanel
-                          {...feedback.login}
-                          onStored={() => test.current?.()}
-                          onApplyStored={() => test.current?.()}
-                        />
+                        <AdapterLoginPanel {...feedback.login} />
                       )}
                     </>
                   )}

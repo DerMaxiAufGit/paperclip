@@ -15,12 +15,13 @@ const ALL_FALSE: AdapterCapabilities = {
  * Synchronous fallback for known built-in adapter types so capability checks
  * return correct values on first render before the /api/adapters call resolves.
  *
- * The `login` value for `claude_local`, `codex_local`, and `grok_local` mirrors
- * the server's login capability declaration in `server/src/adapters/registry.ts`.
- * Reconcile the two together if any adapter's login flow changes.
+ * The `login` value for `codex_local` and `grok_local` mirrors the server's
+ * login capability declaration in `server/src/adapters/registry.ts`. Reconcile
+ * the two together if any adapter's login flow changes. `claude_local` has no
+ * in-app login: it uses the claude CLI signed in on the server itself.
  */
 const KNOWN_DEFAULTS: Record<string, AdapterCapabilities> = {
-  claude_local: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true, login: { panelMode: "submitted_browser_code", timeoutPolicy: "fixed" } },
+  claude_local: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true },
   codex_local: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true, login: { panelMode: "displayed_code", timeoutPolicy: "caller_bounded" } },
   paperclip_runner: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: false, requiresMaterializedRuntimeSkills: false, supportsAcp: false },
   cursor: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: true, supportsAcp: false },

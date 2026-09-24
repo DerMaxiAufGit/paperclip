@@ -1,5 +1,5 @@
 /** Redacted presentation contracts shared with the production API. */
-import type { AiProvider, AiAuthMethod, AiManagedConnectionSummary, AiConnectionBinding } from "@paperclipai/shared";
+import { AI_CONNECTION_CAPABILITIES, aiConnectionMetadataSchema, type AiProvider, type AiAuthMethod, type AiManagedConnectionSummary, type AiConnectionBinding } from "@paperclipai/shared";
 export type { AiProvider, AiAuthMethod, AiConnectionBinding } from "@paperclipai/shared";
 export type AiConnectionStatus = AiManagedConnectionSummary["status"];
 
@@ -7,9 +7,9 @@ export const AI_PROVIDERS: Record<
   AiProvider,
   { name: string; subscriptionName?: string; logo?: string }
 > = {
+  // No subscription connection: see CLAUDE_SUBSCRIPTION_CLI_NOTE.
   anthropic: {
     name: "Claude",
-    subscriptionName: "Claude subscription",
     logo: "/brands/claude-color.svg",
   },
   openai: {
@@ -39,6 +39,36 @@ export const AI_CONNECTION_STATUS: Record<AiConnectionStatus, string> = {
   expired: "Expired",
   revoked: "Revoked",
 };
+
+/**
+ * A Claude subscription is never connected here. It is used only through the
+ * claude CLI signed in on the Paperclip server; Paperclip does not import it.
+ */
+export const CLAUDE_SUBSCRIPTION_CLI_NOTE =
+  "Claude subscriptions are used through the claude CLI signed in on this server.";
+
+export function aiMethodSupported(provider: AiProvider, method: AiAuthMethod) {
+  return Boolean(AI_CONNECTION_CAPABILITIES[provider].methods[method]);
+}
+
+/** The method a new connection for this provider starts with. */
+export function defaultAiMethod(provider: AiProvider): AiAuthMethod {
+  return aiMethodSupported(provider, "subscription") ? "subscription" : "api_key";
+}
+
+/** Why this provider cannot connect with this method, or null when it can. */
+export function aiMethodUnsupportedMessage(provider: AiProvider, method: AiAuthMethod) {
+  if (aiMethodSupported(provider, method)) return null;
+  return provider === "anthropic"
+    ? CLAUDE_SUBSCRIPTION_CLI_NOTE
+    : "This provider does not offer a subscription connection.";
+}
+
+/** The same answer for a saved connection's `config.ai` metadata. */
+export function aiConnectionConfigUnsupportedMessage(config: Record<string, unknown> | undefined) {
+  const metadata = aiConnectionMetadataSchema.safeParse(config?.ai);
+  return metadata.success ? aiMethodUnsupportedMessage(metadata.data.provider, metadata.data.method) : null;
+}
 
 export function aiMethodLabel(provider: AiProvider, method: AiAuthMethod) {
   return method === "subscription"
@@ -75,6 +105,9 @@ export function personalAiDefault(
 export function aiConnectionProblem(connection?: AiConnectionSummary) {
   if (!connection)
     return "No connection selected. Connect an account to continue.";
+  // Connections saved before a method was withdrawn stay listed but unusable.
+  const unsupported = aiMethodUnsupportedMessage(connection.provider, connection.method);
+  if (unsupported) return `${unsupported} Connect an API key instead.`;
   return (
     connection.unavailableReason ??
     (connection.status === "connected"

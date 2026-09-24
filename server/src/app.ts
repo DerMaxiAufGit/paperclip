@@ -51,16 +51,6 @@ import { summarySlotRoutes } from "./routes/summary-slots.js";
 import { statusCardRoutes } from "./routes/status-cards.js";
 import { teamsCatalogRoutes } from "./routes/teams-catalog.js";
 import { agentRoutes } from "./routes/agents.js";
-import type { SetupTokenSessionService } from "./services/setup-token-session.js";
-import {
-  buildSetupTokenLoginTransport,
-  createProductionSetupTokenSandboxProvider,
-  createProductionSetupTokenCleanupStore,
-  createSetupTokenSecretWriter,
-  createWorkerBoundLoginPtyOpener,
-} from "./services/setup-token-transport-binding.js";
-import { environmentService } from "./services/environments.js";
-import { environmentRuntimeService } from "./services/environment-runtime.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
@@ -653,87 +643,10 @@ export async function createApp(
   api.use(summarySlotRoutes(db));
   api.use(statusCardRoutes(db));
   api.use(teamsCatalogRoutes(db));
-  // The setup-token login session service. The router builds it and hands it
-  // back through the callback below, so the shutdown hook can cancel every live
-  // session (SR-4).
-  let setupTokenLoginService: SetupTokenSessionService | null = null;
-  // The dedicated proxy IP or CIDR allowlist for the confidential setup-token
-  // login responses (SR-7). The global `TRUST_PROXY` setting does not satisfy
-  // the guard; an operator sets this allowlist to the real TLS-terminating
-  // proxy addresses. An empty value keeps the confidential responses on direct
-  // TLS (or a `local_trusted` loopback peer) only.
-  const setupTokenLoginProxyAllowlist = (
-    process.env.CLAUDE_LOGIN_TRUSTED_PROXIES ?? ""
-  )
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-  // The explicit operator declaration that a platform edge terminates TLS for
-  // every client request (SR-7). This complements the allowlist for managed
-  // platforms (Railway, Render, Fly, and the like) where the app socket is
-  // always plain HTTP and the edge-proxy peer addresses are not stable or
-  // documented, so `CLAUDE_LOGIN_TRUSTED_PROXIES` cannot express them. It is a
-  // dedicated, single-purpose setting; the guard still never reads the global
-  // `TRUST_PROXY` value.
-  const setupTokenLoginEdgeTlsTerminated = /^(1|true|yes|on)$/i.test(
-    (process.env.CLAUDE_LOGIN_EDGE_TLS_TERMINATED ?? "").trim(),
-  );
-  // Bind the production setup-token login transport. It carries the live lease
-  // manager, the login-process factory over the sandbox pseudo-terminal, and the
-  // durable cleanup store. The factory passes only the fixed command
-  // `CLAUDE_SETUP_TOKEN_COMMAND`; it never reads a command from a
-  // route, a request body, or an adapter configuration. The durable store and the
-  // startup reaper are live now, so a restart reaps a leftover lease.
-  //
-  // The live sandbox pseudo-terminal opener binds inside the sandbox provider
-  // worker, so the server process does not hold the raw sandbox process. The
-  // opener drives the worker through the plugin worker manager route gate.
-  // The manager mints a host-owned route identifier, permits one
-  // active credential pseudo-terminal per worker, binds the worker session
-  // identifier one time for output only, and terminalizes the route on every open
-  // failure path. With the opener supplied, the provider acquires a lease and the
-  // start route drives a live login instead of the fixed 503.
-  const setupTokenLoginTransport = buildSetupTokenLoginTransport({
-    sandbox: createProductionSetupTokenSandboxProvider({
-      environments: environmentService(db),
-      environmentRuntime: environmentRuntimeService(db, {
-        pluginWorkerManager: workerManager,
-      }),
-      openLivePtySession: createWorkerBoundLoginPtyOpener({
-        workerManager,
-        environments: environmentService(db),
-        log: (line) => logger.info(line),
-      }),
-      log: (line) => logger.info(line),
-    }),
-    store: createProductionSetupTokenCleanupStore(db),
-    // Bind the atomic credential-claim writer, so a completed login transitions
-    // the durable row to `stored` and stores the minted token in one control-plane
-    // transaction. The writer reads the company and the owner only from the
-    // immutable session scope. The confirm-replacement flow owns rotation. Without
-    // this writer the router falls back to the deferred, fail-closed 503 and never
-    // stores the token.
-    completeCredential: createSetupTokenSecretWriter({ db }),
-    // Forward the login runner diagnostic lines to the server logger. The
-    // runner is the sole producer, and every line is a fixed, non-secret
-    // literal. Without this sink the diagnostics fall back to a no-op in
-    // production, so a failed login leaves no log trail.
-    log: (line) => logger.info(line),
-  });
   api.use(
     agentRoutes(db, {
       chatRunRetries: chatChannels,
       pluginWorkerManager: workerManager,
-      deploymentMode: opts.deploymentMode,
-      confidentialProxyAllowlist: setupTokenLoginProxyAllowlist,
-      confidentialEdgeTlsTerminated: setupTokenLoginEdgeTlsTerminated,
-      setupTokenLogin: setupTokenLoginTransport,
-      onSetupTokenLoginService: (service) => {
-        // Capture the service, so the graceful-shutdown hook cancels every live
-        // session and releases each lease. The standalone scheduled reaper owns
-        // the startup and interval lease cleanup now (SR-4).
-        setupTokenLoginService = service;
-      },
     }),
   );
   api.use(assetRoutes(db, opts.storageService));
@@ -1323,11 +1236,6 @@ export async function createApp(
       // End the avatar worker pool, if a request ever started one, so no
       // render outlives the HTTP teardown.
       await agentAvatars.close();
-      // Cancel every live setup-token login session and AWAIT the cancellation,
-      // so each direct child stops and the server releases each lease before the
-      // caller stops the database and the provider. A lease release that
-      // fails stays a durable record for the startup reaper.
-      await setupTokenLoginService?.shutdown();
     })();
     return appServicesShutdown;
   };

@@ -53,7 +53,6 @@ describe("agent lifecycle commands", () => {
     await run(["agent", "approve", AGENT_ID]);
     await run(["agent", "terminate", AGENT_ID]);
     await run(["agent", "heartbeat:invoke", AGENT_ID]);
-    await run(["agent", "claude-login", AGENT_ID]);
     await run(["agent", "delete", AGENT_ID, "--yes"]);
 
     expect(fetchMock.mock.calls.map((call) => [call[1]?.method ?? "GET", call[0]])).toEqual([
@@ -65,7 +64,6 @@ describe("agent lifecycle commands", () => {
       ["POST", `http://localhost:3100/api/agents/${AGENT_ID}/approve`],
       ["POST", `http://localhost:3100/api/agents/${AGENT_ID}/terminate`],
       ["POST", `http://localhost:3100/api/agents/${AGENT_ID}/heartbeat/invoke`],
-      ["POST", `http://localhost:3100/api/agents/${AGENT_ID}/claude-login`],
       ["DELETE", `http://localhost:3100/api/agents/${AGENT_ID}`],
     ]);
   });

@@ -20,11 +20,13 @@ import type {
 import { queueLiveRunnerPrpCommand } from "../realtime/runner-prp-ws.js";
 import { dispatchLiveRunnerGoalControl } from "./runner-goal-control-broker.js";
 import { publishLiveEvent } from "./live-events.js";
+import { resolvePersistedClaudeLocalEngine } from "./claude-local-engine.js";
 
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
 const OPEN_ACTION_STATUSES = ["pending", "delivering", "delivered"] as const;
 
-type AgentBinding = Pick<typeof agents.$inferSelect, "id" | "companyId" | "adapterType" | "adapterConfig">;
+type AgentBinding = Pick<typeof agents.$inferSelect, "id" | "companyId" | "adapterType" | "adapterConfig"> &
+  Partial<Pick<typeof agents.$inferSelect, "runtimeConfig">>;
 type TaskSession = typeof agentTaskSessions.$inferSelect;
 
 export class RunnerGoalConflictError extends Error {
@@ -105,8 +107,12 @@ function capabilityForAgent(agent: AgentBinding): RunnerGoalCapability {
       reason,
     };
   }
-  const directAcp = (agent.adapterType === "codex_local" || agent.adapterType === "claude_local")
-    && engine !== "cli" && sessionMode !== "oneshot";
+  // claude_local picks ACP by default only with an API credential; codex_local defaults to ACP.
+  const directAcp = (
+    (agent.adapterType === "codex_local" && engine !== "cli")
+    || (agent.adapterType === "claude_local"
+      && resolvePersistedClaudeLocalEngine({ adapterConfig: agent.adapterConfig, runtimeConfig: agent.runtimeConfig }) === "acp")
+  ) && sessionMode !== "oneshot";
   const reason = agent.adapterType === "opencode_local"
     ? "Unsupported by OpenCode."
     : directAcp
@@ -266,6 +272,7 @@ export function runnerGoalService(
         companyId: agents.companyId,
         adapterType: agents.adapterType,
         adapterConfig: agents.adapterConfig,
+        runtimeConfig: agents.runtimeConfig,
       })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)))

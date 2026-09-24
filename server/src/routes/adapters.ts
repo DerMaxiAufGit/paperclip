@@ -171,8 +171,8 @@ function readAdapterPackageVersionFromDisk(record: AdapterPluginRecord): string 
 
 /**
  * Build the client capability view for one adapter. The login projection carries
- * only the safe scalar fields; it drops the function members and the completion
- * claim, so the response holds no secret and no code.
+ * only the safe scalar fields; it drops the function members, so the response
+ * holds no code.
  */
 export function buildAdapterCapabilities(adapter: ServerAdapterModule): AdapterCapabilities {
   const login = adapter.loginCapability;

@@ -80,6 +80,10 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
 import { execute } from "./execute.js";
 import { resetClaudeCliCapabilitiesCacheForTests } from "./cli-capabilities.js";
 
+// Remote targets need an Anthropic API key; the Claude subscription is limited
+// to the claude CLI signed in on the Paperclip host.
+const REMOTE_API_KEY_ENV = { ANTHROPIC_API_KEY: "sk-ant-remote-fixture" };
+
 describe("claude remote execution", () => {
   const cleanupDirs: string[] = [];
 
@@ -127,6 +131,8 @@ describe("claude remote execution", () => {
         command: "claude",
         instructionsFilePath: instructionsPath,
         env: {
+          ...REMOTE_API_KEY_ENV,
+          CLAUDE_CODE_OAUTH_TOKEN: "oauth-token-must-stay-on-host",
           QA_PROJECT_WORKSPACE_CWD: workspaceDir,
           RANDOM_WORKSPACE_CWD: workspaceDir,
           OTHER_ENV: workspaceDir,
@@ -221,6 +227,9 @@ describe("claude remote execution", () => {
     expect(call?.[3].env.QA_PROJECT_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     expect(call?.[3].env.RANDOM_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     expect(call?.[3].env.OTHER_ENV).toBe(workspaceDir);
+    // Remote targets authenticate with the API key; the subscription token never leaves the host.
+    expect(call?.[3].env.ANTHROPIC_API_KEY).toBe(REMOTE_API_KEY_ENV.ANTHROPIC_API_KEY);
+    expect(call?.[3].env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
     expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledTimes(1);
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
@@ -228,6 +237,59 @@ describe("claude remote execution", () => {
       localDir: workspaceDir,
       remoteDir: managedRemoteWorkspace,
     }));
+  });
+
+  describe("CLI-lane billing label on a remote target", () => {
+    async function runRemote(env: Record<string, string>) {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-remote-billing-"));
+      cleanupDirs.push(rootDir);
+      const workspaceDir = path.join(rootDir, "workspace");
+      await mkdir(workspaceDir, { recursive: true });
+      return execute({
+        runId: "run-ssh-billing",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: { engine: "cli", command: "claude", env },
+        context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+        executionTransport: {
+          remoteExecution: {
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteWorkspacePath: "/remote/workspace",
+            remoteCwd: "/remote/workspace",
+            privateKey: "PRIVATE KEY",
+            knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+            strictHostKeyChecking: true,
+          },
+        },
+        onLog: async () => {},
+      });
+    }
+
+    it.each([
+      ["a gateway ANTHROPIC_AUTH_TOKEN", { ANTHROPIC_AUTH_TOKEN: "gw-token", ANTHROPIC_BASE_URL: "https://openrouter.ai/api" }, "openrouter"],
+      ["Vertex", { CLAUDE_CODE_USE_VERTEX: "1" }, "google"],
+      ["Foundry", { CLAUDE_CODE_USE_FOUNDRY: "1" }, "azure"],
+    ])("labels a remote run with %s metered_api, never subscription", async (_label, env, biller) => {
+      const result = await runRemote(env);
+      expect(result.billingType).toBe("metered_api");
+      expect(result.biller).toBe(biller);
+    });
+
+    it("ignores host Bedrock and Vertex settings, which never reach the remote target", async () => {
+      vi.stubEnv("CLAUDE_CODE_USE_BEDROCK", "1");
+      vi.stubEnv("CLAUDE_CODE_USE_VERTEX", "1");
+      const result = await runRemote(REMOTE_API_KEY_ENV);
+      expect(result.billingType).toBe("api");
+      expect(result.biller).toBe("anthropic");
+    });
   });
 
   it("does not resume saved Claude sessions for remote SSH execution without a matching remote identity", async () => {
@@ -257,6 +319,7 @@ describe("claude remote execution", () => {
       config: {
         engine: "cli",
         command: "claude",
+        env: REMOTE_API_KEY_ENV,
       },
       context: {
         paperclipWorkspace: {
@@ -319,6 +382,7 @@ describe("claude remote execution", () => {
       config: {
         engine: "cli",
         command: "claude",
+        env: REMOTE_API_KEY_ENV,
       },
       context: {
         paperclipWorkspace: {
@@ -387,6 +451,7 @@ describe("claude remote execution", () => {
       config: {
         engine: "cli",
         command: "claude",
+        env: REMOTE_API_KEY_ENV,
       },
       context: {
         paperclipWorkspace: {
@@ -412,6 +477,60 @@ describe("claude remote execution", () => {
     expect(result.errorCode).toBe("duplex_channel_lost");
   });
 
+  it.each([
+    ["cli", { engine: "cli" }],
+    ["unset", {}],
+  ])("fails a remote SSH run before launch without an API key (engine %s)", async (_label, engineConfig) => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-remote-nokey-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    const onSpawn = vi.fn();
+
+    const result = await execute({
+      runId: "run-remote-no-key",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        ...engineConfig,
+        command: "claude",
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth-token-must-stay-on-host" },
+      },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+      onSpawn,
+    } as never);
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      errorCode: "adapter_engine_unavailable",
+      errorMessage:
+        "Claude on remote targets needs an Anthropic API key; subscription use is limited to the claude CLI signed in on this server.",
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+    });
+    expect(runChildProcess).not.toHaveBeenCalled();
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(onSpawn).not.toHaveBeenCalled();
+  });
+
   describe("CLI-lane model pass-through", () => {
     async function executeWithModel(prefix: string, config: Record<string, unknown>) {
       const rootDir = await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -435,8 +554,9 @@ describe("claude remote execution", () => {
           taskKey: null,
         },
         config: {
-        engine: "cli",
+          engine: "cli",
           command: "claude",
+          env: REMOTE_API_KEY_ENV,
           ...config,
         },
         context: {

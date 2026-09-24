@@ -144,7 +144,6 @@ describe("acpx identity split and launch environment", () => {
       HTTPS_PROXY: "https://proxy.example",
       ANTHROPIC_API_KEY: "anthropic-host-secret",
       ANTHROPIC_AUTH_TOKEN: "anthropic-auth-host-secret",
-      CLAUDE_CODE_OAUTH_TOKEN: "claude-oauth-host-secret",
       ANTHROPIC_BASE_URL: "https://anthropic.example",
       ANTHROPIC_MODEL: "claude-test",
       ANTHROPIC_SMALL_FAST_MODEL: "claude-fast-test",
@@ -153,6 +152,11 @@ describe("acpx identity split and launch environment", () => {
       ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock.example",
       AWS_BEARER_TOKEN_BEDROCK: "bedrock-host-secret",
     });
+    // The Claude subscription token is only honoured by the local `claude`
+    // CLI sign-in; it never crosses into an ACPX lane.
+    expect(projectAcpxInheritedHostEnvironment(inherited, "claude", true)).not.toHaveProperty(
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    );
     expect(projectAcpxInheritedHostEnvironment(inherited, "pi", true)).toEqual({
       PATH: "/usr/bin",
       LC_ALL: "C.UTF-8",
@@ -175,6 +179,30 @@ describe("acpx identity split and launch environment", () => {
       KIMI_MODEL_PROVIDER_TYPE: "openai_legacy",
       KIMI_CODE_HOME: "/host/kimi",
     });
+  });
+
+  it("drops a Claude subscription token from the explicit launch env for every provider", () => {
+    for (const acpxAgent of ["codex", "claude", "gemini"]) {
+      for (const inheritHostEnvironment of [true, false]) {
+        const launchEnvironment = finalizeLaunchEnvironment(
+          {
+            CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-explicit",
+            claude_code_oauth_token: "sk-ant-oat01-lowercase",
+            KEEP_ME: "kept",
+          },
+          [],
+          {
+            acpxAgent,
+            inheritHostEnvironment,
+            inheritedEnv: { PATH: "/usr/bin", CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-host" },
+            platform: "linux",
+          },
+        );
+        const env = launchEnvironment.env as Record<string, string>;
+        expect(env.KEEP_ME).toBe("kept");
+        expect(Object.keys(env).map((key) => key.toUpperCase())).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+      }
+    }
   });
 
   it("does not project any ambient host environment across a remote boundary", () => {

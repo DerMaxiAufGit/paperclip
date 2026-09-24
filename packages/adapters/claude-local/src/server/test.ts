@@ -36,7 +36,7 @@ import { buildClaudeProbePermissionArgs, claudeSandboxPermissionEnv } from "./pe
 import { prepareSandboxClaudeProbeRuntime } from "./claude-config.js";
 import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { resolveClaudeExecutionEngineForRun, testClaudeAcpEnvironment } from "./acp.js";
-import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
+import { withoutClaudeSubscriptionTokens } from "./credential-policy.js";
 import {
   buildAdapterTestTargetCheck,
   buildClaudeLoginRequiredHint,
@@ -120,7 +120,10 @@ export async function testEnvironment(
     });
   }
 
-  const envConfig = parseObject(config.env);
+  // Paperclip never forwards a Claude subscription token, on any target. A local
+  // probe runs the `claude` binary with its own sign-in; a remote target
+  // authenticates with an API key (enforced by the engine resolver above).
+  const envConfig = withoutClaudeSubscriptionTokens(parseObject(config.env));
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
@@ -148,7 +151,7 @@ export async function testEnvironment(
       helloProbeTimeoutSec: asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45),
     })),
   );
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = withoutClaudeSubscriptionTokens(ensurePathInEnv({ ...process.env, ...env }));
   let localRuntimeCommand: string | null = null;
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
@@ -210,29 +213,15 @@ export async function testEnvironment(
       code: "claude_anthropic_api_key_overrides_subscription",
       level: selectedApiKey ? "info" : "warn",
       message:
-        selectedApiKey ? "Using the selected Claude API connection." : "ANTHROPIC_API_KEY is set. Claude will use API-key auth instead of subscription credentials.",
+        selectedApiKey ? "Using the selected Claude API connection." : "ANTHROPIC_API_KEY is set. Claude will use API-key auth instead of the claude CLI sign-in.",
       detail: `Detected in ${source}.`,
-      hint: selectedApiKey ? undefined : "Unset ANTHROPIC_API_KEY if you want subscription-based Claude login behavior.",
-    });
-  } else if (
-    isNonEmpty(env.CLAUDE_CODE_OAUTH_TOKEN) ||
-    (considerHostEnv && isNonEmpty(process.env.CLAUDE_CODE_OAUTH_TOKEN))
-  ) {
-    const source = isNonEmpty(env.CLAUDE_CODE_OAUTH_TOKEN)
-      ? "configured environment variables"
-      : "server environment";
-    checks.push({
-      code: "claude_oauth_token_configured",
-      level: "info",
-      message:
-        "CLAUDE_CODE_OAUTH_TOKEN is set. Claude will authenticate with the configured subscription token; no stored login is needed on the execution target.",
-      detail: `Detected in ${source}.`,
+      hint: selectedApiKey ? undefined : "Unset ANTHROPIC_API_KEY to use the claude CLI sign-in on the Paperclip host.",
     });
   } else if (!targetIsRemote) {
     checks.push({
       code: "claude_subscription_mode_possible",
       level: "info",
-      message: "ANTHROPIC_API_KEY is not set; subscription-based auth can be used if Claude is logged in.",
+      message: "ANTHROPIC_API_KEY is not set; Claude uses the sign-in of the claude CLI on the Paperclip host.",
     });
   }
 
@@ -293,7 +282,7 @@ export async function testEnvironment(
         detail: detectedCliVersion
           ? `Detected Claude Code ${detectedCliVersion}.`
           : "Could not determine the installed Claude Code version.",
-        hint: "Upgrade Claude Code or restore the default ACP lane, then retry the Test.",
+        hint: "Upgrade Claude Code, then retry the Test.",
       });
     }
   }
@@ -419,23 +408,16 @@ export async function testEnvironment(
           "Claude CLI hello probe reported login required",
           "auth_required",
         );
+        // No in-environment login is offered for Claude: the local host signs in
+        // through the claude CLI itself, and a remote target needs an API key.
         checks.push({
           code: "claude_hello_probe_auth_required",
           level: "warn",
-          message: "Claude CLI is installed, but login is required.",
-          hint: buildClaudeLoginRequiredHint(loginMeta.loginUrl),
+          message: targetIsRemote
+            ? "Claude CLI is installed, but the environment rejected its credentials."
+            : "Claude CLI is installed, but it is not signed in on the Paperclip host.",
+          hint: buildClaudeLoginRequiredHint({ targetIsRemote }),
         });
-        if (targetIsSandbox) {
-          // Emit the neutral canonical check so the user interface can decide
-          // login eligibility from a stable code. The user interface does not
-          // read the message text or the top-level status.
-          checks.push({
-            code: ADAPTER_AUTH_MISSING_CHECK_CODE,
-            level: "warn",
-            message: "This environment has no ready authentication for this adapter.",
-            hint: "Provide credentials for this adapter, or start login in the environment.",
-          });
-        }
       } else if ((probe.exitCode ?? 1) === 0) {
         const summary = parsedStream.summary.trim();
         const hasHello = /\bhello\b/i.test(summary);

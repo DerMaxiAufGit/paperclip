@@ -14,7 +14,7 @@ import { errorHandler } from "../middleware/index.js";
 import { aiConnectionService } from "../services/ai-connections.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from "../adapters/index.js";
-import { prepareManagedAiRuntime } from "../services/ai-connection-runtime.js";
+import { prepareManagedAiRuntime, resolveRunAiConnectionBinding } from "../services/ai-connection-runtime.js";
 import { secretService } from "../services/secrets.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -70,7 +70,9 @@ function hired(response: request.Response) {
 describe("agent-created hires use managed AI connections", () => {
   for (const endpoint of ["agent-hires", "agents"]) {
     it.each([
-      ["anthropic", "api_key"], ["anthropic", "subscription"],
+      // Anthropic connections are API-key only; a Claude subscription runs
+      // through the claude CLI signed in on the server, never a connection.
+      ["anthropic", "api_key"],
       ["openai", "api_key"], ["openai", "subscription"],
     ] as const)(`${endpoint}: %s hires its own provider using the same %s binding`, async (provider, method) => {
       const f = await fixture(provider, method);
@@ -127,13 +129,19 @@ describe("agent-created hires use managed AI connections", () => {
     expect(agent.runtimeConfig.aiConnection).toBeUndefined();
   });
 
-  it.each(["anthropic", "openai"] as const)("%s can hire the other provider before that user connects it", async (provider) => {
-    const f = await fixture(provider);
-    const otherProvider = provider === "anthropic" ? "openai" : "anthropic";
-    const adapterType = otherProvider === "anthropic" ? "claude_local" : "codex_local";
+  it("anthropic can hire the other provider before that user connects it", async () => {
+    const f = await fixture("anthropic");
+    const adapterType = "codex_local";
     const agent = hired(await request(f.app).post(`/api/companies/${f.companyId}/agent-hires`).send({ name: "Other provider", role: "engineer", adapterType }));
-    expect(agent.runtimeConfig.aiConnection).toMatchObject({ provider: otherProvider, mode: "responsible_user" });
+    expect(agent.runtimeConfig.aiConnection).toMatchObject({ provider: "openai", mode: "responsible_user" });
     await expect(prepareManagedAiRuntime(db, { companyId: f.companyId, agentId: agent.id, responsibleUserId: f.userId, adapterType, binding: agent.runtimeConfig.aiConnection, config: agent.adapterConfig })).rejects.toMatchObject({ details: { code: "ai_connection_default_missing" } });
+    expect(agent.status).toBe("idle");
+  });
+
+  it("openai leaves a claude_local hire unmanaged, so it uses the claude CLI signed in on the server", async () => {
+    const f = await fixture("openai");
+    const agent = hired(await request(f.app).post(`/api/companies/${f.companyId}/agent-hires`).send({ name: "Other provider", role: "engineer", adapterType: "claude_local" }));
+    expect(agent.runtimeConfig.aiConnection).toBeUndefined();
     expect(agent.status).toBe("idle");
   });
 
@@ -149,6 +157,11 @@ describe("agent-created hires use managed AI connections", () => {
         name: "Cross-provider config", role: "engineer", adapterType,
         adapterConfig: { ...config, env: { [key]: "leftover-parent-setting" } },
       }));
+      if (adapterType === "claude_local") {
+        // A claude_local hire is never forced onto a managed Anthropic binding.
+        expect(agent.runtimeConfig.aiConnection).toBeUndefined();
+        return;
+      }
       expect(agent.runtimeConfig.aiConnection).toMatchObject({
         provider: provider === "anthropic" ? "openai" : "anthropic", mode: "responsible_user",
       });
@@ -168,7 +181,7 @@ describe("agent-created hires use managed AI connections", () => {
   });
 
   it.each(["anthropic", "openai"] as const)("inherits %s when the hire uses the native runner", async (provider) => {
-    const f = await fixture(provider, "subscription");
+    const f = await fixture(provider, provider === "anthropic" ? "api_key" : "subscription");
     const agent = hired(await request(f.app).post(`/api/companies/${f.companyId}/agent-hires`).send({ name: "Native teammate", role: "engineer", adapterType: "paperclip_runner", adapterConfig: provider === "anthropic" ? { provider: "acpx", acpxAgent: "claude" } : { provider: "codex" } }));
     expect(agent.runtimeConfig.aiConnection).toEqual(f.binding);
     const runtime = await prepareManagedAiRuntime(db, { companyId: f.companyId, agentId: agent.id, responsibleUserId: f.userId, adapterType: agent.adapterType, binding: agent.runtimeConfig.aiConnection, config: agent.adapterConfig });
@@ -202,7 +215,7 @@ describe("agent-created hires use managed AI connections", () => {
 });
 
 describe("hired agents sharing a subscription", () => {
-  it.each(["openai", "anthropic"] as const)("runs the %s child alongside a live parent and inherits its connection", async (provider) => {
+  it.each(["openai"] as const)("runs the %s child alongside a live parent and inherits its connection", async (provider) => {
     const f = await fixture(provider, "subscription");
     const agent = hired(await request(f.app).post(`/api/companies/${f.companyId}/agent-hires`).send({ name: "Concurrent teammate", role: "engineer", adapterType: f.adapterType, reportsTo: f.agentId, adapterConfig: { cwd: home, engine: "cli" }, runtimeConfig: { heartbeat: { enabled: false } } }));
     const [issue] = await db.insert(issues).values({ companyId: f.companyId, title: "Subscription child task", status: "todo", assigneeAgentId: agent.id, responsibleUserId: f.userId, createdByUserId: f.userId }).returning();
@@ -227,6 +240,59 @@ describe("hired agents sharing a subscription", () => {
       await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, f.runId));
       await heartbeat.drainActiveRunExecutions();
       unregisterServerAdapter(f.adapterType);
+    }
+  });
+});
+
+describe("responsible-user Anthropic binding without a personal default", () => {
+  const anthropicBinding = { provider: "anthropic", method: "api_key", mode: "responsible_user" } as const;
+
+  it("keeps the binding only for a member who has an Anthropic default", async () => {
+    const withKey = await fixture("anthropic");
+    await expect(resolveRunAiConnectionBinding(db, {
+      companyId: withKey.companyId, adapterType: "claude_local", binding: anthropicBinding, responsibleUserId: withKey.userId,
+    })).resolves.toEqual(anthropicBinding);
+
+    const withoutKey = await fixture("openai");
+    await expect(resolveRunAiConnectionBinding(db, {
+      companyId: withoutKey.companyId, adapterType: "claude_local", binding: anthropicBinding, responsibleUserId: withoutKey.userId,
+    })).resolves.toBeUndefined();
+    // Other adapters, providers, and runs without a responsible user are unchanged.
+    await expect(resolveRunAiConnectionBinding(db, {
+      companyId: withoutKey.companyId, adapterType: "paperclip_runner", binding: anthropicBinding, responsibleUserId: withoutKey.userId,
+    })).resolves.toEqual(anthropicBinding);
+    await expect(resolveRunAiConnectionBinding(db, {
+      companyId: withoutKey.companyId, adapterType: "claude_local", binding: anthropicBinding, responsibleUserId: null,
+    })).resolves.toEqual(anthropicBinding);
+    await expect(resolveRunAiConnectionBinding(db, {
+      companyId: withoutKey.companyId, adapterType: "codex_local", binding: withoutKey.binding, responsibleUserId: withoutKey.userId,
+    })).resolves.toEqual(withoutKey.binding);
+  });
+
+  it("runs the claude_local agent unmanaged on the server CLI instead of failing", async () => {
+    const f = await fixture("openai");
+    const [agent] = await db.insert(agents).values({
+      companyId: f.companyId, name: "Claude teammate", role: "engineer", adapterType: "claude_local",
+      adapterConfig: { cwd: home, engine: "cli" }, runtimeConfig: { heartbeat: { enabled: false }, aiConnection: anthropicBinding },
+    }).returning();
+    const [issue] = await db.insert(issues).values({ companyId: f.companyId, title: "CLI fallback task", status: "todo", assigneeAgentId: agent!.id, responsibleUserId: f.userId, createdByUserId: f.userId }).returning();
+    const execute = vi.fn(async (ctx: { config: Record<string, unknown> }) => {
+      expect(ctx.config.managedAiConnection).toBeUndefined();
+      await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, issue!.id));
+      return { exitCode: 0, signal: null, timedOut: false, resultJson: {} };
+    });
+    registerServerAdapter({ ...getServerAdapter("claude_local"), execute });
+    const heartbeat = heartbeatService(db);
+    try {
+      const run = await heartbeat.invoke(agent!.id, "assignment", { issueId: issue!.id, wakeReason: "issue_assigned", responsibleUserId: f.userId }, "system");
+      expect(run).not.toBeNull();
+      await expect.poll(async () => (await heartbeat.getRun(run!.id))?.status, { timeout: 20_000 }).toBe("succeeded");
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect((await heartbeat.getRun(run!.id))?.contextSnapshot?.aiConnection).toBeUndefined();
+    } finally {
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, f.runId));
+      await heartbeat.drainActiveRunExecutions();
+      unregisterServerAdapter("claude_local");
     }
   });
 });

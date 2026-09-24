@@ -1075,7 +1075,7 @@ describe("plugin worker manager execute.log route", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Host-owned setup-token login pseudo-terminal route gate
+// Host-owned login pseudo-terminal route gate
 // ---------------------------------------------------------------------------
 
 const LOGIN_PTY_WORKER_ENTRYPOINT = path.join(
@@ -1107,12 +1107,12 @@ function ptyOpenInput(directive: unknown) {
     // forwards to the worker unchanged. The manager carries the closed command
     // key and the validated session home; it carries no command string.
     providerLeaseId: JSON.stringify(directive),
-    loginCommandKey: "claude" as const,
+    loginCommandKey: "codex" as const,
     sessionHome: PTY_SESSION_HOME,
   };
 }
 
-describe("plugin worker manager setup-token pty route gate", () => {
+describe("plugin worker manager login pty route gate", () => {
   it("rejects a command key that is not in the closed set before the worker call", async () => {
     const handle = makeLoginPtyHandle();
     try {
@@ -1127,7 +1127,7 @@ describe("plugin worker manager setup-token pty route gate", () => {
           companyId: "company-1",
           environmentId: "env-1",
           providerLeaseId: JSON.stringify({ mode: "normal" }),
-          loginCommandKey: "gemini" as unknown as "claude",
+          loginCommandKey: "gemini" as unknown as "codex",
           sessionHome: PTY_SESSION_HOME,
         }),
       ).rejects.toThrow("LOGIN_PTY_COMMAND_NOT_ALLOWED");
@@ -1155,7 +1155,7 @@ describe("plugin worker manager setup-token pty route gate", () => {
           companyId: "company-1",
           environmentId: "env-1",
           providerLeaseId: JSON.stringify({ mode: "normal" }),
-          loginCommandKey: "claude" as const,
+          loginCommandKey: "codex" as const,
           sessionHome: "/tmp/paperclip-adapter-login/../etc",
         }),
       ).rejects.toThrow("LOGIN_PTY_INVALID_SESSION_HOME");

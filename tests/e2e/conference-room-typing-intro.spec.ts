@@ -94,13 +94,14 @@ async function runOnboardingWizard(page: Page, companyName: string) {
   await source.waitFor({ timeout: 30_000 });
   await source.click();
 
-  // "Connect", not "Next": this step's button starts the sign-in where there
-  // is one to start, so it is named for what it does. This test simulates
-  // successful local account connection before the environment check and hire.
+  // "Connect" or "Continue", not "Next": for a provider with a sign-in to start
+  // the button starts it (this test simulates a successful local account
+  // connection); for Claude it reads "Continue", because Claude uses the
+  // claude CLI signed in on the server and there is nothing to connect.
   //
   // Waited on for enabled rather than for visible: it is already on screen,
   // disabled, and clicking a disabled button raises nothing and does nothing.
-  const connectNext = page.getByRole("button", { name: /^Connect$/ });
+  const connectNext = page.getByRole("button", { name: /^(Connect|Continue)$/ });
   await expect(connectNext).toBeEnabled({ timeout: 30_000 });
   await connectNext.click();
 

@@ -1,16 +1,24 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/adapter-utils";
+import { withoutClaudeSubscriptionTokens } from "./credential-policy.js";
+
+// Claude subscription quota comes only from the official `claude` binary.
+// Paperclip runs `claude auth status` and the CLI's own `/usage` panel, then
+// parses their output. Paperclip never reads the Claude sign-in files or the
+// macOS Keychain, and never calls an Anthropic endpoint with a Claude
+// subscription token. Only the `claude` binary uses the sign-in.
 
 const execFileAsync = promisify(execFile);
 
-const CLAUDE_USAGE_SOURCE_OAUTH = "anthropic-oauth";
 const CLAUDE_USAGE_SOURCE_CLI = "claude-cli";
 
+/**
+ * Path of the Claude config dir. The server uses it to find Claude session
+ * transcripts. The quota path never reads anything under it.
+ */
 export function claudeConfigDir(): string {
   const fromEnv = process.env.CLAUDE_CONFIG_DIR;
   if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return fromEnv.trim();
@@ -22,9 +30,11 @@ function hasNonEmptyProcessEnv(key: string): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+// The CLI reports its own sign-in only when neither an API key nor a Claude
+// subscription token from the host env overrides it.
 function createClaudeQuotaEnv(): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  for (const [key, value] of Object.entries(withoutClaudeSubscriptionTokens(process.env))) {
     if (typeof value !== "string") continue;
     if (key.startsWith("ANTHROPIC_")) continue;
     env[key] = value;
@@ -86,71 +96,70 @@ function trimToLatestUsagePanel(text: string): string | null {
   return tail;
 }
 
-async function readClaudeTokenFromFile(credPath: string): Promise<string | null> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(credPath, "utf8");
-  } catch {
-    return null;
-  }
-  const credential = parseClaudeCredential(raw);
-  if (!credential) return null;
-  // On macOS the CLI refreshes the Keychain item, not this file, so a file
-  // whose token has expired is a stale leftover. Skip it so the caller can
-  // fall through to a live credential instead of failing with a dead token.
-  if (credential.expiresAt != null && credential.expiresAt <= Date.now()) return null;
-  return credential.token;
-}
-
-interface ClaudeCredential {
-  token: string;
-  /** Epoch milliseconds, when the credential file records one. */
-  expiresAt: number | null;
-}
-
-function parseClaudeCredential(raw: string): ClaudeCredential | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const obj = parsed as Record<string, unknown>;
-  const oauth = obj["claudeAiOauth"];
-  if (typeof oauth !== "object" || oauth === null) return null;
-  const token = (oauth as Record<string, unknown>)["accessToken"];
-  if (typeof token !== "string" || token.length === 0) return null;
-  const expiresAt = (oauth as Record<string, unknown>)["expiresAt"];
-  return { token, expiresAt: typeof expiresAt === "number" && Number.isFinite(expiresAt) ? expiresAt : null };
-}
-
-function parseClaudeCredentialToken(raw: string): string | null {
-  return parseClaudeCredential(raw)?.token ?? null;
-}
-
-interface ClaudeAuthStatus {
+export interface ClaudeAuthStatus {
   loggedIn: boolean;
   authMethod: string | null;
   subscriptionType: string | null;
 }
 
-export async function readClaudeAuthStatus(): Promise<ClaudeAuthStatus | null> {
+export interface ClaudeAuthStatusProbe {
+  status: ClaudeAuthStatus | null;
+  /** True when the `claude` binary is not on PATH. */
+  binaryMissing: boolean;
+}
+
+function parseClaudeAuthStatus(stdout: string): ClaudeAuthStatus | null {
   try {
-    const { stdout } = await execFileAsync("claude", ["auth", "status"], {
-      env: process.env,
-      timeout: 5_000,
-      maxBuffer: 1024 * 1024,
-    });
-    const parsed = JSON.parse(stdout) as Record<string, unknown>;
+    const parsed = JSON.parse(stdout) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const record = parsed as Record<string, unknown>;
     return {
-      loggedIn: parsed.loggedIn === true,
-      authMethod: typeof parsed.authMethod === "string" ? parsed.authMethod : null,
-      subscriptionType: typeof parsed.subscriptionType === "string" ? parsed.subscriptionType : null,
+      loggedIn: record.loggedIn === true,
+      authMethod: typeof record.authMethod === "string" ? record.authMethod : null,
+      subscriptionType: typeof record.subscriptionType === "string" ? record.subscriptionType : null,
     };
   } catch {
     return null;
   }
+}
+
+async function probeClaudeAuthStatus(env: NodeJS.ProcessEnv): Promise<ClaudeAuthStatusProbe> {
+  try {
+    const { stdout } = await execFileAsync("claude", ["auth", "status"], {
+      env,
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return { status: parseClaudeAuthStatus(stdout), binaryMissing: false };
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : null;
+    if (code === "ENOENT") return { status: null, binaryMissing: true };
+    // `claude auth status` exits non-zero when signed out but still prints its
+    // JSON status on stdout.
+    const stdout =
+      typeof error === "object" && error !== null && "stdout" in error && typeof error.stdout === "string"
+        ? error.stdout
+        : "";
+    return { status: parseClaudeAuthStatus(stdout), binaryMissing: false };
+  }
+}
+
+/**
+ * Ask the `claude` binary for its own sign-in status (`claude auth status`),
+ * and say whether the binary is missing from PATH. Paperclip only runs the
+ * binary; it never reads the sign-in itself.
+ */
+export async function probeClaudeCliAuth(
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<ClaudeAuthStatusProbe> {
+  return probeClaudeAuthStatus(withoutClaudeSubscriptionTokens(options.env ?? process.env));
+}
+
+/** Ask the `claude` binary for its own sign-in status (`claude auth status`). */
+export async function readClaudeAuthStatus(
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<ClaudeAuthStatus | null> {
+  return (await probeClaudeAuthStatus(withoutClaudeSubscriptionTokens(options.env ?? process.env))).status;
 }
 
 function describeClaudeSubscriptionAuth(status: ClaudeAuthStatus | null): string | null {
@@ -158,182 +167,6 @@ function describeClaudeSubscriptionAuth(status: ClaudeAuthStatus | null): string
   return status.subscriptionType
     ? `Claude is logged in via claude.ai (${status.subscriptionType})`
     : "Claude is logged in via claude.ai";
-}
-
-// Claude Code on macOS stores the OAuth credential for a custom
-// CLAUDE_CONFIG_DIR in a per-directory Keychain item named
-// "Claude Code-credentials-<first 8 hex chars of sha256(dir)>" instead of a
-// credentials file in the directory. The suffix binds the item to exactly one
-// auth home, so reading it can only ever surface the login performed inside
-// that home — none of the cross-account risk of the unsuffixed operator item.
-function isolatedKeychainService(configDir: string): string {
-  return `Claude Code-credentials-${createHash("sha256").update(configDir).digest("hex").slice(0, 8)}`;
-}
-
-async function readClaudeTokenFromKeychain(service: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("/usr/bin/security", ["find-generic-password", "-s", service, "-w"], { timeout: 10000, maxBuffer: 1024 * 1024 });
-    return parseClaudeCredentialToken(stdout);
-  } catch { return null; }
-}
-
-/**
- * Read the credential that a `claude` login performed inside an isolated auth
- * home left in the macOS Keychain. Only that home's own suffixed item is
- * consulted — never the unsuffixed item that holds the server operator's
- * machine-level login. Returns null off macOS.
- */
-export async function readIsolatedClaudeKeychainToken(loginHome: string): Promise<string | null> {
-  if (process.platform !== "darwin") return null;
-  return readClaudeTokenFromKeychain(isolatedKeychainService(loginHome));
-}
-
-export async function readClaudeToken(options: { allowKeychain?: boolean } = {}): Promise<string | null> {
-  const configDir = claudeConfigDir();
-  for (const filename of [".credentials.json", "credentials.json"]) {
-    const token = await readClaudeTokenFromFile(path.join(configDir, filename));
-    if (token) return token;
-  }
-  if (process.platform !== "darwin") return null;
-  // A custom auth home owns exactly one Keychain item: the suffixed one the
-  // CLI created for that directory. It must never fall through to the
-  // unsuffixed item, which belongs to a different account.
-  if (process.env.CLAUDE_CONFIG_DIR?.trim()) {
-    return readClaudeTokenFromKeychain(isolatedKeychainService(configDir));
-  }
-  // Only an explicit local-account import may consult the user's Keychain.
-  if (options.allowKeychain) {
-    return readClaudeTokenFromKeychain("Claude Code-credentials");
-  }
-  return null;
-}
-
-interface AnthropicUsageWindow {
-  utilization?: number | null;
-  resets_at?: string | null;
-}
-
-interface AnthropicExtraUsage {
-  is_enabled?: boolean | null;
-  monthly_limit?: number | null;
-  used_credits?: number | null;
-  utilization?: number | null;
-  currency?: string | null;
-}
-
-interface AnthropicUsageResponse {
-  five_hour?: AnthropicUsageWindow | null;
-  seven_day?: AnthropicUsageWindow | null;
-  seven_day_sonnet?: AnthropicUsageWindow | null;
-  seven_day_opus?: AnthropicUsageWindow | null;
-  extra_usage?: AnthropicExtraUsage | null;
-}
-
-function formatCurrencyAmount(value: number, currency: string | null | undefined): string {
-  const code = typeof currency === "string" && currency.trim().length > 0 ? currency.trim().toUpperCase() : "USD";
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: code,
-    maximumFractionDigits: 2,
-  }).format(value);
-}
-
-function formatExtraUsageLabel(extraUsage: AnthropicExtraUsage): string | null {
-  const monthlyLimit = extraUsage.monthly_limit;
-  const usedCredits = extraUsage.used_credits;
-  if (
-    typeof monthlyLimit !== "number" ||
-    !Number.isFinite(monthlyLimit) ||
-    typeof usedCredits !== "number" ||
-    !Number.isFinite(usedCredits)
-  ) {
-    return null;
-  }
-  // API returns values in cents — convert to dollars for display
-  return `${formatCurrencyAmount(usedCredits / 100, extraUsage.currency)} / ${formatCurrencyAmount(monthlyLimit / 100, extraUsage.currency)}`;
-}
-
-/** Convert a utilization value to a 0-100 integer percent. Returns null for null/undefined input.
- *  Handles both 0-1 fractions (legacy) and 0-100 percentages (current API). */
-export function toPercent(utilization: number | null | undefined): number | null {
-  if (utilization == null) return null;
-  return Math.min(100, Math.round(utilization < 1 ? utilization * 100 : utilization));
-}
-
-/** fetch with an abort-based timeout so a hanging provider api doesn't block the response indefinitely */
-export async function fetchWithTimeout(url: string, init: RequestInit, ms = 8000): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
-  const resp = await fetchWithTimeout("https://api.anthropic.com/api/oauth/usage", {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "anthropic-beta": "oauth-2025-04-20",
-    },
-  });
-  if (!resp.ok) throw new Error(`anthropic usage api returned ${resp.status}`);
-  const body = (await resp.json()) as AnthropicUsageResponse;
-  const windows: QuotaWindow[] = [];
-
-  if (body.five_hour != null) {
-    windows.push({
-      label: "Current session",
-      usedPercent: toPercent(body.five_hour.utilization),
-      resetsAt: body.five_hour.resets_at ?? null,
-      valueLabel: null,
-      detail: null,
-    });
-  }
-  if (body.seven_day != null) {
-    windows.push({
-      label: "Current week (all models)",
-      usedPercent: toPercent(body.seven_day.utilization),
-      resetsAt: body.seven_day.resets_at ?? null,
-      valueLabel: null,
-      detail: null,
-    });
-  }
-  if (body.seven_day_sonnet != null) {
-    windows.push({
-      label: "Current week (Sonnet only)",
-      usedPercent: toPercent(body.seven_day_sonnet.utilization),
-      resetsAt: body.seven_day_sonnet.resets_at ?? null,
-      valueLabel: null,
-      detail: null,
-    });
-  }
-  if (body.seven_day_opus != null) {
-    windows.push({
-      label: "Current week (Opus only)",
-      usedPercent: toPercent(body.seven_day_opus.utilization),
-      resetsAt: body.seven_day_opus.resets_at ?? null,
-      valueLabel: null,
-      detail: null,
-    });
-  }
-  if (body.extra_usage != null) {
-    windows.push({
-      label: "Extra usage",
-      usedPercent: body.extra_usage.is_enabled === false ? null : toPercent(body.extra_usage.utilization),
-      resetsAt: null,
-      valueLabel:
-        body.extra_usage.is_enabled === false
-          ? "Not enabled"
-          : formatExtraUsageLabel(body.extra_usage),
-      detail:
-        body.extra_usage.is_enabled === false
-          ? "Extra usage not enabled"
-          : "Monthly extra usage pool",
-    });
-  }
-  return windows;
 }
 
 function usageOutputLooksRelevant(text: string): boolean {
@@ -366,10 +199,10 @@ function extractUsageError(text: string): string | null {
   const lower = text.toLowerCase();
   const compact = lower.replace(/\s+/g, "");
   if (lower.includes("token_expired") || lower.includes("token has expired")) {
-    return "Claude CLI token expired. Run `claude login` to refresh.";
+    return "Claude CLI token expired. Run `claude auth login` to refresh.";
   }
   if (lower.includes("authentication_error")) {
-    return "Claude CLI authentication error. Run `claude login`.";
+    return "Claude CLI authentication error. Run `claude auth login`.";
   }
   if (lower.includes("rate_limit_error") || lower.includes("rate limited") || compact.includes("ratelimited")) {
     return "Claude CLI usage endpoint is rate limited right now. Please try again later.";
@@ -549,55 +382,28 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
     return { provider: "anthropic", source: "bedrock", ok: true, windows: [] };
   }
 
-  const authStatus = await readClaudeAuthStatus();
+  // Ask the CLI with the same env the /usage probe uses, so both see the same
+  // sign-in.
+  const { status: authStatus, binaryMissing } = await probeClaudeAuthStatus(createClaudeQuotaEnv());
   const authDescription = describeClaudeSubscriptionAuth(authStatus);
-  const token = await readClaudeToken();
 
-  const errors: string[] = [];
-
-  if (token) {
-    try {
-      const windows = await fetchClaudeQuota(token);
-      return { provider: "anthropic", source: CLAUDE_USAGE_SOURCE_OAUTH, ok: true, windows };
-    } catch (error) {
-      errors.push(formatProviderError("Anthropic OAuth usage", error));
-    }
+  // No `claude` binary, or the binary reports no Claude subscription sign-in
+  // (signed out, or API-key auth): there is no subscription quota to show.
+  if (binaryMissing || (authStatus && !authDescription)) {
+    return { provider: "anthropic", source: CLAUDE_USAGE_SOURCE_CLI, ok: true, windows: [] };
   }
 
   try {
     const windows = await fetchClaudeCliQuota();
     return { provider: "anthropic", source: CLAUDE_USAGE_SOURCE_CLI, ok: true, windows };
   } catch (error) {
-    errors.push(formatProviderError("Claude CLI /usage", error));
-  }
-
-  if (hasNonEmptyProcessEnv("ANTHROPIC_API_KEY") && !authDescription) {
+    const reason = formatProviderError("Claude CLI /usage", error);
     return {
       provider: "anthropic",
+      source: CLAUDE_USAGE_SOURCE_CLI,
       ok: false,
-      error:
-        errors[0]
-        ?? "ANTHROPIC_API_KEY is set and no local Claude subscription session is available for quota polling",
+      error: authDescription ? `${authDescription}, but quota polling failed (${reason})` : reason,
       windows: [],
     };
   }
-
-  if (authDescription) {
-    return {
-      provider: "anthropic",
-      ok: false,
-      error:
-        errors.length > 0
-          ? `${authDescription}, but quota polling failed (${errors.join("; ")})`
-          : `${authDescription}, but Paperclip could not load subscription quota data`,
-      windows: [],
-    };
-  }
-
-  return {
-    provider: "anthropic",
-    ok: false,
-    error: errors[0] ?? "no local claude auth token",
-    windows: [],
-  };
 }

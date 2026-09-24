@@ -628,7 +628,7 @@ function BudgetFinanceMatrix() {
                 windowRows={providerWindowRows.anthropic}
                 showDeficitNotch={false}
                 quotaWindows={claudeQuotaWindows}
-                quotaSource="anthropic-oauth"
+                quotaSource="claude-cli"
               />
             </CaseFrame>
             <CaseFrame title="Warning provider" detail="Codex weekly usage is high and subscription overage has started." tone="warning">
@@ -733,7 +733,7 @@ function BudgetFinanceMatrix() {
 
         <Section eyebrow="Subscriptions" title="ClaudeSubscriptionPanel and CodexSubscriptionPanel status windows">
           <div className="grid gap-5 xl:grid-cols-2">
-            <ClaudeSubscriptionPanel windows={claudeQuotaWindows} source="anthropic-oauth" />
+            <ClaudeSubscriptionPanel windows={claudeQuotaWindows} source="claude-cli" />
             <CodexSubscriptionPanel windows={codexQuotaWindows} source="codex-rpc" />
           </div>
           <div className="mt-5 grid gap-5 xl:grid-cols-2">

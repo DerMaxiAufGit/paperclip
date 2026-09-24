@@ -21,6 +21,18 @@ import { classifyThrownErrorClass, logSandboxProbeDiagnostic } from "./probe-dia
 
 const SEEDED_SHARED_FILES = ["settings.json", "CLAUDE.md"] as const;
 
+/**
+ * Claude Code settings keys that can supply or produce credentials. They are
+ * never copied into a remote config seed.
+ */
+export const CLAUDE_SETTINGS_CREDENTIAL_KEYS = [
+  "env",
+  "apiKeyHelper",
+  "awsAuthRefresh",
+  "awsCredentialExport",
+  "otelHeadersHelper",
+] as const;
+
 interface SeedFile {
   name: string;
   sourcePath: string;
@@ -59,6 +71,11 @@ function sanitizeRemoteClaudeSettings(raw: string): string {
   delete settings.mcpServers;
   delete settings.permissionMode;
   delete settings.skipDangerousModePermissionPrompt;
+  // Keys that can carry or produce credentials. The `env` block may hold a
+  // Claude subscription token or a host API key; the helpers run commands that
+  // print credentials. A remote target gets auth only from the explicit run env,
+  // so none of them is copied into the seed Paperclip stores and ships.
+  for (const key of CLAUDE_SETTINGS_CREDENTIAL_KEYS) delete settings[key];
   return JSON.stringify(settings);
 }
 
@@ -211,13 +228,15 @@ export async function prepareClaudeConfigSeed(
   } else {
     await onLog(
       "stdout",
-      `[paperclip] No local Claude config seed files were found in "${sourceDir}". Remote Claude auth may still require login.\n`,
+      `[paperclip] No local Claude config seed files were found in "${sourceDir}".\n`,
     );
   }
 
   return targetDir;
 }
 
+// A remote target authenticates with an Anthropic API key only, so the managed
+// config dir holds the sanitized seed and never a Claude sign-in file.
 export function buildRemoteClaudeConfigMaterializationCommand(input: {
   remoteClaudeConfigDir: string;
   remoteClaudeConfigSeedDir: string;
@@ -225,12 +244,7 @@ export function buildRemoteClaudeConfigMaterializationCommand(input: {
   return `mkdir -p ${shellQuote(input.remoteClaudeConfigDir)} && ` +
     `if [ -d ${shellQuote(input.remoteClaudeConfigSeedDir)} ]; then ` +
     `cp -R ${shellQuote(`${input.remoteClaudeConfigSeedDir}/.`)} ${shellQuote(input.remoteClaudeConfigDir)}/; ` +
-    `fi; ` +
-    `for file in .credentials.json credentials.json; do ` +
-    `if [ -n "\${HOME:-}" ] && [ -f "\${HOME}/.claude/\${file}" ] && [ ! -f ${shellQuote(input.remoteClaudeConfigDir)}/"\${file}" ]; then ` +
-    `cp "\${HOME}/.claude/\${file}" ${shellQuote(input.remoteClaudeConfigDir)}/"\${file}"; ` +
-    `fi; ` +
-    `done`;
+    `fi`;
 }
 
 export async function materializeRemoteClaudeConfig(input: {
@@ -256,12 +270,10 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 /**
- * Prepare the sandbox runtime that a Claude hello probe needs. The step
- * installs the Claude CLI in the sandbox when the CLI is absent, and it
- * materializes the Paperclip-managed Claude config directory. Both the CLI
- * Test lane and the ACP Test lane call this helper, so the two lanes probe
- * the same login state. The Claude CLI and the Claude ACP engine share the
- * same stored Claude login.
+ * Prepare the sandbox runtime that the Claude CLI Test lane hello probe needs.
+ * The step installs the Claude CLI in the sandbox when the CLI is absent, and
+ * it materializes the Paperclip-managed Claude config directory, so the probe
+ * reads the same config the real run uses.
  *
  * The function mutates `env`: it sets `CLAUDE_CONFIG_DIR` to the managed
  * remote config directory when it materializes one. It returns the checks to

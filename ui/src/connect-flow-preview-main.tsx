@@ -1,7 +1,8 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MotionConfig, motion } from "motion/react";
-import { isValidBrowserCode } from "@paperclipai/shared";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { AdapterAuthSignalResponse } from "@paperclipai/shared";
 import {
   CARD_ENTER,
   CARD_EXIT,
@@ -18,6 +19,8 @@ import {
   OnboardingCardField,
   OnboardingLoginCodeRow,
 } from "./components/AdapterLoginChrome";
+import { ClaudeCliSignInStatus } from "./components/ClaudeCliSignInStatus";
+import { queryKeys } from "./lib/queryKeys";
 import { AgentPreview } from "./components/onboarding/AgentPreview";
 import { CredentialModeLink } from "./components/onboarding/CredentialModeLink";
 import { FooterNav } from "./components/onboarding/FooterNav";
@@ -45,11 +48,35 @@ import "./index.css";
  * (stepper, avatar, heading, tiles, credential link, footer) is the real
  * presentational set too.
  *
- * What is faked is only the server. The three delays below stand in for a
- * session start, a prompt round trip, and the poll that lands while the
- * customer is finishing a login somewhere else. The wizard itself is not here:
- * it needs a query client, a router and a company.
+ * What is faked is only the server. The delays below stand in for a session
+ * start, a prompt round trip, and the poll that lands while the customer is
+ * finishing a login somewhere else. The wizard itself is not here: it needs a
+ * router and a company.
+ *
+ * Claude has no in-app sign-in. A Claude subscription is the claude CLI signed
+ * in on the Paperclip server, so the Claude tile shows the shipped
+ * `ClaudeCliSignInStatus`, answered from a query cache seeded below rather
+ * than from a server, or takes an API key.
  */
+
+/** The company the seeded Claude CLI status is filed under; no server sees it. */
+const PREVIEW_COMPANY_ID = "connect-flow-preview";
+
+/**
+ * Seeded and never stale, so the status panel renders "signed in" without a
+ * request. The panel only offers "Check again" when it is signed out, so
+ * nothing on this page can trigger a refetch.
+ */
+function createPreviewQueryClient() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { staleTime: Number.POSITIVE_INFINITY, retry: false } },
+  });
+  client.setQueryData<AdapterAuthSignalResponse>(
+    queryKeys.agents.authSignal(PREVIEW_COMPANY_ID, "claude_local", null),
+    { status: "present" },
+  );
+  return client;
+}
 
 
 /**
@@ -109,10 +136,8 @@ const POLL_DELAY_MS = 3000;
 /** The code OpenAI's login hands over. */
 const DISPLAYED_CODE = "Q2RJ-E1YIF";
 
-const OAUTH_URL: Record<string, string> = {
-  claude_local: "https://claude.ai/oauth/authorize?code=true&client=paperclip",
-  codex_local: "https://auth.openai.com/codex/device",
-};
+/** Where OpenAI's device login sends the customer. */
+const OPENAI_DEVICE_URL = "https://auth.openai.com/codex/device";
 
 function ConnectFlowPreview({
   initialSourceId,
@@ -124,7 +149,6 @@ function ConnectFlowPreview({
   const [selectedId, setSelectedId] = useState<string | null>(initialSourceId);
   const [useApiKeys, setUseApiKeys] = useState(false);
   const [phase, setPhase] = useState<Phase>(initialPhase);
-  const [code, setCode] = useState("");
   const [apiKey, setApiKey] = useState("");
   const timers = useRef<Array<ReturnType<typeof setTimeout>>>([]);
 
@@ -132,16 +156,15 @@ function ConnectFlowPreview({
   const providerName = selectedId === "codex_local" ? "OpenAI" : "Claude";
   const signInLabel = `Sign in to ${providerName}`;
   /*
-    Claude takes a code back from the customer; OpenAI hands one over. That is
-    the only difference between the two cards — the sentence and the last row —
-    and everything around them, every transition included, is shared.
+    OpenAI hands a code over and signs in elsewhere; Claude's subscription is
+    the claude CLI already signed in on the server, so its card is that status
+    and Connect goes straight on, as a key does. Everything around the cards,
+    every transition included, is shared.
   */
   const apiMode = mode === "api";
+  const claudeCli = !apiMode && selectedId === "claude_local";
   const handsOverCode = !apiMode && selectedId === "codex_local";
-  const instructionTail = handsOverCode
-    ? " by providing the authorization code below"
-    : " then come back and enter authorization code";
-  const authUrl = OAUTH_URL[selectedId ?? "claude_local"]!;
+  const connectsDirectly = apiMode || claudeCli;
 
   const after = (ms: number, fn: () => void) => {
     timers.current.push(setTimeout(fn, ms));
@@ -160,11 +183,11 @@ function ConnectFlowPreview({
     if (phase === "collapsing") {
       // The row finishes answering before the card starts arriving.
       //
-      // A key goes straight to `ready`. There is no prompt to fetch for one —
-      // the field is available the moment the source is chosen — and the
-      // canvas's own notes are explicit that a spinner standing in for no work
-      // is a slower screen that also says something untrue.
-      after(SOURCE_COLLAPSE_MS, () => setPhase(apiMode ? "ready" : "loading"));
+      // A key or the Claude CLI status goes straight to `ready`. There is no
+      // prompt to fetch for either, and the canvas's own notes are explicit
+      // that a spinner standing in for no work is a slower screen that also
+      // says something untrue.
+      after(SOURCE_COLLAPSE_MS, () => setPhase(connectsDirectly ? "ready" : "loading"));
     } else if (phase === "loading") {
       after(PROMPT_DELAY_MS, () => setPhase("ready"));
     } else if (phase === "waiting" && handsOverCode) {
@@ -178,7 +201,6 @@ function ConnectFlowPreview({
       // The card's own fade, with its space still held. The fields are emptied
       // at the end of it, once nothing is legible, so the reset is never seen.
       after(CARD_EXIT_MS, () => {
-        setCode("");
         setApiKey("");
         setPhase("unwindRoom");
       });
@@ -194,14 +216,15 @@ function ConnectFlowPreview({
       setSelectedId(null);
       after(SOURCE_COLLAPSE_MS, () => setPhase("idle"));
     }
-  }, [phase, handsOverCode, apiMode]);
+  }, [phase, handsOverCode, connectsDirectly]);
 
   /**
-   * A key is submitted by the step's button, not by arriving. It goes straight
-   * to the hold: there is nothing to wait for once it has been handed over.
+   * A key, or the signed-in Claude CLI, is submitted by the step's button. It
+   * goes straight to the hold: the shipped step tests the connection there,
+   * and there is nothing else to wait for.
    */
-  const submitKey = () => {
-    if (!apiKey.trim() || phase !== "ready") return;
+  const connectDirectly = () => {
+    if (phase !== "ready" || (apiMode && !apiKey.trim())) return;
     setPhase("connecting");
     after(CONNECTED_HOLD_MS, () => setPhase("done"));
   };
@@ -220,7 +243,6 @@ function ConnectFlowPreview({
   const reset = () => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
-    setCode("");
     setApiKey("");
     setSelectedId(null);
     setPhase("idle");
@@ -233,17 +255,6 @@ function ConnectFlowPreview({
     setSelectedId(id);
     setPhase("collapsing");
   };
-
-  // The paste is the answer; see the shipped panel for why it is the paste and
-  // not the value. The hold after it is deliberate — `CONNECTED_HOLD_MS`.
-  const pastedRef = useRef(false);
-  useEffect(() => {
-    if (!pastedRef.current) return;
-    pastedRef.current = false;
-    if (!isValidBrowserCode(code.trim())) return;
-    setPhase("connecting");
-    after(CONNECTED_HOLD_MS, () => setPhase("done"));
-  }, [code]);
 
   // Collapsed from the moment a tile is pressed until the row is asked to
   // reopen — `unwindRow` is where it expands, one beat after the card left.
@@ -275,13 +286,16 @@ function ConnectFlowPreview({
     // the card leaving, and changing the label at the same time would make two
     // things happen in a beat meant to carry one.
     phase === "unwindCard"
-      ? { label: signInLabel, icon: "none" as const, disabled: true }
+      ? connectsDirectly
+        ? { label: "Connect", icon: "arrow" as const, disabled: true }
+        : { label: signInLabel, icon: "none" as const, disabled: true }
       : done
       ? { label: "Start over", icon: "arrow" as const, disabled: false }
-      : phase === "ready" && apiMode
+      : phase === "ready" && connectsDirectly
         ? // A key is typed here rather than fetched elsewhere, so the button is
-          // the submit and stays dead until there is something to submit.
-          { label: "Connect", icon: "arrow" as const, disabled: !apiKey.trim() }
+          // the submit and stays dead until there is something to submit. The
+          // signed-in Claude CLI has nothing to type.
+          { label: "Connect", icon: "arrow" as const, disabled: apiMode && !apiKey.trim() }
         : phase === "ready"
         ? { label: signInLabel, icon: "none" as const, disabled: false }
         : phase === "waiting"
@@ -390,64 +404,52 @@ function ConnectFlowPreview({
                   : CARD_EXIT,
               }}
             >
-                  <OnboardingLoginCard
-                    loading={phase === "loading"}
-                    instruction={
-                      apiMode ? (
-                        // No link, because there is nowhere to sign in to. The
-                        // key is pasted straight in, so the sentence only has
-                        // to say what is wanted.
-                        `Provide your ${providerName} API key to connect`
-                      ) : (
-                        <>
-                          {/* The same destination as the button below. Two ways
-                              to reach one link: the button for the customer
-                              following the flow, the anchor for anyone who
-                              wants to copy it into another browser. */}
-                          <a
-                            href={authUrl}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="underline underline-offset-2 hover:text-foreground"
-                          >
-                            {signInLabel}
-                          </a>
-                          {instructionTail}
-                        </>
-                      )
-                    }
-              >
-                    {/* The one place the three paths differ. */}
-                    {apiMode ? (
-                      <OnboardingCardField
-                        label="API key"
-                        placeholder="Enter API key here"
-                        masked
-                        value={apiKey}
-                        onChange={setApiKey}
-                        disabled={phase === "connecting"}
-                        onSubmit={submitKey}
-                      />
-                    ) : handsOverCode ? (
-                      <OnboardingLoginCodeRow code={DISPLAYED_CODE} autoCopy={cardLive} />
+              {/* The one place the three paths differ. */}
+              {claudeCli ? (
+                <ClaudeCliSignInStatus companyId={PREVIEW_COMPANY_ID} />
+              ) : (
+                <OnboardingLoginCard
+                  loading={phase === "loading"}
+                  instruction={
+                    apiMode ? (
+                      // No link, because there is nowhere to sign in to. The
+                      // key is pasted straight in, so the sentence only has
+                      // to say what is wanted.
+                      `Provide your ${providerName} API key to connect`
                     ) : (
-                      <OnboardingCardField
-                        value={code}
-                        onChange={setCode}
-                        masked
-                        disabled={phase === "connecting"}
-                        onSubmit={() => {
-                          if (isValidBrowserCode(code.trim())) {
-                            setPhase("connecting");
-                            after(CONNECTED_HOLD_MS, () => setPhase("done"));
-                          }
-                        }}
-                        onPaste={() => {
-                          pastedRef.current = true;
-                        }}
-                      />
-                    )}
-                      </OnboardingLoginCard>
+                      <>
+                        {/* The same destination as the button below. Two ways
+                            to reach one link: the button for the customer
+                            following the flow, the anchor for anyone who
+                            wants to copy it into another browser. */}
+                        <a
+                          href={OPENAI_DEVICE_URL}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="underline underline-offset-2 hover:text-foreground"
+                        >
+                          {signInLabel}
+                        </a>
+                        {" by providing the authorization code below"}
+                      </>
+                    )
+                  }
+                >
+                  {apiMode ? (
+                    <OnboardingCardField
+                      label="API key"
+                      placeholder="Enter API key here"
+                      masked
+                      value={apiKey}
+                      onChange={setApiKey}
+                      disabled={phase === "connecting"}
+                      onSubmit={connectDirectly}
+                    />
+                  ) : (
+                    <OnboardingLoginCodeRow code={DISPLAYED_CODE} autoCopy={cardLive} />
+                  )}
+                </OnboardingLoginCard>
+              )}
             </motion.div>
           </>
         )}
@@ -476,11 +478,11 @@ function ConnectFlowPreview({
               return;
             }
             if (phase !== "ready") return;
-            if (apiMode) {
-              submitKey();
+            if (connectsDirectly) {
+              connectDirectly();
               return;
             }
-            window.open(authUrl, "_blank", "noreferrer,noopener");
+            window.open(OPENAI_DEVICE_URL, "_blank", "noreferrer,noopener");
             setPhase("waiting");
           }}
         />
@@ -489,12 +491,16 @@ function ConnectFlowPreview({
   );
 }
 
-/** `?state=` opens on a frame; everything stays clickable afterwards. */
+/**
+ * `?state=` opens on a frame; everything stays clickable afterwards. `ready`
+ * is Claude's CLI status; the sign-in frames are OpenAI's, since Claude has no
+ * in-app sign-in.
+ */
 const STATES: Record<string, { initialSourceId: string | null; initialPhase: Phase }> = {
   default: { initialSourceId: null, initialPhase: "idle" },
-  loading: { initialSourceId: "claude_local", initialPhase: "loading" },
+  loading: { initialSourceId: "codex_local", initialPhase: "loading" },
   ready: { initialSourceId: "claude_local", initialPhase: "ready" },
-  waiting: { initialSourceId: "claude_local", initialPhase: "waiting" },
+  waiting: { initialSourceId: "codex_local", initialPhase: "waiting" },
   openai: { initialSourceId: "codex_local", initialPhase: "ready" },
 };
 
@@ -503,10 +509,12 @@ const initial = STATES[requested] ?? STATES.default!;
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <div className="flex min-h-dvh justify-center">
-      <div className="my-auto">
-        <ConnectFlowPreview {...initial} />
+    <QueryClientProvider client={createPreviewQueryClient()}>
+      <div className="flex min-h-dvh justify-center">
+        <div className="my-auto">
+          <ConnectFlowPreview {...initial} />
+        </div>
       </div>
-    </div>
+    </QueryClientProvider>
   </StrictMode>,
 );

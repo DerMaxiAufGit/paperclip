@@ -454,7 +454,8 @@ export interface PluginDefinition {
   ): Promise<PluginEnvironmentDeleteTemplateResult>;
 
   /**
-   * Called to open one live Claude `setup-token` login pseudo-terminal.
+   * Called to open one live adapter device-login pseudo-terminal (the Codex and
+   * Grok device-auth flows).
    * The worker registers the terminal under the host route identifier and returns a
    * worker session identifier for the output notification binding only. The worker
    * streams output and the exit through `ctx.loginPty`, never as a reply.

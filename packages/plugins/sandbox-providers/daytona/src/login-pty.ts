@@ -1,9 +1,9 @@
-// The Daytona pseudo-terminal (PTY) session for the shared login flow. The login
-// command needs a real pseudo-terminal: pipe stdio emits no login prompt. The
-// Daytona SDK opens a PTY through `process.createPty`. This module binds that PTY
-// to a small session that the login PTY transport consumes, so the login runner
-// runs the command on a real terminal, streams the terminal output, and delivers
-// the delayed browser code plus the Enter byte.
+// The Daytona pseudo-terminal (PTY) session for the adapter device-login flow
+// (Codex and Grok). The login command needs a real pseudo-terminal: pipe stdio
+// emits no login prompt. The Daytona SDK opens a PTY through
+// `process.createPty`. This module binds that PTY to a small session that the
+// login PTY transport consumes, so the device-login runner runs the command on a
+// real terminal and streams the terminal output.
 //
 // Command contract: the host resolves a closed login command key and a validated
 // session home, and it carries them in a launch descriptor. The descriptor holds
@@ -11,9 +11,8 @@
 // caller cannot select or override the command. For the Codex key the module
 // composes `exec env CODEX_HOME=<encoded-home> <fixed-codex-command>`. For the
 // Grok key it composes `exec env GROK_HOME=<encoded-home> <fixed-grok-command>`.
-// For the Claude key it composes `exec <fixed-claude-command>` with no home
-// variable. The module encodes the dynamic home with a POSIX shell-argument
-// encoder, so the home cannot add a second shell token or a second command.
+// The module encodes the dynamic home with a POSIX shell-argument encoder, so the
+// home cannot add a second shell token or a second command.
 //
 // Session home: the module revalidates the descriptor and the home shape, then
 // creates the session home directory with one `mkdir -p` command. The command
@@ -38,11 +37,13 @@
 // `sandbox.process` with no adapter. The narrow surface keeps the module
 // unit-testable with a fake PTY and a fake filesystem.
 //
-// Security (secret handling): the login runner delivers the browser code and the
-// Enter byte through {@link DaytonaPtyHandle.sendInput}. The SDK sends the input
-// over the PTY socket, so the code never rides a command line and never reaches a
-// process argument list. The session forwards the raw terminal bytes with no ANSI
-// or OSC 8 handling; the login parser owns that handling.
+// Security (secret handling): the session sends any input through
+// {@link DaytonaPtyHandle.sendInput}. The SDK sends the input over the PTY
+// socket, so the input never rides a command line and never reaches a process
+// argument list. The device-login flow writes its credential inside the sandbox
+// session home; the session never reads it. The session forwards the raw
+// terminal bytes with no ANSI or OSC 8 handling; the login parser owns that
+// handling.
 
 import { randomUUID } from "node:crypto";
 
@@ -53,7 +54,7 @@ import { sendPtyInputInChunks } from "./pty-chunked-input.js";
  * compile-time command. A value outside this set fails closed before the module
  * touches the filesystem.
  */
-export type LoginCommandKey = "claude" | "codex" | "grok";
+export type LoginCommandKey = "codex" | "grok";
 
 /**
  * The host-resolved launch descriptor. It carries the closed command key and the
@@ -75,9 +76,14 @@ export interface LoginPtyLaunchDescriptor {
  * a command lands here and in the adapter constant together.
  */
 const LOGIN_COMMAND_BY_KEY: Readonly<Record<LoginCommandKey, string>> = {
-  claude: "claude setup-token",
   codex: "codex login --device-auth",
   grok: "grok login --device-auth",
+};
+
+/** The home variable each login command reads its session home from. */
+const LOGIN_HOME_ENV_BY_KEY: Readonly<Record<LoginCommandKey, string>> = {
+  codex: "CODEX_HOME",
+  grok: "GROK_HOME",
 };
 
 /** The fixed root for a login session home. */
@@ -109,29 +115,24 @@ export function encodePosixShellArg(value: string): string {
 
 /** Reports whether a value is a member of the closed login command key set. */
 export function isLoginCommandKey(value: unknown): value is LoginCommandKey {
-  return value === "claude" || value === "codex" || value === "grok";
+  return value === "codex" || value === "grok";
 }
 
 /**
  * Composes the launch line for the descriptor. The module reads only
- * {@link LOGIN_COMMAND_BY_KEY} and the closed command key on the descriptor, so
- * a command string smuggled onto the descriptor object confers no authority.
- * For the Codex key it prefixes one safely encoded `CODEX_HOME` assignment with
- * `env`. For the Grok key it prefixes one safely encoded `GROK_HOME` assignment
- * with `env`. For the Claude key it adds no home variable. It replaces the
- * interactive shell with the command through `exec`, so the pseudo-terminal
- * runs the command directly and its exit code becomes the PTY exit code.
+ * {@link LOGIN_COMMAND_BY_KEY}, {@link LOGIN_HOME_ENV_BY_KEY}, and the closed
+ * command key on the descriptor, so a command string smuggled onto the
+ * descriptor object confers no authority. It prefixes one safely encoded home
+ * assignment (`CODEX_HOME` for Codex, `GROK_HOME` for Grok) with `env`. It
+ * replaces the interactive shell with the command through `exec`, so the
+ * pseudo-terminal runs the command directly and its exit code becomes the PTY
+ * exit code.
  */
 export function composeLaunchLine(descriptor: LoginPtyLaunchDescriptor): string {
   const command = LOGIN_COMMAND_BY_KEY[descriptor.loginCommandKey];
+  const homeVariable = LOGIN_HOME_ENV_BY_KEY[descriptor.loginCommandKey];
   const encodedHome = encodePosixShellArg(descriptor.sessionHome);
-  if (descriptor.loginCommandKey === "codex") {
-    return `exec env CODEX_HOME=${encodedHome} ${command}`;
-  }
-  if (descriptor.loginCommandKey === "grok") {
-    return `exec env GROK_HOME=${encodedHome} ${command}`;
-  }
-  return `exec ${command}`;
+  return `exec env ${homeVariable}=${encodedHome} ${command}`;
 }
 
 /**
@@ -309,8 +310,8 @@ export async function openDaytonaLoginPtySession(
 
   await handle.waitForConnection();
   // Replace the interactive shell with the login command, so the pseudo-terminal
-  // runs the command directly. The runner then writes the delayed browser code
-  // to the command, not to a shell.
+  // runs the command directly. Any later input then reaches the command, not a
+  // shell.
   await handle.sendInput(composeLaunchLine(descriptor) + PTY_COMMAND_TERMINATOR);
 
   // The tail of the write chain. The chunker awaits each chunk, so one write can
@@ -399,8 +400,8 @@ export function createDaytonaLoginHomeFs(exec: DaytonaSandboxExec): DaytonaLogin
 /**
  * Creates a {@link LoginPtySessionOpener} bound to a Daytona `process` and a
  * {@link DaytonaLoginHomeFs}. The opener runs the login command on a real
- * pseudo-terminal, streams the terminal output, delivers the delayed browser code
- * plus the Enter byte, and stops the child for a terminal state.
+ * pseudo-terminal, streams the terminal output, and stops the child for a
+ * terminal state.
  */
 export function createDaytonaLoginPtySessionOpener(
   process: DaytonaPtyProcess,

@@ -234,12 +234,11 @@ export const CTA_LABEL_OUT = LINK_LABEL_FADE_OUT;
 export const CTA_LABEL_IN = LINK_LABEL_FADE_IN;
 
 /**
- * The deliberate pause between a pasted code being accepted and the step
- * advancing.
+ * The deliberate pause between a sign-in finishing and the step advancing.
  *
  * Not a fetch — the work is already done by the time this starts. It exists so
  * "Connecting" is legible as a state rather than a flicker on the way out: the
- * step advancing the instant a paste lands reads as the paste having gone
+ * step advancing the instant the sign-in lands reads as something having gone
  * wrong, because nothing acknowledged it. Two seconds is long enough to be read
  * and short enough not to feel stalled.
  */

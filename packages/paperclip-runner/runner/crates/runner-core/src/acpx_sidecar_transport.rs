@@ -96,7 +96,7 @@ impl AcpxSidecarTransport {
         agent: &str,
     ) -> Result<Self, LocalRunnerError> {
         let credential_keys: &[&str] = match agent {
-            "claude" => &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+            "claude" => &["ANTHROPIC_API_KEY"],
             "codex" => &["OPENAI_API_KEY", "CODEX_API_KEY"],
             _ => {
                 return Err(LocalRunnerError::invalid(

@@ -15,6 +15,11 @@ Current implementation status:
 - Node.js 24.11+
 - pnpm 9+
 
+To run `claude_local` agents on a Claude subscription, install Claude Code and
+sign in (`claude`, then `/login`) as the same operating system user that runs
+Paperclip. Paperclip never stores the sign-in; the `claude` binary reads it.
+See [Running Claude on a server](../docs/adapters/claude-local.md#running-claude-on-a-server).
+
 ## Dependency Lockfile Policy
 
 GitHub Actions owns `pnpm-lock.yaml`.
@@ -1029,11 +1034,13 @@ applies the same default to older runner rows whose model is missing or blank.
 
 For an Agent Chat test drive, enable **Agent Chat** in Experimental settings and
 configure two agents with Paperclip Runner: native Codex and ACPX Claude. Connect
-the Claude account through the agent's **AI connection** section (or supply an
-explicit supported provider credential); an ambient Claude CLI login alone is
-not a credential source for its isolated runner home. The default
-`approve-all` setting approves harness operations across assigned tools and
-connections, including provider-native tools. Company permissions, approval
+an Anthropic API key through the agent's **AI connection** section (or supply
+`ANTHROPIC_API_KEY`). The runner is a remote target, so ACPX Claude cannot use a
+Claude subscription: the server's `claude` CLI sign-in is not a credential
+source for its isolated runner home, and Paperclip never stores or forwards
+Claude sign-ins or `CLAUDE_CODE_OAUTH_TOKEN`. The default `approve-all` setting
+approves harness operations across assigned tools and connections, including
+provider-native tools. Company permissions, approval
 gates, and workspace isolation still apply. Explicit restrictive modes remain
 restrictive; omitted settings use full auto.
 

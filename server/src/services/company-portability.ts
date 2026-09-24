@@ -1,4 +1,4 @@
-import { agentAppearanceSchema } from "@paperclipai/shared";
+import { agentAppearanceSchema, isClaudeSubscriptionTokenEnvKey } from "@paperclipai/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { execFile } from "node:child_process";
@@ -3023,9 +3023,18 @@ function readIncludeEntries(frontmatter: Record<string, unknown>): CompanyPackag
   });
 }
 
+// A package may declare a Claude subscription token input (older exports did).
+// Paperclip never asks for, stores, or binds one: the imported agent uses the
+// claude CLI signed in on this server, or an API key. The skip is reported as
+// an import warning so the operator knows why the input is gone.
+function claudeSubscriptionTokenSkippedWarning(key: string, owner: string) {
+  return `Skipped ${key} for ${owner}: Claude subscriptions run through the claude CLI signed in on this server.`;
+}
+
 function readAgentEnvInputs(
   extension: Record<string, unknown>,
   agentSlug: string,
+  warnings: string[],
 ): CompanyPortabilityManifest["envInputs"] {
   const inputs = isPlainRecord(extension.inputs) ? extension.inputs : null;
   const env = inputs && isPlainRecord(inputs.env) ? inputs.env : null;
@@ -3033,6 +3042,10 @@ function readAgentEnvInputs(
 
   return Object.entries(env).flatMap(([key, value]) => {
     if (!isPlainRecord(value)) return [];
+    if (isClaudeSubscriptionTokenEnvKey(key)) {
+      warnings.push(claudeSubscriptionTokenSkippedWarning(key, `agent ${agentSlug}`));
+      return [];
+    }
     const record = value as EnvInputRecord;
     return [{
       key,
@@ -3050,6 +3063,7 @@ function readAgentEnvInputs(
 function readProjectEnvInputs(
   extension: Record<string, unknown>,
   projectSlug: string,
+  warnings: string[],
 ): CompanyPortabilityManifest["envInputs"] {
   const inputs = isPlainRecord(extension.inputs) ? extension.inputs : null;
   const env = inputs && isPlainRecord(inputs.env) ? inputs.env : null;
@@ -3057,6 +3071,10 @@ function readProjectEnvInputs(
 
   return Object.entries(env).flatMap(([key, value]) => {
     if (!isPlainRecord(value)) return [];
+    if (isClaudeSubscriptionTokenEnvKey(key)) {
+      warnings.push(claudeSubscriptionTokenSkippedWarning(key, `project ${projectSlug}`));
+      return [];
+    }
     const record = value as EnvInputRecord;
     return [{
       key,
@@ -3257,7 +3275,7 @@ function buildManifestFromPackageFiles(
       metadata: extensionMetadata,
     });
 
-    manifest.envInputs.push(...readAgentEnvInputs(extension, slug));
+    manifest.envInputs.push(...readAgentEnvInputs(extension, slug, warnings));
 
     if (frontmatter.kind && frontmatter.kind !== "agent") {
       warnings.push(`Agent markdown ${agentPath} does not declare kind: agent in frontmatter.`);
@@ -3400,7 +3418,7 @@ function buildManifestFromPackageFiles(
       workspaces,
       metadata: isPlainRecord(extension.metadata) ? extension.metadata : null,
     });
-    manifest.envInputs.push(...readProjectEnvInputs(extension, slug));
+    manifest.envInputs.push(...readProjectEnvInputs(extension, slug, warnings));
     if (frontmatter.kind && frontmatter.kind !== "project") {
       warnings.push(`Project markdown ${projectPath} does not declare kind: project in frontmatter.`);
     }
@@ -3675,6 +3693,8 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     actorUserId: string | null | undefined,
     createdSecretIds: string[] = [],
   ) {
+    // Never materialize a Claude subscription token, even if a caller passes one.
+    envInputs = envInputs.filter((input) => !isClaudeSubscriptionTokenEnvKey(input.key));
     if (envInputs.length === 0) return;
     const missingRequired = envInputs.filter((input) => {
       if (input.requirement !== "required") return false;

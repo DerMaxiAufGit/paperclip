@@ -79,3 +79,24 @@ it("preserves runtime warnings after a successful provider request", async () =>
     .mockResolvedValueOnce(ready);
   expect((await testAgentSetup(input)).status).toBe("warn");
 });
+it("fails a runner's Claude lane without an API key instead of passing on the server's claude sign-in", async () => {
+  testEnvironment.mockResolvedValueOnce(ready);
+  const result = await testAgentSetup({
+    ...input,
+    adapterConfig: { provider: "acpx", acpxAgent: "claude", env: {} },
+  });
+  expect(result.status).toBe("fail");
+  expect(result.checks.map((check) => check.code)).toContain("adapter_auth_missing");
+  // The claude_local CLI probe never ran.
+  expect(testEnvironment).toHaveBeenCalledTimes(1);
+});
+it("still runs the Claude CLI probe for a runner with a probe-only API key", async () => {
+  testEnvironment.mockResolvedValueOnce(ready).mockResolvedValueOnce(ready);
+  const result = await testAgentSetup({
+    ...input,
+    adapterConfig: { provider: "acpx", acpxAgent: "claude", env: {} },
+    testCredentials: { ANTHROPIC_API_KEY: "sk-ant-probe" },
+  });
+  expect(result.status).toBe("pass");
+  expect(testEnvironment).toHaveBeenCalledTimes(2);
+});

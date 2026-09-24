@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
 import type { DeploymentMode } from "@paperclipai/shared";
+import { isClaudeSubscriptionTokenEnvKey } from "@paperclipai/shared";
 import { instanceSettingsService, issueService } from "../services/index.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
@@ -247,14 +248,20 @@ export function boardChatRoutes(
       liveBoardChats -= 1;
     };
 
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      PAPERCLIP_API_URL: apiUrl,
+      PAPERCLIP_COMPANY_ID: companyId,
+    };
+    // Paperclip never forwards a Claude subscription credential: the `claude`
+    // binary uses the sign-in of the user Paperclip runs as.
+    for (const key of Object.keys(childEnv)) {
+      if (isClaudeSubscriptionTokenEnvKey(key)) delete childEnv[key];
+    }
     const proc = spawn("claude", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: "/tmp",
-      env: {
-        ...process.env,
-        PAPERCLIP_API_URL: apiUrl,
-        PAPERCLIP_COMPANY_ID: companyId,
-      },
+      env: childEnv,
     });
 
     let fullResponse = "";

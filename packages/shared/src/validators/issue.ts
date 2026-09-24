@@ -36,6 +36,7 @@ import {
   REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
+import { rejectClaudeSubscriptionTokenEnvKeys } from "./secret.js";
 import {
   lowTrustReviewPresetPolicySchema,
   trustAuthorizationPolicySchema,
@@ -295,7 +296,13 @@ export const issueExecutionWorkspaceSettingsSchema = z
 
 export const issueAssigneeAdapterOverridesSchema = z
   .object({
-    adapterConfig: z.record(z.string(), z.unknown()).optional(),
+    adapterConfig: z
+      .record(z.string(), z.unknown())
+      .superRefine((adapterConfig, ctx) => {
+        // An issue override never carries a Claude subscription credential.
+        rejectClaudeSubscriptionTokenEnvKeys(adapterConfig.env, ctx, ["env"]);
+      })
+      .optional(),
     useProjectWorkspace: z.boolean().optional(),
   })
   .strict();

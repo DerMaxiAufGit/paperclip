@@ -16,11 +16,11 @@ export function getConfigSchema(): AdapterConfigSchema {
         type: "select",
         default: "auto",
         options: [
-          { value: "auto", label: "Default (ACP)" },
+          { value: "auto", label: "Default (CLI, or ACP with an API key)" },
           { value: "cli", label: "Claude CLI" },
-          { value: "acp", label: "ACP" },
+          { value: "acp", label: "ACP (needs an Anthropic API key)" },
         ],
-        hint: "Default uses ACP. If ACP is unavailable, the run fails with a setup error. Choose CLI explicitly to use it.",
+        hint: "Default uses ACP when this server has an Anthropic API key for the agent, and otherwise the claude CLI signed in on this server. ACP always needs an Anthropic API key; without one the run fails with a setup error.",
       },
       {
         key: "agentCommand",

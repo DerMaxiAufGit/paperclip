@@ -1,13 +1,14 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { userEvent, within } from "storybook/test";
+import { expect, userEvent, within } from "storybook/test";
 import { NewAgentWizard } from "../prototypes/NewAgentWizard";
+import { resetOnboardingFixtureState, setOnboardingFixtureState } from "../fixtures/onboardingEnvironment";
 
 const meta = {
   title: "Onboarding/New agent",
   component: NewAgentWizard,
   parameters: {
     layout: "fullscreen",
-    docs: { description: { component: "Interactive design prototype: name → adapter → simulated creation → connection → configuration → confirmation. Each screen is directly inspectable below. All state is local to the story; subscription and API-key connections are simulated, and actual hiring is deferred. Use Start over to replay. The adapter and runner are fixed after creation." } },
+    docs: { description: { component: "Interactive design prototype: name → adapter → simulated creation → connection → configuration → confirmation. Each screen is directly inspectable below. All state is local to the story; subscription and API-key connections are simulated, and actual hiring is deferred. A Claude subscription is the claude CLI signed in on the server: the Claude tile shows its sign-in status from the auth-signal fixture, and Claude through a runner connects with an API key only. Use Start over to replay. The adapter and runner are fixed after creation." } },
   },
   argTypes: {
     testOutcome: { control: "select", options: ["pass", "fail"] },
@@ -51,9 +52,29 @@ export const ClaudeAdapterApiKey: Story = { name: "Connect · Claude adapter · 
 export const CodexAdapterApiKey: Story = { name: "Connect · Codex adapter · API key", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "codex_local", initialConnectionMethod: "api" } };
 export const ClaudeRunnerApiKey: Story = { name: "Connect · Claude runner · API key", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "paperclip_runner", initialRunnerProvider: "Claude (ACPX)", initialConnectionMethod: "api" } };
 export const CodexRunnerApiKey: Story = { name: "Connect · Native Codex runner · API key", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "paperclip_runner", initialRunnerProvider: "Codex (app server)", initialConnectionMethod: "api" } };
-export const ClaudeAdapterSubscription: Story = { name: "Connect · Claude adapter · Subscription", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "claude_local", initialConnectionWaiting: true } };
+export const ClaudeAdapterSubscription: Story = {
+  name: "Connect · Claude adapter · claude CLI signed in",
+  args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "claude_local", initialConnectionWaiting: true },
+  beforeEach: () => {
+    setOnboardingFixtureState({ authSignal: "present" });
+    return resetOnboardingFixtureState;
+  },
+  play: async ({ canvasElement }) => {
+    await expect(await within(canvasElement).findByText("The claude CLI on this server is signed in.")).toBeVisible();
+  },
+};
+export const ClaudeAdapterCliSignedOut: Story = {
+  name: "Connect · Claude adapter · claude CLI signed out",
+  args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "claude_local", initialConnectionWaiting: true },
+  beforeEach: () => {
+    resetOnboardingFixtureState();
+    return resetOnboardingFixtureState;
+  },
+  play: async ({ canvasElement }) => {
+    await expect(await within(canvasElement).findByText("The claude CLI on this server is not signed in.")).toBeVisible();
+  },
+};
 export const CodexAdapterSubscription: Story = { name: "Connect · Codex adapter · Subscription", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "codex_local", initialConnectionWaiting: true } };
-export const ClaudeRunnerSubscription: Story = { name: "Connect · Claude runner · Subscription", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "paperclip_runner", initialRunnerProvider: "Claude (ACPX)", initialConnectionWaiting: true } };
 export const CodexRunnerSubscription: Story = { name: "Connect · Native Codex runner · Subscription", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "paperclip_runner", initialRunnerProvider: "Codex (app server)", initialConnectionWaiting: true } };
 
 export const ConnectYourAgent: Story = { name: "Connect · Choose subscription or API key", args: { initialScreen: "connect", initialName: "Darnold", initialAdapter: "claude_local" } };

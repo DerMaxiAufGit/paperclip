@@ -40,16 +40,7 @@ import {
 import { logActivity } from "./activity-log.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
-import {
-  assertClaudeOAuthBindingInvariant,
-  claudeOAuthBindingsMatchExactly,
-  claudeOAuthClaimRejectedError,
-  CLAUDE_LOCAL_ADAPTER_TYPE,
-  readClaudeOAuthBinding,
-  secretService,
-  type ClaudeOAuthBindingInvariantDecision,
-} from "./secrets.js";
-import { createDbSetupTokenCleanupStore } from "./setup-token-session.js";
+import { secretService } from "./secrets.js";
 import {
   builtInAgentMarkersEqual,
   readBuiltInAgentMarker,
@@ -90,45 +81,15 @@ interface RevisionMetadata {
   rolledBackFromRevisionId?: string | null;
 }
 
-/**
- * The Claude login context for an agent write. The route derives the owner user
- * from the authenticated actor, not from the request body, and forwards the
- * non-secret `storedSessionId` claim from a completed Claude login session. A
- * controlled internal override permits a migration or an administrator repair to
- * bind or unbind the fixed OAuth token without a claim.
- *
- * The `applyExistingWithoutClaim` field is the user-actor apply-existing path.
- * The route sets it only for an authenticated user actor and derives the owner
- * from that actor. The path binds the fixed reference to the owner stored value
- * with no login round trip. It is distinct from `allowInternalBindingOverride`,
- * which does no ownership check.
- *
- * The `inheritedFromAgentId` field is the hire-inheritance path. The route
- * sets it only for an authenticated agent actor whose hire request inherited
- * the fixed reference from that named parent. The service re-reads the parent
- * agent inside the write transaction and binds the fixed reference only when
- * the parent exists, is in the same company, is a `claude_local` agent, and
- * already holds the exact fixed binding.
- */
-interface ClaudeLoginContext {
-  storedSessionId?: string | null;
-  ownerUserId?: string | null;
-  allowInternalBindingOverride?: boolean;
-  applyExistingWithoutClaim?: boolean;
-  inheritedFromAgentId?: string | null;
-}
-
 interface UpdateAgentOptions {
   recordRevision?: RevisionMetadata;
   allowBuiltInAgentMetadata?: boolean;
   allowPendingApprovalConfigUpdate?: boolean;
-  claudeLogin?: ClaudeLoginContext;
 }
 
 interface CreateAgentOptions {
   aiConnectionInstall?: { connectionId: string; createdByUserId: string | null };
   allowBuiltInAgentMetadata?: boolean;
-  claudeLogin?: ClaudeLoginContext;
 }
 
 interface AgentShortnameRow {
@@ -553,134 +514,6 @@ export function agentService(db: Db) {
     }
   }
 
-  /**
-   * Enforces the Claude OAuth binding claim inside a write transaction. It runs
-   * after {@link assertClaudeOAuthBindingInvariant} decided that the write
-   * introduces or keeps the fixed binding.
-   *
-   * When the write introduces the fixed binding:
-   *   * A create or hire path (`consume: true`) consumes a stored-session claim
-   *     with one conditional write. It builds the claim scope from the company,
-   *     the owner user, the fixed adapter, the environment, and the
-   *     `storedSessionId`. It inserts the binding only when the write returns one
-   *     row; otherwise it raises the fixed claim error, which rolls back the
-   *     whole transaction and inserts no binding.
-   *   * An update, approval, or rollback path (`consume: false`) carries no
-   *     claim, so it raises the same fixed claim error at once.
-   *
-   * The user-actor apply-existing path (`applyExistingWithoutClaim`) binds the
-   * fixed reference with no login round trip. The route sets the flag only for
-   * an authenticated user actor and derives the owner from that actor. The gate
-   * permits the no-claim bind only when the owner already has a stored value for
-   * the company. It reads the owner value status; it reads no token. A missing
-   * owner or a missing stored value raises the same fixed claim error, so the
-   * caller cannot tell the reasons apart.
-   *
-   * The hire-inheritance path (`inheritedFromAgentId`) binds the fixed
-   * reference with no login round trip and no stored owner value, because the
-   * owning user resolves per run, not from a value stored against this agent.
-   * The route copies the parent's reference onto the child before this
-   * transaction starts, so a concurrent version change on the parent can
-   * leave the child holding a stale version. The gate re-reads the named
-   * parent agent inside this transaction and permits the bind only when the
-   * parent exists, is in the same company, is a `claude_local` agent, and its
-   * current reference matches the child's copied reference exactly, including
-   * the version selector. The gate locks the parent row with `SELECT ...
-   * FOR UPDATE` before it reads the reference. The lock blocks a concurrent
-   * credential rotation on the same parent row until this transaction
-   * commits or rolls back, so the compare-and-bind check stays atomic with
-   * the parent's current state. The route derives the parent identifier
-   * from the authenticated agent actor, never from the request body, so the
-   * gate treats it as a claim to verify, not a trusted value.
-   *
-   * A controlled internal override skips the claim for a migration or an
-   * administrator repair. The function creates the fixed user-secret definition
-   * before the caller runs the declaration synchronization, so the synchronized
-   * declaration always references an existing definition.
-   */
-  async function enforceClaudeOAuthBindingClaim(
-    txDb: Db,
-    input: {
-      companyId: string;
-      decision: ClaudeOAuthBindingInvariantDecision;
-      consume: boolean;
-      environmentId: string | null;
-      claudeLogin?: ClaudeLoginContext;
-      /**
-       * The adapter config the write is about to persist. The
-       * `inheritedFromAgentId` path reads the child's copied
-       * `CLAUDE_CODE_OAUTH_TOKEN` reference from it, to compare against the
-       * parent's current reference.
-       */
-      childAdapterConfig?: unknown;
-    },
-  ): Promise<void> {
-    const ownerUserId = input.claudeLogin?.ownerUserId ?? null;
-    if (input.decision.introducesBinding && !input.claudeLogin?.allowInternalBindingOverride) {
-      if (input.claudeLogin?.applyExistingWithoutClaim) {
-        // The user-actor apply-existing path. The route derived the owner from
-        // the authenticated user actor. The gate binds the fixed reference only
-        // when that owner already has a stored value. It reads no token.
-        if (!ownerUserId) {
-          throw claudeOAuthClaimRejectedError();
-        }
-        const stored = await secretService(txDb).readClaudeOAuthUserSecretStatus(
-          input.companyId,
-          ownerUserId,
-        );
-        if (!stored) {
-          throw claudeOAuthClaimRejectedError();
-        }
-      } else if (input.claudeLogin?.inheritedFromAgentId) {
-        // The hire-inheritance path. Re-read the named parent inside this
-        // transaction; a caller-supplied identifier never binds on its own.
-        // Compare the parent's current reference against the reference
-        // already copied onto the child, including the version selector, so
-        // a concurrent version change on the parent cannot leave the child
-        // bound to a stale version.
-        const parentId = input.claudeLogin.inheritedFromAgentId;
-        const parent = await txDb
-          .select({
-            companyId: agents.companyId,
-            adapterType: agents.adapterType,
-            adapterConfig: agents.adapterConfig,
-          })
-          .from(agents)
-          .where(eq(agents.id, parentId))
-          .for("update")
-          .then((rows) => rows[0] ?? null);
-        const parentBinding = readClaudeOAuthBinding(parent?.adapterConfig ?? null);
-        const childBinding = readClaudeOAuthBinding(input.childAdapterConfig ?? null);
-        if (
-          !parent ||
-          parent.companyId !== input.companyId ||
-          parent.adapterType !== CLAUDE_LOCAL_ADAPTER_TYPE ||
-          !claudeOAuthBindingsMatchExactly(parentBinding, childBinding)
-        ) {
-          throw claudeOAuthClaimRejectedError();
-        }
-      } else if (!input.consume) {
-        throw claudeOAuthClaimRejectedError();
-      } else {
-        const consumed = await createDbSetupTokenCleanupStore(txDb).consumeStoredClaim({
-          sessionId: input.claudeLogin?.storedSessionId ?? "",
-          companyId: input.companyId,
-          ownerUserId: ownerUserId ?? "",
-          adapterType: CLAUDE_LOCAL_ADAPTER_TYPE,
-        });
-        if (!consumed) {
-          throw claudeOAuthClaimRejectedError();
-        }
-      }
-    }
-    if (input.decision.introducesBinding || input.decision.keepsBinding) {
-      // Create the fixed definition before declaration synchronization.
-      await secretService(txDb).ensureClaudeOAuthUserSecretDefinition(input.companyId, {
-        userId: ownerUserId,
-      });
-    }
-  }
-
   function assertBuiltInAgentMetadataMutationAllowed(
     beforeMetadata: unknown,
     afterMetadata: unknown,
@@ -771,18 +604,6 @@ export function agentService(db: Db) {
         existing.adapterConfig,
       );
     }
-    // Run the server-enforced binding invariant when the patch touches the
-    // adapter config. The update, approval, and rollback paths keep an existing
-    // fixed binding but reject a newly introduced binding, because they carry no
-    // stored-session claim.
-    const bindingDecision = Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig")
-      ? assertClaudeOAuthBindingInvariant({
-          adapterType: (normalizedPatch.adapterType ?? existing.adapterType) as string,
-          nextConfig: normalizedPatch.adapterConfig,
-          priorConfig: existing.adapterConfig,
-        })
-      : null;
-
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
@@ -809,15 +630,6 @@ export function agentService(db: Db) {
       }
 
       if (Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig")) {
-        if (bindingDecision) {
-          await enforceClaudeOAuthBindingClaim(txDb, {
-            companyId: existing.companyId,
-            decision: bindingDecision,
-            consume: false,
-            environmentId: null,
-            claudeLogin: options?.claudeLogin,
-          });
-        }
         await syncAgentSecretBindings(
           updated,
           txDb,
@@ -895,26 +707,8 @@ export function agentService(db: Db) {
         ? await secretsSvc.normalizeAdapterConfigForPersistence(companyId, data.adapterConfig, { adapterType })
         : {};
       const adapterConfig = normalizePaperclipRunnerAdapterConfig(adapterType, rawAdapterConfig);
-      // Run the server-enforced binding invariant after generic normalization
-      // and before any database write. A create has no prior config.
-      const bindingDecision = assertClaudeOAuthBindingInvariant({
-        adapterType,
-        nextConfig: adapterConfig,
-        priorConfig: null,
-      });
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
-        // Consume the stored-session claim and create the fixed definition inside
-        // the same transaction that inserts the binding. A rejected claim rolls
-        // back the whole transaction and inserts no binding.
-        await enforceClaudeOAuthBindingClaim(txDb, {
-          companyId,
-          decision: bindingDecision,
-          consume: true,
-          environmentId: (data.defaultEnvironmentId as string | null | undefined) ?? null,
-          claudeLogin: options?.claudeLogin,
-          childAdapterConfig: adapterConfig,
-        });
         const created = await tx
           .insert(agents)
           .values({
@@ -1099,7 +893,6 @@ export function agentService(db: Db) {
         if (!existing || existing.status !== "pending_approval") return null;
         const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
         let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
-        let approvalBindingDecision: ClaudeOAuthBindingInvariantDecision | null = null;
         if (
           Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
           isPlainRecord(patch.adapterConfig)
@@ -1113,13 +906,6 @@ export function agentService(db: Db) {
             (patch.adapterType ?? existing.adapterType) as string,
             normalizedAdapterConfig,
           );
-          // The approval activation keeps an existing fixed binding but rejects a
-          // newly introduced binding, because it carries no stored-session claim.
-          approvalBindingDecision = assertClaudeOAuthBindingInvariant({
-            adapterType: (patch.adapterType ?? existing.adapterType) as string,
-            nextConfig: patch.adapterConfig,
-            priorConfig: existing.adapterConfig,
-          });
         } else if (
           Object.prototype.hasOwnProperty.call(patch, "adapterType")
           && isPlainRecord(existing.adapterConfig)
@@ -1141,14 +927,6 @@ export function agentService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
         if (!updated) return null;
-        if (approvalBindingDecision) {
-          await enforceClaudeOAuthBindingClaim(txDb, {
-            companyId: existing.companyId,
-            decision: approvalBindingDecision,
-            consume: false,
-            environmentId: null,
-          });
-        }
         await syncAgentSecretBindings(updated, txDb, existing.adapterConfig);
         const agent = await agentService(txDb).getById(updated.id);
         if (!agent) {

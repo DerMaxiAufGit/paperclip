@@ -509,12 +509,6 @@ function Setup({
           (forced.forced || managedOnly ? environmentId : null),
         runtimeConfig: { ...buildNewAgentRuntimeConfig({ heartbeatEnabled: false }), ...(aiBinding ? { aiConnection: aiBinding } : {}) },
         budgetMonthlyCents: 0,
-        ...(connection?.storedSessionId
-          ? { storedSessionId: connection.storedSessionId }
-          : {}),
-        ...(connection?.applyStoredClaudeLogin
-          ? { applyStoredClaudeLogin: true }
-          : {}),
       });
       hired = true;
       setApiKey("");
@@ -713,7 +707,11 @@ function Setup({
                     <div className="mb-8">
                       <OnboardingHeading
                         title="Connect a model"
-                        lede={`Connect ${name} to ${connectionAdapter === "claude_local" ? "Claude" : connectionAdapter === "grok_local" ? "Grok" : "OpenAI"}.`}
+                        lede={
+                          isRunner && connectionAdapter === "claude_local"
+                            ? `Connect ${name} to Claude with an Anthropic API key. Claude on a Paperclip Runner always needs an API key.`
+                            : `Connect ${name} to ${connectionAdapter === "claude_local" ? "Claude" : connectionAdapter === "grok_local" ? "Grok" : "OpenAI"}.`
+                        }
                         center
                       />
                     </div>
@@ -724,6 +722,7 @@ function Setup({
                       environmentId={environmentId}
                       canLogin={canLogin}
                       localEnvironment={environment?.driver === "local"}
+                      apiKeyOnly={isRunner && connectionAdapter === "claude_local"}
                       onBack={() => navigate("/agents/all")}
                       testConnection={runTest}
                       testError={

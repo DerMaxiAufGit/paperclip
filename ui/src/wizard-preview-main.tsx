@@ -26,13 +26,11 @@ import "./index.css";
 
 const COMPANY = { id: "company-preview", name: "Initech", issuePrefix: "INI" };
 const SESSION_ID = "preview-session";
-const AUTH_URL = "https://claude.ai/oauth/authorize?code=true&client=paperclip";
 const OPENAI_URL = "https://auth.openai.com/codex/device";
 
 /** How long the fake server takes to produce a prompt. */
 const PROMPT_LATENCY_MS = 1200;
 let sessionStartedAt = 0;
-let authenticated = false;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -60,9 +58,9 @@ function respond(pathname: string, method: string): Response {
   if (has("/instance/settings/experimental")) return json({ enableConferenceRoomChat: true });
   if (has("/instance/settings")) return json({ defaultEnvironmentId: "env-sandbox" });
 
-  // No credential anywhere, which is what makes the step offer a sign-in.
+  // No credential anywhere. Codex offers a sign-in; Claude shows the claude
+  // CLI on the server as not signed in, with the steps to sign it in.
   if (has("/auth-signal")) return json({ status: "absent" });
-  if (has("/claude-oauth-token-status")) return json({}, 404);
   if (pathname.endsWith("/models")) return json([]);
 
   if (pathname.endsWith("/environments/capabilities"))
@@ -100,12 +98,18 @@ function respond(pathname: string, method: string): Response {
       },
     ]);
 
+  // Claude has no in-app login: its subscription is the claude CLI signed in
+  // on the server. Only Codex declares one.
   if (pathname.endsWith("/adapters"))
     return json(
       [
-        ["claude_local", "Claude Code", "submitted_browser_code", "fixed"],
-        ["codex_local", "Codex", "displayed_code", "caller_bounded"],
-      ].map(([type, label, panelMode, timeoutPolicy]) => ({
+        { type: "claude_local", label: "Claude Code" },
+        {
+          type: "codex_local",
+          label: "Codex",
+          login: { panelMode: "displayed_code", timeoutPolicy: "caller_bounded" },
+        },
+      ].map(({ type, label, login }) => ({
         type,
         label,
         source: "builtin",
@@ -118,39 +122,10 @@ function respond(pathname: string, method: string): Response {
           supportsLocalAgentJwt: true,
           requiresMaterializedRuntimeSkills: false,
           supportsAcp: true,
-          login: { panelMode, timeoutPolicy },
+          ...(login ? { login } : {}),
         },
       })),
     );
-
-  // The browser-code login: a session, then a prompt once the latency passes.
-  if (has("/setup-token-login-sessions")) {
-    if (has("/prompt")) {
-      const ready = Date.now() - sessionStartedAt > PROMPT_LATENCY_MS;
-      return ready ? json({ authorizationUrl: AUTH_URL, transportAdvisory: null }) : json({}, 404);
-    }
-    if (has("/completion")) return json({ storedSessionId: "stored-preview" });
-    if (has("/code")) {
-      // Accepted, and the next status read reports the login authenticated.
-      authenticated = true;
-      return json({ sessionId: SESSION_ID, status: "authenticated" });
-    }
-    if (has("/cancel")) return json({});
-    if (method === "POST") {
-      sessionStartedAt = Date.now();
-      authenticated = false;
-      return json({
-        sessionId: SESSION_ID,
-        status: "pending",
-        expiresAt: new Date(Date.now() + 600_000).toISOString(),
-      });
-    }
-    return json({
-      sessionId: SESSION_ID,
-      status: authenticated ? "authenticated" : "pending",
-      expiresAt: new Date(Date.now() + 600_000).toISOString(),
-    });
-  }
 
   // The displayed-code login: one session that hands a code over.
   if (has("/login-sessions")) {

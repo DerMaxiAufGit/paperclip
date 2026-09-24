@@ -49,7 +49,6 @@ describe("buildLocalAdapterTestProbeEnv", () => {
     const built = await buildLocalAdapterTestProbeEnv({
       callerEnv: {
         ANTHROPIC_API_KEY: "api-key-value",
-        CLAUDE_CODE_OAUTH_TOKEN: "oauth-token-value",
         CLAUDE_CODE_USE_BEDROCK: "1",
         ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock.example",
         AWS_ACCESS_KEY_ID: "aws-key",
@@ -60,13 +59,25 @@ describe("buildLocalAdapterTestProbeEnv", () => {
       trustedEnv: { PATH: dir },
     });
     expect(built.env.ANTHROPIC_API_KEY).toBe("api-key-value");
-    expect(built.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-token-value");
     expect(built.env.CLAUDE_CODE_USE_BEDROCK).toBe("1");
     expect(built.env.ANTHROPIC_BEDROCK_BASE_URL).toBe("https://bedrock.example");
     expect(built.env.AWS_ACCESS_KEY_ID).toBe("aws-key");
     expect(built.env.AWS_SECRET_ACCESS_KEY).toBe("aws-secret");
     expect(built.env.AWS_REGION).toBe("us-east-1");
     expect(built.env.CLAUDE_CONFIG_DIR).toBe("/managed/config");
+  });
+
+  it("never takes a Claude subscription token from the caller env", async () => {
+    const { dir } = await makeTrustedPathWithClaude();
+    const built = await buildLocalAdapterTestProbeEnv({
+      callerEnv: {
+        CLAUDE_CODE_OAUTH_TOKEN: "oauth-token-value",
+        claude_code_oauth_token: "oauth-token-lower",
+      },
+      trustedEnv: { PATH: dir, CLAUDE_CODE_OAUTH_TOKEN: "host-oauth-token" },
+    });
+    expect(Object.keys(built.env).map((key) => key.toUpperCase())).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(JSON.stringify(built.env)).not.toContain("oauth-token");
   });
 
   it("drops hostile loader, PATH, shell-startup, and Windows interpreter keys", async () => {

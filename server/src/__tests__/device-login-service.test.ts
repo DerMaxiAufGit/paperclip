@@ -1911,7 +1911,7 @@ describeEmbeddedPostgres("device login service concurrency (embedded postgres)",
       expect(pending.map((row) => row.id)).toContain(pendingId);
     });
 
-    it("the orphan lease scan includes a session row of a second displayed-code adapter, and excludes a Claude setup-token row", async () => {
+    it("the orphan lease scan includes a session row of a second displayed-code adapter, and excludes a row of an adapter outside the set", async () => {
       const { companyId, environmentId } = await seedCompanyEnvironment();
       const reaperRuntime = createProductionLoginSessionReaperRuntime({
         db,
@@ -1945,8 +1945,8 @@ describeEmbeddedPostgres("device login service concurrency (embedded postgres)",
         metadata: { [LOGIN_LEASE_SESSION_TAG_KEY]: grokSessionId },
       });
 
-      // A Claude setup-token row in a second environment, in the shared
-      // `cleanup_pending` state the two login flows both use. `claude_local` is
+      // A leftover row of another adapter type (a legacy `claude_local` row) in
+      // a second environment, in the `cleanup_pending` state. `claude_local` is
       // outside the displayed-code adapter set, and no other row makes this
       // second environment a scan candidate, so the scan must never read it.
       const claudeEnvironmentId = await seedEnvironment(companyId);

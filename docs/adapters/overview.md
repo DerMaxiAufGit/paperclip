@@ -18,7 +18,7 @@ When a heartbeat fires, Paperclip:
 
 | Adapter | Type Key | Description |
 |---------|----------|-------------|
-| [Claude Code](/adapters/claude-local) | `claude_local` | Runs Claude Code CLI locally, with a native ACP engine when available |
+| [Claude Code](/adapters/claude-local) | `claude_local` | Runs the Claude Code CLI on the Paperclip server by default; the optional ACP engine needs an Anthropic API key |
 | [Codex](/adapters/codex-local) | `codex_local` | Runs OpenAI Codex CLI locally, with a native ACP engine when available |
 | [Gemini CLI](/adapters/gemini-local) | `gemini_local` | Runs Gemini CLI locally (experimental — adapter package exists, not yet in stable type enum) |
 | [Kimi Code CLI](/adapters/kimi-local) | `kimi_local` | Runs Kimi Code CLI locally through ACP, with explicitly selectable headless `-p` mode |
@@ -40,7 +40,7 @@ before the CLI starts:
 | Adapter | Credential topology | Which credential file wins on managed sandbox targets |
 |---------|---------------------|-------------------------------------------------------|
 | [`codex_local`](/adapters/codex-local) | Host-owns-auth for Paperclip-managed `CODEX_HOME` | A host-owned `auth.json` is symlinked into the managed `CODEX_HOME` and uploaded to the sandbox. If a per-agent `OPENAI_API_KEY` is configured, Paperclip writes an API-key `auth.json` instead and that file wins. A login baked into the sandbox image is shadowed because Codex runs with Paperclip's uploaded `CODEX_HOME`. |
-| [`claude_local`](/adapters/claude-local) | Snapshot-owns-auth for managed remote Claude config | A configured `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (agent or environment env) wins over any stored login. Otherwise Paperclip uploads only sanitized settings and skill/runtime assets, and when the remote managed config has no Claude credential files it copies `.credentials.json` or `credentials.json` from the sandbox image's own `$HOME/.claude`, so the image's login wins. |
+| [`claude_local`](/adapters/claude-local) | API key only on remote targets | Remote targets need `ANTHROPIC_API_KEY` (agent or environment env, or an Anthropic AI connection) or Bedrock/Vertex configuration; a run without one fails before launch. Paperclip uploads only sanitized settings and skill/runtime assets. It never uploads or copies a Claude sign-in file, including one baked into the sandbox image. A Claude subscription works only with the CLI engine on the Paperclip server, where `claude` uses the sign-in of the Paperclip user. |
 
 Worked examples:
 
@@ -48,10 +48,12 @@ Worked examples:
   is symlinked into the managed home, then uploaded as the sandbox
   `CODEX_HOME`. Codex reads that uploaded file and does not use any
   `auth.json` already present inside the sandbox image.
-- **Claude sandbox with image login:** Paperclip materializes a remote
-  `CLAUDE_CONFIG_DIR`, then fills missing `.credentials.json` /
-  `credentials.json` from the sandbox image's own `$HOME/.claude`. The
-  snapshot's Claude login is the credential source for the run.
+- **Claude sandbox:** Paperclip materializes a remote `CLAUDE_CONFIG_DIR`
+  with sanitized settings only, and the run authenticates with
+  `ANTHROPIC_API_KEY`. A Claude login baked into the sandbox image is not
+  copied into that directory. To run Claude on a subscription, use the CLI
+  engine on the Paperclip server. See
+  [Running Claude on a server](/adapters/claude-local#running-claude-on-a-server).
 
 ### Hermes local vs gateway
 
@@ -116,7 +118,7 @@ my-adapter/
 ## Choosing an Adapter
 
 - **Need a coding agent?** Use `claude_local`, `codex_local`, `opencode_local`, `hermes_local`, or install `droid_local` as an external plugin
-- **Need the richest live run feedback?** Use `claude_local`, `codex_local`, or `gemini_local` with `adapterConfig.engine` set to `acp` when the execution environment satisfies the ACP prerequisites — see [Feedback granularity](#feedback-granularity)
+- **Need the richest live run feedback?** Use `claude_local`, `codex_local`, or `gemini_local` with `adapterConfig.engine` set to `acp` when the execution environment satisfies the ACP prerequisites — see [Feedback granularity](#feedback-granularity). For `claude_local`, the ACP engine needs an Anthropic API key; a Claude subscription runs only on the default CLI engine.
 - **Need Hermes on another host or already running as a service?** Use `hermes_gateway`
 - **Need to run a script or command?** Use `process`
 - **Need to call a custom external service?** Use `http`
@@ -132,7 +134,7 @@ Rough tiers, richest first:
 2. **CLI wrappers (`claude_local`, `codex_local`, `cursor`, `opencode_local`, …).** These parse each CLI's own streaming JSON output. You get assistant text, tool calls/results, and a final usage/cost summary, but granularity is limited to what the CLI prints — some emit tool progress, others only call/finish pairs.
 3. **Generic adapters (`process`, `http`).** Plain stdout/stderr lines with no structured transcript — you see raw output only.
 
-**Recommendation:** use the native ACP engine on `claude_local`, `codex_local`, or `gemini_local` when the selected execution environment supports it. Rich ACP status events (including context usage) and incremental tool-call updates give the closest thing to watching the agent work locally.
+**Recommendation:** use the native ACP engine on `claude_local`, `codex_local`, or `gemini_local` when the selected execution environment supports it. Rich ACP status events (including context usage) and incremental tool-call updates give the closest thing to watching the agent work locally. `claude_local` defaults to ACP only when the run on the Paperclip server has an Anthropic API credential (API key, gateway token, or Bedrock/Vertex/Foundry), and to the CLI engine otherwise. Agents that run on a Claude subscription stay on the CLI engine.
 
 ## UI Parser Contract
 

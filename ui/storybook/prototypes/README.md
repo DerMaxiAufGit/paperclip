@@ -9,10 +9,12 @@ pnpm --filter @paperclipai/ui exec storybook dev --port 6010 --host 127.0.0.1 --
 ## Existing onboarding
 
 **Onboarding → Agent arc** mounts the shipped `OnboardingWizard` against API
-fixtures. The four **Connect · ...** stories walk from naming the agent to the
-actual Claude/OpenAI subscription and API-key screens. Claude shows the returned
-authorization-code field; Codex/OpenAI shows its device code. They stop at the
-connection prompt for visual review. They do not authorize real provider accounts.
+fixtures. The **Connect · ...** stories walk from naming the agent to the
+actual Claude/OpenAI connection screens. A Claude subscription is the `claude`
+CLI signed in on the Paperclip server, so the Claude tile shows that sign-in
+status (from the auth-signal fixture) or takes an API key; Codex/OpenAI shows
+its device code. They stop at the connection prompt for visual review. They do
+not authorize real provider accounts.
 
 **Onboarding → Connect a model** remains the older tile/mode design preview, not
 the shipped flow. Use Agent arc to inspect current onboarding behavior.
@@ -37,18 +39,21 @@ existing model lists. Every model starts on **Default**. Adapters without a
 bundled list show Default until runtime discovery is wired up. Every model picker
 also accepts a custom model ID through the shipped dropdown’s creatable option.
 
-Claude and Codex offer subscription or API-key connections, directly and through
-their runners. Eight **Connect · ...** stories expose those combinations.
+Codex offers subscription or API-key connections, directly and through its
+runner. Claude offers the `claude` CLI signed in on the server (shown with the
+shipped `ClaudeCliSignInStatus`) or an API key directly, and an API key only
+through its runner. The **Connect · ...** stories expose those combinations.
 **Connect · Choose subscription or API key** starts before selecting a method.
 The connection step reuses `ModelSourceTiles`, `CredentialModeLink`,
 `OnboardingLoginCard`, `OnboardingCardField`, `OnboardingLoginCodeRow`,
-`OnboardingCard`, `OnboardingHeading`, and `FooterNav`, plus the existing
+`ClaudeCliSignInStatus`, `OnboardingCard`, `OnboardingHeading`, and
+`FooterNav`, plus the existing
 onboarding motion constants for the source collapse, card reveal, button labels,
 and connecting hold. Only the already-selected provider is offered.
 
-The provider lifecycle is simulated locally. Use example keys/codes. Claude
-accepts a pasted code or Enter; Codex has a separate **Simulate completed sign-in**
-preview control. No keys or codes are persisted or sent to a provider. Completion
+The provider lifecycle is simulated locally. Use example keys. Codex has a
+separate **Simulate completed sign-in** preview control. No keys are persisted
+or sent to a provider. Completion
 advances to configuration. Direct configuration and confirmation stories seed a
 completed connection so each screen can be reviewed independently.
 
@@ -57,8 +62,9 @@ screen directly. Finish setup reaches that screen interactively; Edit configurat
 preserves the choices, and Start over clears them.
 
 These stories remain isolated design fixtures. The production implementation now
-lives in `ui/src/components/new-agent/`, with real hiring, subscription login,
-secret storage, provider probes, and task assignment. OpenCode and Pi support
+lives in `ui/src/components/new-agent/`, with real hiring, Codex and Grok
+subscription login, the Claude CLI sign-in status, secret storage, provider
+probes, and task assignment. OpenCode and Pi support
 provider environment variables, including saved OpenRouter secrets. The real
 configuration page uses the same compact test card and shared settings styles.
 See `docs/specs/agent-config-ui.md` for the current workflow. Environment choices

@@ -21,16 +21,8 @@ describe("assertValidAdapterLoginCapability", () => {
     expect(() => assertValidAdapterLoginCapability(validCapability(), "vendor")).not.toThrow();
   });
 
-  it("accepts a well-formed capability with every optional member set", () => {
-    const capability: AdapterLoginCapability = {
-      panelMode: "submitted_browser_code",
-      timeoutPolicy: "fixed",
-      getCommand: () => "vendor setup-token",
-      parsePrompt: () => null,
-      captureCredential: () => null,
-      onComplete: async () => {},
-      completionClaim: "storedSessionId",
-    };
+  it("accepts the fixed timeout policy", () => {
+    const capability: AdapterLoginCapability = { ...validCapability(), timeoutPolicy: "fixed" };
     expect(() => assertValidAdapterLoginCapability(capability, "vendor")).not.toThrow();
   });
 
@@ -59,21 +51,6 @@ describe("assertValidAdapterLoginCapability", () => {
   it("rejects a missing parsePrompt", () => {
     const bad = { ...validCapability(), parsePrompt: undefined };
     expect(() => assertValidAdapterLoginCapability(bad, "vendor")).toThrow(/parsePrompt/);
-  });
-
-  it("rejects a non-function captureCredential", () => {
-    const bad = { ...validCapability(), captureCredential: "token" };
-    expect(() => assertValidAdapterLoginCapability(bad, "vendor")).toThrow(/captureCredential/);
-  });
-
-  it("rejects a non-function onComplete", () => {
-    const bad = { ...validCapability(), onComplete: true };
-    expect(() => assertValidAdapterLoginCapability(bad, "vendor")).toThrow(/onComplete/);
-  });
-
-  it("rejects an unknown completionClaim", () => {
-    const bad = { ...validCapability(), completionClaim: "storedToken" };
-    expect(() => assertValidAdapterLoginCapability(bad, "vendor")).toThrow(/completionClaim/);
   });
 
   it("names the adapter in the error text", () => {

@@ -11,6 +11,7 @@ import { aiConnectionsApi } from "@/api/ai-connections";
 import { AiConnectionPicker } from "./AiConnectionPicker";
 import { AiConnectionLegacyNotice } from "./AiConnectionManagement";
 import { AiConnectionCredentialStep } from "./AiConnectionCredentialStep";
+import { AI_PROVIDERS, aiMethodSupported, defaultAiMethod } from "./model";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -72,10 +73,11 @@ export function AiConnectionField({
     queryFn: () => aiConnectionsApi.list(companyId, agentId),
     enabled: Boolean(provider),
   });
-  const method: AiAuthMethod = (value?.mode !== "responsible_user" ? value?.method : undefined)
-    ?? accounts.data?.connections.find((account) => account.provider === provider && account.isDefault)?.method
-    ?? (provider === "openrouter" ? "api_key" : "subscription");
   if (!provider) return null;
+  const defaultMethod = accounts.data?.connections.find((account) => account.provider === provider && account.isDefault)?.method;
+  const method: AiAuthMethod = (value?.mode !== "responsible_user" ? value?.method : undefined)
+    ?? (defaultMethod && aiMethodSupported(provider, defaultMethod) ? defaultMethod : undefined)
+    ?? defaultAiMethod(provider);
   if (legacy && !value && !adopting)
     return (
       <AiConnectionLegacyNotice
@@ -160,18 +162,18 @@ export function AiConnectionField({
             companyId={companyId}
             provider={provider}
             initialMethod={method}
-            name={`My ${provider === "anthropic" ? "Claude" : provider === "openai" ? "OpenAI" : provider === "xai" ? "Grok" : "OpenRouter"} ${method === "subscription" ? "subscription" : "API"}`}
+            name={`My ${AI_PROVIDERS[provider].name} ${method === "subscription" ? "subscription" : "API"}`}
             ownership="personal"
             agentIds={agentId ? [agentId] : []}
             allAgents={false}
             environmentId={environmentId}
             onCancel={() => setConnecting(false)}
-            onComplete={() => {
+            onComplete={(result) => {
               void client.invalidateQueries({
                 queryKey: ["ai-connections", companyId],
               });
               setConnecting(false);
-              changeBinding({ provider, method, mode: "responsible_user" });
+              changeBinding({ provider, method: result.method, mode: "responsible_user" });
             }}
           />
         </DialogContent>

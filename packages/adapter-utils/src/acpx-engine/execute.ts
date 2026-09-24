@@ -56,6 +56,7 @@ import {
   ensurePathInEnv,
   ensurePaperclipSkillSymlink,
   isForbiddenConfigEnvKey,
+  isNeverForwardedChildEnvKey,
   isPaperclipExternalChatTurn,
   isPaperclipRuntimeEnvKey,
   joinPromptSections,
@@ -594,7 +595,6 @@ const ACPX_INHERITED_PROVIDER_ENV_KEYS: Readonly<Record<string, ReadonlySet<stri
   claude: new Set([
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
@@ -2641,9 +2641,12 @@ function resolveRuntimeEnv(
     env,
     (options.platform ?? process.platform) === "win32",
   );
+  // A Claude subscription credential never reaches an ACP child, whether it
+  // comes from the host projection or from the explicit run env.
   const finalEnv = Object.fromEntries(
     Object.entries(mergedEnv).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
+      (entry): entry is [string, string] =>
+        typeof entry[1] === "string" && !isNeverForwardedChildEnvKey(entry[0]),
     ),
   );
   // codex-acp supports both key names, but ACP clients must select its

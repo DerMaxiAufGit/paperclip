@@ -10,7 +10,7 @@ import { api } from "./client";
  * no secret. The form reads it to pick the login flow and the login panel.
  */
 export interface AdapterLoginProjection {
-  panelMode: "displayed_code" | "submitted_browser_code";
+  panelMode: "displayed_code";
   timeoutPolicy: "caller_bounded" | "fixed";
 }
 

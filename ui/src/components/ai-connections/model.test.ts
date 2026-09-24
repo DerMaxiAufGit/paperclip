@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  aiConnectionConfigUnsupportedMessage,
   aiConnectionProblem,
+  aiMethodLabel,
   bindingProblem,
+  defaultAiMethod,
   matchesAiRequirement,
   personalAiDefault,
   type AiConnectionSummary,
@@ -11,7 +14,7 @@ import {
 
 const requirement: AiConnectionRequirement = {
   companyId: "company",
-  provider: "anthropic",
+  provider: "openai",
   method: "subscription",
 };
 const account: AiConnectionSummary = {
@@ -19,14 +22,14 @@ const account: AiConnectionSummary = {
   method: "subscription",
   id: "connection",
   grantId: "grant",
-  name: "Personal Claude",
+  name: "Personal ChatGPT",
   ownership: "personal",
   ownerUserId: "alice",
   status: "connected",
   isDefault: true,
 };
 const binding: AiConnectionBinding = {
-  provider: "anthropic",
+  provider: "openai",
   method: "subscription",
   mode: "responsible_user",
 };
@@ -35,7 +38,7 @@ describe("AI connection selection presentation", () => {
   it("scopes personal defaults to company, user and provider, independently of method", () => {
     for (const change of [
       { companyId: "other" },
-      { provider: "openai" as const },
+      { provider: "xai" as const },
       { ownerUserId: "bob" },
       { ownership: "shared" as const },
     ]) {
@@ -82,7 +85,7 @@ describe("AI connection selection presentation", () => {
     const original = { ...requirement };
     expect(
       bindingProblem(
-        { ...binding, provider: "openai" },
+        { ...binding, provider: "xai" },
         requirement,
         [account],
         "alice",
@@ -96,7 +99,7 @@ describe("AI connection selection presentation", () => {
   });
   it("requires exact grant identity and human access for a legacy personal selection", () => {
     const delegated = {
-      provider: "anthropic",
+      provider: "openai",
       method: "subscription",
       mode: "delegated",
       connectionId: account.id,
@@ -140,6 +143,24 @@ describe("AI connection selection presentation", () => {
         "agent",
       ),
     ).toContain("company-shared");
+  });
+  it("reports a saved Claude subscription as unavailable and points to an API key", () => {
+    const claude: AiConnectionSummary = { ...account, provider: "anthropic", name: "Personal Claude" };
+    expect(aiConnectionProblem(claude)).toBe(
+      "Claude subscriptions are used through the claude CLI signed in on this server. Connect an API key instead.",
+    );
+    expect(aiConnectionProblem({ ...claude, method: "api_key" })).toBeNull();
+    expect(aiMethodLabel("anthropic", "subscription")).toBe("Subscription unavailable");
+    expect(aiMethodLabel("openai", "subscription")).toBe("ChatGPT subscription");
+    expect(defaultAiMethod("anthropic")).toBe("api_key");
+    expect(defaultAiMethod("openai")).toBe("subscription");
+    expect(defaultAiMethod("openrouter")).toBe("api_key");
+    expect(aiConnectionConfigUnsupportedMessage({ ai: { provider: "anthropic", method: "subscription" } })).toBe(
+      "Claude subscriptions are used through the claude CLI signed in on this server.",
+    );
+    expect(aiConnectionConfigUnsupportedMessage({ ai: { provider: "anthropic", method: "api_key" } })).toBeNull();
+    expect(aiConnectionConfigUnsupportedMessage({ ai: { provider: "openai", method: "subscription" } })).toBeNull();
+    expect(aiConnectionConfigUnsupportedMessage(undefined)).toBeNull();
   });
   it("preserves server-projected eligibility denials", () => {
     expect(

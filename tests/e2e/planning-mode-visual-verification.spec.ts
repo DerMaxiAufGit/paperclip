@@ -93,16 +93,17 @@ test("captures planning mode UI for desktop and mobile", async ({ page }) => {
 
   // The connect step arrives with no source selected — the tile row is a
   // question, not a confirmation — so its CTA stays disabled until one is
-  // pressed. It reads "Connect", not "Next": the button starts the sign-in
-  // where there is one to start. The test simulates successful local account
-  // connection, then exercises the real first-task creation flow.
+  // pressed. It reads "Connect" where there is a sign-in to start (the test
+  // simulates a successful local account connection) and "Continue" for
+  // Claude, which uses the claude CLI signed in on the server. Then the test
+  // exercises the real first-task creation flow.
   //
   // Waited on for enabled rather than visible: it is already on screen, and
   // clicking a disabled button raises nothing and does nothing.
   const source = page.getByRole("radio").first();
   await source.waitFor({ timeout: 30_000 });
   await source.click();
-  const connectNext = page.getByRole("button", { name: /^Connect$/ });
+  const connectNext = page.getByRole("button", { name: /^(Connect|Continue)$/ });
   await expect(connectNext).toBeEnabled({ timeout: 30_000 });
   await connectNext.click();
 

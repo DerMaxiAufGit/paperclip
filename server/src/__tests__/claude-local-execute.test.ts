@@ -871,6 +871,8 @@ describe("claude execute", () => {
           cwd: localWorkspace,
           env: {
             PAPERCLIP_TEST_CAPTURE_PATH: capturePath1,
+            // Claude on a remote target needs an API credential.
+            ANTHROPIC_API_KEY: "sk-ant-test-sandbox",
           },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
@@ -948,6 +950,8 @@ describe("claude execute", () => {
           effort: "low",
           env: {
             PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            // Claude on a remote target needs an API credential.
+            ANTHROPIC_API_KEY: "sk-ant-test-sandbox",
           },
           promptTemplate: "Fallback cleanly if the sandbox CLI is old.",
         },
@@ -1005,6 +1009,8 @@ describe("claude execute", () => {
         effort: "low",
         env: {
           PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          // Claude on a remote target needs an API credential.
+          ANTHROPIC_API_KEY: "sk-ant-test-sandbox",
           PAPERCLIP_TEST_HELP_COUNT_PATH: helpCountPath,
         },
         promptTemplate: "Keep the requested effort when supported.",

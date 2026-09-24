@@ -5,15 +5,15 @@ import path from "node:path";
 /**
  * The environment variable names that a local Claude adapter-test probe may
  * take from the untrusted adapter configuration. The builder denies every
- * other key by default. The list holds the documented Claude, Anthropic auth,
- * and AWS Bedrock variables that the probe needs to reach the real credential
- * the agent run uses.
+ * other key by default. The list holds the documented Claude, Anthropic API
+ * auth, and AWS Bedrock variables that the probe needs to reach the real
+ * credential the agent run uses. It never holds a Claude subscription token:
+ * the local `claude` binary uses its own sign-in.
  */
 const LOCAL_PROBE_ALLOWED_CALLER_ENV_KEYS = [
-  // Claude and Anthropic subscription and API auth.
+  // Claude and Anthropic API auth.
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
-  "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_MODEL",
   "ANTHROPIC_SMALL_FAST_MODEL",

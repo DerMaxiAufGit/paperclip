@@ -485,10 +485,11 @@ describe("adapter device-login routes", () => {
     expect(store.rows.get(res.body.sessionId)).toBeUndefined();
   });
 
-  it("rejects an adapter whose login capability drives a different panel mode", async () => {
-    // The Claude adapter declares a submitted-browser-code login, not a
-    // displayed-code device login. The guard reads the capability panel mode, so
-    // it rejects the adapter with a fixed 400 before any lease.
+  it("rejects an adapter that declares no device login capability", async () => {
+    // The Claude adapter declares no in-app login: Claude subscriptions run
+    // through the claude CLI signed in on the server. The guard reads the
+    // capability panel mode, so it rejects the adapter with a fixed 400 before
+    // any lease.
     const app = await createApp();
 
     const res = await request(app)
@@ -541,12 +542,12 @@ describe("adapter device-login routes", () => {
     // displayed-code login capability. The guard reads the registry capability
     // and the command map, not the adapter name, so the adapter passes the guard
     // and starts a session. This proves no adapter-name branch remains in the
-    // guard path. The test overrides the mapped `claude_local` type with a
+    // guard path. The test overrides the mapped `grok_local` type with a generic
     // displayed-code capability so the guard admits it.
     const app = await createApp();
     const { registerServerAdapter, unregisterServerAdapter } = await import("../adapters/index.js");
     registerServerAdapter({
-      type: "claude_local",
+      type: "grok_local",
       execute: async () => {
         throw new Error("not used");
       },
@@ -562,15 +563,15 @@ describe("adapter device-login routes", () => {
     });
     try {
       const res = await request(app)
-        .post(loginPath(COMPANY_1, "claude_local"))
+        .post(loginPath(COMPANY_1, "grok_local"))
         .send({ environmentId: SANDBOX_ENV_1 });
 
       expect(res.status, JSON.stringify(res.body)).toBe(201);
       expect(res.body).toMatchObject({ environmentId: SANDBOX_ENV_1, status: "starting" });
       expect(harness.acquisitions).toHaveLength(1);
-      expect(harness.acquisitions[0]).toMatchObject({ adapterType: "claude_local" });
+      expect(harness.acquisitions[0]).toMatchObject({ adapterType: "grok_local" });
     } finally {
-      unregisterServerAdapter("claude_local");
+      unregisterServerAdapter("grok_local");
     }
   });
 

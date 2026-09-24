@@ -9,7 +9,7 @@ import type {
 
 const requirement: AiConnectionRequirement = {
   companyId: "design-example",
-  provider: "anthropic",
+  provider: "openai",
   method: "subscription",
 };
 const account: AiConnectionSummary = {
@@ -17,7 +17,7 @@ const account: AiConnectionSummary = {
   method: "subscription",
   id: "example",
   grantId: "example-grant",
-  name: "My Claude subscription",
+  name: "My ChatGPT subscription",
   ownership: "personal",
   ownerUserId: "example-user",
   ownerName: "You",
@@ -27,7 +27,7 @@ const account: AiConnectionSummary = {
 
 export function AiConnectionDesignExamples() {
   const [binding, setBinding] = useState<AiConnectionBinding>({
-    provider: "anthropic",
+    provider: "openai",
     method: "subscription",
     mode: "responsible_user",
   });
@@ -60,9 +60,9 @@ export function AiConnectionDesignExamples() {
         placeholder="Enter API key here"
       />
       <LocalProviderLoginInstructions
-        adapterType="claude_local"
-        login={{ isolated: true, preparing: false, status: "sign_in_required", error: null,
-          command: "CLAUDE_CONFIG_DIR='/example/connection-login' claude auth login", retry: () => {} }}
+        adapterType="codex_local"
+        login={{ preparing: false, status: "sign_in_required", error: null,
+          command: "CODEX_HOME='/example/connection-login' codex login --device-auth", retry: () => {} }}
       />
     </div>
   );

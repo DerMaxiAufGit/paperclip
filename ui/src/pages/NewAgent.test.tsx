@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { queryKeys } from "@/lib/queryKeys";
 import { NewAgent } from "./NewAgent";
-import { ApiError } from "@/api/client";
 
 const api = vi.hoisted(() => ({
   get: vi.fn(),
@@ -15,7 +14,6 @@ const api = vi.hoisted(() => ({
   hire: vi.fn(),
   testEnvironment: vi.fn(),
   getAdapterAuthSignal: vi.fn(),
-  getClaudeOAuthTokenStatus: vi.fn(),
 }));
 const envApi = vi.hoisted(() => ({ list: vi.fn(), capabilities: vi.fn() }));
 const settings = vi.hoisted(() => ({
@@ -80,11 +78,7 @@ vi.mock("@/components/AgentConfigForm", () => ({
       onChange={(e) => onChange(e.target.value)}
     />
   ),
-  AdapterLoginPanel: ({ onStored }: { onStored: (id: string) => void }) => (
-    <button onClick={() => onStored("stored-claim")}>
-      Complete subscription login
-    </button>
-  ),
+  AdapterLoginPanel: () => <div>Subscription login</div>,
 }));
 vi.mock("@/components/onboarding/PillGuy", () => ({ PillGuy: () => null }));
 vi.mock("motion/react", () => ({
@@ -172,7 +166,6 @@ beforeEach(() => {
   api.adapterModels.mockResolvedValue([]);
   api.list.mockResolvedValue([{ id: "ceo", role: "ceo", status: "idle" }]);
   api.getAdapterAuthSignal.mockResolvedValue({ status: "present" });
-  api.getClaudeOAuthTokenStatus.mockRejectedValue(new ApiError("Not found", 404, null));
   api.testEnvironment.mockResolvedValue(pass);
   api.hire.mockImplementation(async (_company, input) => ({
     agent: { ...input, id: "new-agent", status: "idle", urlKey: "atlas" },
@@ -381,7 +374,10 @@ describe("New agent setup", () => {
     ["paperclip_runner", "codex", "OpenAI", "OPENAI_API_KEY"],
   ])("stores %s %s as a reusable connection before hiring", async (adapter, runner, provider, key) => {
     await render(adapter, runner);
-    await click("Use API key insteadUse subscription insteadUse API key instead");
+    // A runner's Claude lane is API-key only, so it offers no mode switch.
+    if (!(adapter === "paperclip_runner" && runner === "claude")) {
+      await click("Use API key insteadUse subscription insteadUse API key instead");
+    }
     await click(provider + "API");
     await fill("API key", "connection-key");
     await click("Connect");
@@ -487,8 +483,12 @@ describe("New agent setup", () => {
     "uses the correct native %s runner",
     async (runner) => {
       await render("paperclip_runner", runner);
-      if (runner !== "opencode")
-        await connect(runner === "claude" ? "Claude" : "OpenAI");
+      if (runner === "claude") {
+        // Claude on a Paperclip Runner (ACPX) always needs an API key.
+        await click("ClaudeAPI");
+        await fill("API key", "runner-key");
+        await click("Connect");
+      } else if (runner !== "opencode") await connect("OpenAI");
       else await fill("Model", "openrouter/anthropic/claude-sonnet-4.6");
       await click("Finish setup");
       const config = api.hire.mock.calls[0][1].adapterConfig;
@@ -589,17 +589,33 @@ describe("New agent setup", () => {
     settings.getExperimental.mockResolvedValue({
       enableManagedSandboxOnly: true,
     });
-    api.getClaudeOAuthTokenStatus.mockResolvedValue({ secretId: "saved-oauth", latestVersion: 1 });
     await render("claude_local");
-    await click("ClaudeSubscription");
-    await click("Use saved subscription");
+    // A sandbox cannot use the server's claude CLI, so Claude defaults to an
+    // API key there.
+    await click("ClaudeAPI");
+    expect(container.textContent).not.toContain("Uses the claude CLI signed in on this server");
+    await fill("API key", "sandbox-key");
+    await click("Connect");
+    expect(container.textContent).not.toContain("Subscription login");
     await click("Finish setup");
     expect(api.testEnvironment.mock.calls[0][2].environmentId).toBe(
       "sandbox-1",
     );
     expect(api.hire.mock.calls[0][1]).toMatchObject({
       defaultEnvironmentId: "sandbox-1",
-      applyStoredClaudeLogin: true,
     });
+  });
+  it("creates a Claude subscription agent that uses the server's claude CLI with no Claude credential", async () => {
+    await render("claude_local");
+    await click("ClaudeSubscription");
+    expect(container.textContent).toContain("Uses the claude CLI signed in on this server");
+    await click("Connect");
+    await click("Finish setup");
+    const payload = api.hire.mock.calls[0][1];
+    expect(payload).not.toHaveProperty("storedSessionId");
+    expect(payload).not.toHaveProperty("applyStoredClaudeLogin");
+    expect(payload.runtimeConfig).not.toHaveProperty("aiConnection");
+    expect(payload.adapterConfig.env ?? {}).toEqual({});
+    expect(managedApi.create).not.toHaveBeenCalled();
   });
 });

@@ -220,6 +220,13 @@ silently launching a different engine. A default local engine must support
 normal task work and control-plane coordination; explicit operator restrictions
 remain authoritative.
 
+Claude subscription boundary: Paperclip never reads, stores, forwards, or
+injects a Claude subscription credential. A Claude subscription is used only
+when `claude_local` runs the official `claude` CLI (its default engine) on the
+Paperclip server, signed in by the operating system user that runs Paperclip.
+The Claude ACP engine and remote execution targets authenticate with an
+Anthropic API key (or a cloud provider such as Bedrock or Vertex).
+
 ### Adapter Interface
 
 Every adapter implements three methods:

@@ -239,9 +239,10 @@ const GOOGLE_WORKSPACE_PROFILE_EXPECTATIONS = [
   writeTools: readonly string[];
 }>;
 describe("AppDefinition catalog", () => {
-  it("offers Anthropic runtime authentication without the unsupported REST tool method", () => {
+  it("offers Anthropic runtime authentication with an API key only", () => {
     const anthropic = APP_DEFINITIONS.find((app) => app.slug === "anthropic")!;
-    expect(anthropic.methods.map((method) => method.key)).toEqual(["ai-subscription", "ai-api_key"]);
+    // Claude subscriptions run only through the claude CLI signed in on the server.
+    expect(anthropic.methods.map((method) => method.key)).toEqual(["ai-api_key"]);
     expect(anthropic.methods.every((method) => method.purpose === "ai" && method.transport === "runtime_auth")).toBe(true);
     expect(getAvailableConnectionMethod(anthropic, "api-key")).toBeNull();
   });

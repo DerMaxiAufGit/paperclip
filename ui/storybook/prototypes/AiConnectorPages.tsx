@@ -4,7 +4,7 @@ import { AiConnectionAccountControls } from "@/components/ai-connections/AiConne
 import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Route, Routes, useNavigate, useSearchParams } from "@/lib/router";
-import { APP_DEFINITIONS, getAppStoreDefinition, type AppDefinition, type ToolApplication, type ToolConnection, type ConnectionGrantsResponse } from "@paperclipai/shared";
+import { AI_CONNECTION_CAPABILITIES, APP_DEFINITIONS, getAppStoreDefinition, type AppDefinition, type ToolApplication, type ToolConnection, type ConnectionGrantsResponse } from "@paperclipai/shared";
 import { Browse } from "@/pages/apps/Browse";
 import { AppDetail } from "@/pages/apps/AppDetail";
 import { ConnectionSetupFlow } from "@/features/connections/ConnectionSetupFlow";
@@ -159,9 +159,12 @@ function Setup({ accounts, onSave }: { accounts: AiConnectionSummary[]; onSave: 
   const navigate = useNavigate();
   const provider = (params.get("source") ?? "anthropic") as AiProvider;
   const reconnect = accounts.find((row) => row.id === params.get("reconnect"));
-  const [method, setMethod] = useState<AiAuthMethod>(reconnect?.method ?? (provider === "openrouter" ? "api_key" : "subscription"));
+  // Claude and OpenRouter offer an API key only: a Claude subscription is used
+  // through the claude CLI signed in on the server, never as a connection.
+  const offersSubscription = Boolean(AI_CONNECTION_CAPABILITIES[provider]?.methods.subscription);
+  const [method, setMethod] = useState<AiAuthMethod>(reconnect?.method ?? (offersSubscription ? "subscription" : "api_key"));
   const [state, setState] = useState<AiAuthState>({ phase: "idle" });
-  const [name, setName] = useState(reconnect?.name ?? `My ${AI_PROVIDERS[provider]?.subscriptionName ?? "OpenRouter API"}`);
+  const [name, setName] = useState(reconnect?.name ?? (offersSubscription ? `My ${AI_PROVIDERS[provider].subscriptionName}` : `My ${AI_PROVIDERS[provider]?.name ?? "OpenRouter"} API`));
   const [savedId, setSavedId] = useState<string>();
   function complete(grantKind: string, agentIds: string[], allAgents: boolean) {
     const id = reconnect?.id ?? `review-${provider}-${accounts.length}`;
@@ -173,12 +176,12 @@ function Setup({ accounts, onSave }: { accounts: AiConnectionSummary[]; onSave: 
   if (!(provider in AI_PROVIDERS)) return <><p className="text-sm">This review focuses on AI authentication. The existing connector remains in the same list.</p><Button onClick={() => navigate("/apps")}>Back to Connectors</Button></>;
   return <ConnectionSetupFlow serviceSlug={provider} onCancel={() => navigate("/apps")} renderCredentialStep={({ grantKind, agentIds, allAgents }) => <AiReviewBoundary label="Shared AI credential presentation · Existing setup shell and login cards"><div className="mx-auto max-w-xl space-y-4">
     <label className="block space-y-2 text-sm">Connection name<Input value={name} onChange={(event) => setName(event.target.value)} disabled={Boolean(reconnect)} /></label>
-    {!reconnect && provider !== "openrouter" && <CredentialModeLink mode={method === "subscription" ? "subscription" : "api"} onChange={() => { setMethod(method === "subscription" ? "api_key" : "subscription"); setState({ phase: "idle" }); }} />}
+    {!reconnect && offersSubscription && <CredentialModeLink mode={method === "subscription" ? "subscription" : "api"} onChange={() => { setMethod(method === "subscription" ? "api_key" : "subscription"); setState({ phase: "idle" }); }} />}
     <AiConnectionAuth provider={provider} method={method} state={state}
-      onStart={() => setState({ phase: "waiting", authorizationUrl: "https://example.test/review-authorization", code: provider === "openai" ? "REVIEW-CODE" : undefined })}
+      onStart={() => setState({ phase: "waiting", authorizationUrl: "https://example.test/review-authorization", code: "REVIEW-CODE" })}
       onSubmit={() => complete(grantKind, agentIds, allAgents)}
       onCancel={() => navigate("/apps")}
       onDone={() => navigate(`/apps/${savedId}/permissions`)} />
-    {state.phase === "waiting" && method === "subscription" && provider !== "anthropic" && <Button variant="outline" onClick={() => complete(grantKind, agentIds, allAgents)}>Storybook only: simulate browser completion</Button>}
+    {state.phase === "waiting" && method === "subscription" && <Button variant="outline" onClick={() => complete(grantKind, agentIds, allAgents)}>Storybook only: simulate browser completion</Button>}
   </div></AiReviewBoundary>} />;
 }

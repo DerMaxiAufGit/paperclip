@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  OnboardingCardField,
   OnboardingLoginCodeRow,
   ProviderApiKeyCard,
   ProviderSubscriptionCard,
@@ -9,6 +8,7 @@ import {
 import {
   AI_PROVIDERS,
   aiMethodLabel,
+  aiMethodUnsupportedMessage,
   type AiAuthMethod,
   type AiProvider,
 } from "./model";
@@ -52,9 +52,11 @@ function AuthAttempt({
   const [value, setValue] = useState("");
   const info = AI_PROVIDERS[provider];
   const busy = state.phase === "starting" || state.phase === "submitting";
-  const unsupported =
-    state.phase === "unsupported" ||
-    (method === "subscription" && !info.subscriptionName);
+  const unsupportedMessage =
+    state.phase === "unsupported"
+      ? state.message
+      : aiMethodUnsupportedMessage(provider, method);
+  const unsupported = unsupportedMessage !== null;
   const submit = () => {
     if (!value.trim() || busy) return;
     const submitted = value.trim();
@@ -83,9 +85,7 @@ function AuthAttempt({
         <>
           {unsupported ? (
             <p role="status" className="text-sm text-muted-foreground">
-              {state.phase === "unsupported"
-                ? state.message
-                : "This provider does not offer a subscription connection."}
+              {unsupportedMessage}
             </p>
           ) : (
             <>
@@ -110,36 +110,15 @@ function AuthAttempt({
                   autoFocus
                 />
               ) : busy ? (
-                <ProviderSubscriptionCard
-                  providerName={info.name}
-                  mode={
-                    provider === "anthropic"
-                      ? "submitted_code"
-                      : "displayed_code"
-                  }
-                  loading
-                >
+                <ProviderSubscriptionCard providerName={info.name} loading>
                   <span />
                 </ProviderSubscriptionCard>
               ) : state.phase === "waiting" ? (
                 <ProviderSubscriptionCard
                   providerName={info.name}
                   authorizationUrl={state.authorizationUrl}
-                  mode={
-                    provider === "anthropic"
-                      ? "submitted_code"
-                      : "displayed_code"
-                  }
                 >
-                  {provider === "anthropic" ? (
-                    <OnboardingCardField
-                      value={value}
-                      onChange={setValue}
-                      onSubmit={submit}
-                    />
-                  ) : (
-                    <OnboardingLoginCodeRow code={state.code ?? ""} />
-                  )}
+                  <OnboardingLoginCodeRow code={state.code ?? ""} />
                 </ProviderSubscriptionCard>
               ) : (
                 <p className="text-sm text-muted-foreground">
@@ -164,15 +143,9 @@ function AuthAttempt({
                   {busy ? "Connecting…" : "Connect"}
                 </Button>
               ) : state.phase === "waiting" ? (
-                provider === "anthropic" ? (
-                  <Button disabled={!value.trim()} onClick={submit}>
-                    Submit code
-                  </Button>
-                ) : (
-                  <span role="status" className="text-sm text-muted-foreground">
-                    Waiting for sign-in…
-                  </span>
-                )
+                <span role="status" className="text-sm text-muted-foreground">
+                  Waiting for sign-in…
+                </span>
               ) : (
                 <Button disabled={busy} onClick={onStart}>
                   {busy

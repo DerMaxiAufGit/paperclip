@@ -4,8 +4,8 @@ Reviewed against the adapter builders, runtime probes, and provider documentatio
 
 | Adapter | Setup connection/prerequisites | Model and effort in setup |
 | --- | --- | --- |
-| Claude Code / Codex | Existing subscription/API connection step | Searchable model; supported effort options |
-| Paperclip Runner | The selected Codex, Claude ACPX, or OpenCode connection | Provider model; no generic effort setting |
+| Claude Code / Codex | Existing subscription/API connection step. Claude subscription: the `claude` CLI signed in on the Paperclip server (status panel only; nothing stored). Claude API: Anthropic API key, required for the ACP engine and remote targets | Searchable model; supported effort options |
+| Paperclip Runner | The selected Codex, Claude ACPX (Anthropic API key only), or OpenCode connection | Provider model; no generic effort setting |
 | Cursor CLI | `CURSOR_API_KEY`, existing organization secret, or host `agent login` | Model; no generic effort (Cursor uses modes) |
 | Cursor Cloud | Enter a new `CURSOR_API_KEY` and repository URL; optional starting branch/ref. The key is saved as a new organization secret; setup does not reuse existing keys. | Account-default model; no generic effort |
 | Gemini CLI | `GEMINI_API_KEY`, existing organization secret, or supported host login | Model; no effort control |
@@ -18,7 +18,7 @@ Reviewed against the adapter builders, runtime probes, and provider documentatio
 ## Contracts and regression coverage
 
 - Cursor Cloud sends `repoUrl` and `repoStartingRef`, matching its SDK adapter. It never sends the old, ignored `repository`/`branch` properties.
-- New runtime keys are stored as distinct organization secrets when setup completes. They do not rotate existing keys. Existing Claude/Codex connection flows retain their user-specific credential behavior.
+- New runtime keys are stored as distinct organization secrets when setup completes. They do not rotate existing keys. Existing Codex connection flows and Claude API-key connections retain their user-specific credential behavior. Paperclip stores no Claude subscription credential.
 - A draft key goes only into the allowlisted `testCredentials` request field during testing. It does not pass through persistence normalization. Hermes Gateway's one-shot key maps to its top-level `apiKey` only after normalization.
 - Failed tests and abandoned forms do not create secrets. A failed hire removes the newly created secret; cleanup errors remain visible.
 - Kimi API mode omits `config.model`: passing `--model` would override the model synthesized from `KIMI_MODEL_*` variables.

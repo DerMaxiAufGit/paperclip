@@ -12,10 +12,9 @@ export interface AdapterLoginStartResolution<TData> {
 }
 
 /**
- * The injected steps of the shared adapter login start-route spine. The Codex
- * device login start route and the Claude setup-token login start route both
- * provide them. Each step holds the per-flow rule; the spine holds the shared
- * order.
+ * The injected steps of the adapter login start-route spine. The device login
+ * start route (Codex, Grok) provides them. Each step holds the per-flow rule;
+ * the spine holds the shared order.
  */
 export interface AdapterLoginStartSpineInput<TData extends { environmentId: string }> {
   req: Request;
@@ -47,13 +46,6 @@ export interface AdapterLoginStartSpineInput<TData extends { environmentId: stri
    */
   guardBeforeValidate?: () => void | Promise<void>;
   /**
-   * Runs an optional per-flow guard after the validation and before the sandbox
-   * check. The Claude route checks the body adapter type and the transport
-   * readiness here. It returns `true` when it sends a response; the spine then
-   * stops and returns null.
-   */
-  guardAfterValidate?: (data: TData) => boolean | Promise<boolean>;
-  /**
    * Checks the sandbox environment. It throws a mapped HTTP error for a missing,
    * archived, non-sandbox, or foreign environment.
    */
@@ -61,17 +53,14 @@ export interface AdapterLoginStartSpineInput<TData extends { environmentId: stri
 }
 
 /**
- * Runs the shared start-route spine for an adapter login. It runs the same
- * ordered steps for both start routes, and it runs every step before any session
- * or lease side effect:
+ * Runs the start-route spine for an adapter login. It runs these ordered steps,
+ * and it runs every step before any session or lease side effect:
  *
  * 1. It derives the session owner and runs the company access check.
  * 2. It runs the optional pre-validation guard.
  * 3. It validates the request body with the strict schema. It sends the fixed
  *    400 and returns null on a failure.
- * 4. It runs the optional post-validation guard. It returns null when the guard
- *    sends a response.
- * 5. It checks the sandbox environment.
+ * 4. It checks the sandbox environment.
  *
  * It returns the owner and the validated body when every step passes. It returns
  * null when a step sends a response; the caller must then stop.
@@ -96,11 +85,6 @@ export async function runAdapterLoginStartSpine<TData extends { environmentId: s
     return null;
   }
   const data = parsed.data;
-
-  if (input.guardAfterValidate) {
-    const stop = await input.guardAfterValidate(data);
-    if (stop) return null;
-  }
 
   await input.assertSandbox(data);
   return { ownerUserId, data };

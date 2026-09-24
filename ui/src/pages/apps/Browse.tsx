@@ -1,4 +1,5 @@
 import { ManagedAiConnectionRow } from "@/components/ai-connections/ManagedAiConnectionDetails";
+import { aiConnectionConfigUnsupportedMessage } from "@/components/ai-connections/model";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -173,6 +174,14 @@ function connectionState(connection: ToolConnection): ConnectionState {
       kind: "paused",
       label: "Paused",
       message: "Agents can’t use this account right now.",
+    };
+  }
+  const unsupportedAiMethod = connection.connectionPurpose === "ai" ? aiConnectionConfigUnsupportedMessage(connection.config) : null;
+  if (unsupportedAiMethod) {
+    return {
+      kind: "attention",
+      label: "Needs attention",
+      message: `${unsupportedAiMethod} Connect an API key instead.`,
     };
   }
   if ((connection.connectionPurpose === "ai" && (connection.healthStatus !== "ok" || aiSubscriptionNeedsIsolatedLogin(connection.config))) || isToolConnectionAttentionHealth(connection.healthStatus)) {

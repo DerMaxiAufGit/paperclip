@@ -585,6 +585,34 @@ describe("runChildProcess", () => {
     expect(result.stdout).toBe("done");
   });
 
+  it("never passes a Claude subscription token to the child, from the host or the caller env", async () => {
+    const previous = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "host-subscription-token";
+    try {
+      const result = await runChildProcess(
+        randomUUID(),
+        process.execPath,
+        [
+          "-e",
+          "process.stdout.write(JSON.stringify({ token: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null, keep: process.env.KEEP_ME ?? null }))",
+        ],
+        {
+          cwd: process.cwd(),
+          env: { CLAUDE_CODE_OAUTH_TOKEN: "caller-subscription-token", KEEP_ME: "kept" },
+          timeoutSec: 10,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ token: null, keep: "kept" });
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = previous;
+    }
+  });
+
   it("waits for onSpawn before sending stdin to the child", async () => {
     const spawnDelayMs = 150;
     const startedAt = Date.now();

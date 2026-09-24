@@ -73,36 +73,16 @@ const mockAgentsApi = vi.hoisted(() => ({
   list: vi.fn(async () => [] as Array<{ id: string; name: string; adapterType: string }>),
   instructionsBundle: vi.fn(async () => ({ entryFile: "AGENTS.md" })),
   saveInstructionsFile: vi.fn(async () => ({})),
-  // No default implementation: the top-level `beforeEach` sets the "no
-  // stored value" 404 rejection, using the real `ApiError` class the code
-  // under test checks with `instanceof`.
-  getClaudeOAuthTokenStatus: vi.fn(),
   getAdapterAuthSignal: vi.fn(
     async (): Promise<import("@paperclipai/shared").AdapterAuthSignalResponse> => ({
       status: "present",
     }),
   ),
-  // The sign-in routes. The connect step's Connect button starts a login rather
-  // than hiring when the signal says the source has no credential, so the two
-  // login shapes need enough of a server to reach the state the step is about:
-  // a session that is running, and a prompt to show for it.
-  startClaudeSetupTokenLogin: vi.fn(async () => ({
-    sessionId: "claude-session-1",
-    status: "pending",
-    expiresAt: new Date(Date.now() + 600_000).toISOString(),
-  })),
-  getClaudeSetupTokenLoginStatus: vi.fn(async () => ({
-    sessionId: "claude-session-1",
-    status: "pending",
-    expiresAt: new Date(Date.now() + 600_000).toISOString(),
-  })),
-  getClaudeSetupTokenLoginPrompt: vi.fn(async () => ({
-    authorizationUrl: "https://claude.ai/oauth/authorize?code=true",
-    transportAdvisory: null,
-  })),
-  cancelClaudeSetupTokenLogin: vi.fn(async () => ({})),
-  submitClaudeSetupTokenBrowserCode: vi.fn(async () => ({})),
-  completeClaudeSetupTokenLogin: vi.fn(async () => ({ storedSessionId: "stored-1" })),
+  // The device-login routes. Choosing a source starts a login rather than
+  // hiring when the signal says the source has no credential, so the login
+  // needs enough of a server to reach the state the step is about: a session
+  // that is running, and a prompt to show for it. The top-level `beforeEach`
+  // puts these defaults back after a test that overrides them.
   startAdapterAuthLogin: vi.fn(async () => ({
     sessionId: "codex-session-1",
     status: "pending",
@@ -116,7 +96,6 @@ const mockAgentsApi = vi.hoisted(() => ({
   // No default implementation: the top-level `beforeEach` sets the "no active
   // session" 404 rejection, matching the real route.
   getActiveAdapterAuthLoginSession: vi.fn(),
-  getActiveClaudeSetupTokenLoginSession: vi.fn(),
 }));
 // The adapter registry mock below always returns this function, so a test
 // can shape the built adapter config (e.g. a configured ANTHROPIC_API_KEY)
@@ -215,18 +194,12 @@ vi.mock("../adapters/use-disabled-adapters", () => ({
   useAdapterRegistryLoaded: () => true,
 }));
 // Adapters with a declared login capability, mirroring the real registry:
-// `claude_local` and `codex_local` both support a sandbox login, and every
-// other type has none, matching the real `useAdapterCapabilities` fallback for
-// an unlisted type.
-//
-// The panel modes are the real ones rather than one mode for both. They used to
-// be, back when nothing outside the panel dispatcher read them. The connect
-// step reads them now — the two logins end in different places, so its button
-// waits differently for each — and a mock that called Claude's login
-// `displayed_code` would have the step testing the wrong half of that.
-// Reconcile with KNOWN_DEFAULTS in `adapters/use-adapter-capabilities.ts`.
-const ADAPTER_LOGIN_MODES: Record<string, "displayed_code" | "submitted_browser_code"> = {
-  claude_local: "submitted_browser_code",
+// `codex_local` supports a sandbox device login. `claude_local` has none — a
+// Claude subscription is the claude CLI signed in on the server — and every
+// other type has none either, matching the real `useAdapterCapabilities`
+// fallback for an unlisted type. Reconcile with KNOWN_DEFAULTS in
+// `adapters/use-adapter-capabilities.ts`.
+const ADAPTER_LOGIN_MODES: Record<string, "displayed_code"> = {
   codex_local: "displayed_code",
 };
 vi.mock("../adapters/use-adapter-capabilities", () => ({
@@ -247,7 +220,7 @@ vi.mock("./AgentCapsule", () => ({ AgentCapsule: () => null }));
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE, getEnvironmentCapabilities } from "@paperclipai/shared";
-import { CLAUDE_OAUTH_TOKEN_ENV_KEY } from "./environment-variables-editor/model";
+import { CLAUDE_CLI_SIGN_IN_STEPS, CLAUDE_CLI_SIGN_IN_TITLE } from "./ClaudeCliSignInStatus";
 import { ONBOARDING_STORAGE_KEY, OnboardingWizard } from "./OnboardingWizard";
 import { CONNECTED_HOLD_MS } from "./onboarding/onboarding-motion";
 
@@ -311,19 +284,19 @@ async function pickFirstSource(
  * The arc footer's primary button, whatever this step calls it.
  *
  * Step 4 calls it "Connect", because there it starts a sign-in rather than
- * simply advancing; every other arc step calls it "Next". These tests are about
- * what the press does, not what it reads, so they match either — restating the
- * label at twenty call sites would make a copy change look like a behaviour
- * regression. The label itself is pinned once, in the step test that is about
- * the label.
+ * simply advancing — or "Continue" for a Claude subscription, which has nothing
+ * to connect. Every other arc step calls it "Next". These tests are about what
+ * the press does, not what it reads, so they match any — restating the label at
+ * twenty call sites would make a copy change look like a behaviour regression.
  */
 function isArcPrimary(text: string): boolean {
-  return text.startsWith("Next") || text.startsWith("Connect");
+  return text.startsWith("Next") || text.startsWith("Connect") || text.startsWith("Continue");
 }
 
 describe("OnboardingWizard restore-gate (stale localStorage across accounts)", () => {
   beforeEach(() => {
     localHealth.get.mockResolvedValue({ deploymentMode: "authenticated" });
+    managedApi.list.mockReset().mockResolvedValue({ currentUserId: "user-1", connections: [] });
     managedApi.checkLocalLogin.mockReset().mockResolvedValue({ status: "sign_in_required" });
     managedApi.connectLocal.mockReset().mockResolvedValue({ connectionId: "local-connection", grantId: "local-grant" });
     mockAuthApi.getSession.mockResolvedValue({
@@ -345,23 +318,25 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
     mockAdapterRegistry.disabled = new Set<string>();
     mockAdapterBuild.buildAdapterConfig.mockReset();
     mockAdapterBuild.buildAdapterConfig.mockReturnValue({});
-    // Default: no stored Claude login for the owner. The route returns a
-    // fixed 404 for a missing value, so the client treats a real `ApiError`
-    // with that status as "no stored value" rather than a hard failure.
-    mockAgentsApi.getClaudeOAuthTokenStatus.mockReset();
-    mockAgentsApi.getClaudeOAuthTokenStatus.mockRejectedValue(
-      new ApiError("Not found", 404, null),
-    );
     // Default: no active login session for the caller. A resume test
     // overrides this with a resolved session body.
     mockAgentsApi.getActiveAdapterAuthLoginSession.mockReset();
     mockAgentsApi.getActiveAdapterAuthLoginSession.mockRejectedValue(
       new ApiError("Not found", 404, null),
     );
-    mockAgentsApi.getActiveClaudeSetupTokenLoginSession.mockReset();
-    mockAgentsApi.getActiveClaudeSetupTokenLoginSession.mockRejectedValue(
-      new ApiError("Not found", 404, null),
-    );
+    // A running device login that has handed out its code, until a test says
+    // the login finished.
+    mockAgentsApi.startAdapterAuthLogin.mockReset();
+    mockAgentsApi.startAdapterAuthLogin.mockResolvedValue({
+      sessionId: "codex-session-1",
+      status: "pending",
+    });
+    mockAgentsApi.getAdapterAuthLoginStatus.mockReset();
+    mockAgentsApi.getAdapterAuthLoginStatus.mockResolvedValue({
+      sessionId: "codex-session-1",
+      status: "pending",
+      prompt: { url: "https://auth.openai.com/codex/device", code: "Q2RJ-E1YIF" },
+    });
     // Reset to each mock's original default. `mockResolvedValue` /
     // `mockReturnValue` overrides a mock's implementation permanently — it
     // is not undone by `afterEach`'s `vi.clearAllMocks()`, which only clears
@@ -822,7 +797,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           {
             code: ADAPTER_AUTH_MISSING_CHECK_CODE,
             level: "warn" as const,
-            message: "No stored Claude login was found for this agent.",
+            message: "Claude is not logged in on this host.",
           },
         ],
         testedAt: new Date().toISOString(),
@@ -833,8 +808,32 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
 
       expect(mockAgentsApi.hire).not.toHaveBeenCalled();
       expect(document.body.textContent).toContain(
-        "No stored Claude login was found for this agent.",
+        "Claude is not logged in on this host.",
       );
+
+      await act(async () => root.unmount());
+    });
+
+    it("blocks the hire when the server's claude CLI is signed out (claude_hello_probe_auth_required warn)", async () => {
+      mockAgentsApi.testEnvironment.mockResolvedValue({
+        adapterType: "claude_local",
+        status: "warn" as const,
+        checks: [
+          {
+            code: "claude_hello_probe_auth_required",
+            level: "warn" as const,
+            message: "Claude CLI is installed, but login is required.",
+          },
+        ],
+        testedAt: new Date().toISOString(),
+      });
+      const { root, clickByText } = await openConnectStep();
+
+      await clickByText((t) => isArcPrimary(t));
+
+      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain("Claude CLI is installed, but login is required.");
+      expect(document.body.textContent).toContain("Connect a model");
 
       await act(async () => root.unmount());
     });
@@ -871,8 +870,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
      * Typing a key into this step must not put the key into the agent's stored
      * configuration. That configuration is persisted and revisioned, so a plain
      * value there is a live credential at rest in every copy of it — which is
-     * what this step did before, and what the Claude token path has always
-     * avoided by holding a `user_secret_ref` instead.
+     * what this step did before.
      */
     it.each(["personal", "organization"])("defaults to a saved %s API key and uses the same reference for probe and hire", async (scope) => {
       const key = "ANTHROPIC_API_KEY";
@@ -1026,7 +1024,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           {
             code: ADAPTER_AUTH_MISSING_CHECK_CODE,
             level: "warn" as const,
-            message: "No stored Claude login was found for this agent.",
+            message: "Claude is not logged in on this host.",
           },
         ],
         testedAt: new Date().toISOString(),
@@ -1046,196 +1044,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
-    it("sends the fixed Claude binding and applyStoredClaudeLogin when a stored login exists", async () => {
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockReset();
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({
-        secretId: "11111111-1111-1111-1111-111111111111",
-        latestVersion: 1,
-      });
-      const { root } = await openConnectStep();
-      // Selecting the provider automatically verifies the saved subscription.
-      await flushReact();
-
-      expect(mockAgentsApi.hire).toHaveBeenCalled();
-      const hireArgs = mockAgentsApi.hire.mock.calls.at(-1) as unknown[];
-      const hireBody = hireArgs[1] as {
-        adapterConfig: { env?: Record<string, unknown> };
-        applyStoredClaudeLogin?: boolean;
-      };
-      expect(hireBody.applyStoredClaudeLogin).toBe(true);
-      expect(hireBody.adapterConfig.env?.[CLAUDE_OAUTH_TOKEN_ENV_KEY]).toEqual({
-        type: "user_secret_ref",
-        key: CLAUDE_OAUTH_TOKEN_ENV_KEY,
-        version: "latest",
-        required: true,
-      });
-
-      await act(async () => root.unmount());
-    });
-
-    it("sends no binding and no flag when the Claude status route returns 404", async () => {
-      // The default `beforeEach` mock already rejects with a 404 `ApiError`,
-      // matching "no stored value" — asserted explicitly here to pin the
-      // scenario this test is named for.
-      const { root, clickByText } = await openConnectStep();
-
-      await clickByText((t) => isArcPrimary(t));
-
-      expect(mockAgentsApi.hire).toHaveBeenCalled();
-      const hireArgs = mockAgentsApi.hire.mock.calls.at(-1) as unknown[];
-      const hireBody = hireArgs[1] as {
-        adapterConfig: { env?: Record<string, unknown> };
-        applyStoredClaudeLogin?: boolean;
-      };
-      expect(hireBody.applyStoredClaudeLogin).toBeUndefined();
-      expect(hireBody.adapterConfig.env?.[CLAUDE_OAUTH_TOKEN_ENV_KEY]).toBeUndefined();
-
-      await act(async () => root.unmount());
-    });
-
-    it("sends no binding when the adapter configuration holds a non-empty ANTHROPIC_API_KEY", async () => {
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockReset();
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({
-        secretId: "11111111-1111-1111-1111-111111111111",
-        latestVersion: 1,
-      });
-      mockAdapterBuild.buildAdapterConfig.mockReturnValue({
-        env: { ANTHROPIC_API_KEY: { type: "plain", value: "sk-ant-configured" } },
-      });
-      const { root } = await openConnectStep();
-      // Selecting the provider automatically verifies the saved subscription.
-      await flushReact();
-
-      expect(mockAgentsApi.hire).toHaveBeenCalled();
-      // Discovery reads saved-login metadata once; the hire does not re-read
-      // or apply it when the configuration already has an API key.
-      expect(mockAgentsApi.getClaudeOAuthTokenStatus).toHaveBeenCalledTimes(1);
-      const hireArgs = mockAgentsApi.hire.mock.calls.at(-1) as unknown[];
-      const hireBody = hireArgs[1] as {
-        adapterConfig: { env?: Record<string, unknown> };
-        applyStoredClaudeLogin?: boolean;
-      };
-      expect(hireBody.applyStoredClaudeLogin).toBeUndefined();
-      expect(hireBody.adapterConfig.env?.[CLAUDE_OAUTH_TOKEN_ENV_KEY]).toBeUndefined();
-
-      await act(async () => root.unmount());
-    });
-
-    it("carries no token value in the hire payload", async () => {
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockReset();
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({
-        secretId: "11111111-1111-1111-1111-111111111111",
-        latestVersion: 1,
-      });
-      const { root } = await openConnectStep();
-      // Selecting the provider automatically verifies the saved subscription.
-      await flushReact();
-
-      expect(mockAgentsApi.hire).toHaveBeenCalled();
-      const hireArgs = mockAgentsApi.hire.mock.calls.at(-1) as unknown[];
-      const hireBody = hireArgs[1] as { adapterConfig: { env?: Record<string, unknown> } };
-      const binding = hireBody.adapterConfig.env?.[CLAUDE_OAUTH_TOKEN_ENV_KEY] as
-        | { type: string }
-        | undefined;
-      // A reference, never a value: no `value` field, no `secretId` field
-      // either — the fixed binding names the env var, not the status
-      // response's secret id.
-      expect(binding?.type).toBe("user_secret_ref");
-      expect(JSON.stringify(hireBody)).not.toContain("secretId");
-
-      await act(async () => root.unmount());
-    });
-
-    it("sends the fixed binding in the environment test request when the status route returns 200", async () => {
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockReset();
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({
-        secretId: "11111111-1111-1111-1111-111111111111",
-        latestVersion: 1,
-      });
-      const { root } = await openConnectStep();
-      // Selecting the provider automatically verifies the saved subscription.
-      await flushReact();
-
-      expect(mockAgentsApi.testEnvironment).toHaveBeenCalled();
-      const testArgs = mockAgentsApi.testEnvironment.mock.calls.at(-1) as unknown[];
-      const testBody = testArgs[2] as { adapterConfig: { env?: Record<string, unknown> } };
-      expect(testBody.adapterConfig.env?.[CLAUDE_OAUTH_TOKEN_ENV_KEY]).toEqual({
-        type: "user_secret_ref",
-        key: CLAUDE_OAUTH_TOKEN_ENV_KEY,
-        version: "latest",
-        required: true,
-      });
-
-      await act(async () => root.unmount());
-    });
-
-    it("sends no binding in the environment test request when the status route returns 404", async () => {
-      // The default `beforeEach` mock already rejects with a 404 `ApiError`.
-      const { root, clickByText } = await openConnectStep();
-
-      await clickByText((t) => isArcPrimary(t));
-
-      expect(mockAgentsApi.testEnvironment).toHaveBeenCalled();
-      const testArgs = mockAgentsApi.testEnvironment.mock.calls.at(-1) as unknown[];
-      const testBody = testArgs[2] as { adapterConfig: { env?: Record<string, unknown> } };
-      expect(testBody.adapterConfig.env?.[CLAUDE_OAUTH_TOKEN_ENV_KEY]).toBeUndefined();
-
-      await act(async () => root.unmount());
-    });
-
-    it("hires when a stored login exists, even though a probe without the binding would warn adapter_auth_missing", async () => {
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockReset();
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({
-        secretId: "11111111-1111-1111-1111-111111111111",
-        latestVersion: 1,
-      });
-      // Answers like the real sandbox probe: `warn` with `adapter_auth_missing`
-      // for a configuration with no binding, `pass` once the binding is
-      // present. This proves the wizard sends the probe the SAME configuration
-      // it hires with — a probe still sent without the binding would warn and
-      // block the hire below.
-      mockAgentsApi.testEnvironment.mockImplementation(
-        (async (...args: unknown[]) => {
-          const request = args[2] as {
-            adapterConfig: { env?: Record<string, unknown> };
-          };
-          const hasBinding = Boolean(
-            request.adapterConfig.env?.[CLAUDE_OAUTH_TOKEN_ENV_KEY],
-          );
-          return hasBinding
-            ? {
-                adapterType: "claude_local" as const,
-                status: "pass" as const,
-                checks: [],
-                testedAt: new Date().toISOString(),
-              }
-            : {
-                adapterType: "claude_local" as const,
-                status: "warn" as const,
-                checks: [
-                  {
-                    code: ADAPTER_AUTH_MISSING_CHECK_CODE,
-                    level: "warn" as const,
-                    message: "No stored Claude login was found for this agent.",
-                  },
-                ],
-                testedAt: new Date().toISOString(),
-              };
-        }) as unknown as () => Promise<
-          import("@paperclipai/shared").AdapterEnvironmentTestResult
-        >,
-      );
-      const { root } = await openConnectStep();
-      // Selecting the provider automatically verifies the saved subscription.
-      await flushReact();
-
-      expect(mockAgentsApi.hire).toHaveBeenCalled();
-
-      await act(async () => root.unmount());
-    });
-
-    it("blocks the hire when the probe reports warn with adapter_auth_missing and no stored login exists", async () => {
-      // The default `beforeEach` mock already rejects with a 404 `ApiError`.
+    it("blocks the hire when the probe reports warn with adapter_auth_missing", async () => {
       mockAgentsApi.testEnvironment.mockResolvedValue({
         adapterType: "claude_local",
         status: "warn" as const,
@@ -1243,7 +1052,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           {
             code: ADAPTER_AUTH_MISSING_CHECK_CODE,
             level: "warn" as const,
-            message: "No stored Claude login was found for this agent.",
+            message: "Claude is not logged in on this host.",
           },
         ],
         testedAt: new Date().toISOString(),
@@ -1256,27 +1065,6 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       expect(document.body.textContent).toContain(
         "No working authentication was found",
       );
-
-      await act(async () => root.unmount());
-    });
-
-    it("reads the stored-login status once for each create attempt", async () => {
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockReset();
-      mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({
-        secretId: "11111111-1111-1111-1111-111111111111",
-        latestVersion: 1,
-      });
-      // Fails after the gate opens, so the button stays clickable for a
-      // second attempt instead of advancing past step 4.
-      mockAgentsApi.hire.mockRejectedValue(new Error("hire failed"));
-      const { root, clickByText } = await openConnectStep();
-
-      const discoveryReads = mockAgentsApi.getClaudeOAuthTokenStatus.mock.calls.length;
-      await clickByText((t) => isArcPrimary(t));
-      expect(mockAgentsApi.getClaudeOAuthTokenStatus).toHaveBeenCalledTimes(discoveryReads + 1);
-
-      await clickByText((t) => isArcPrimary(t));
-      expect(mockAgentsApi.getClaudeOAuthTokenStatus).toHaveBeenCalledTimes(discoveryReads + 2);
 
       await act(async () => root.unmount());
     });
@@ -2014,14 +1802,11 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       return { root, queryClient };
     }
 
-    it.each([
-      ["claude_local", "anthropic", /Claude/, "claude-session-1", "claude-setup-token-status"],
-      ["codex_local", "openai", /OpenAI/, "codex-session-1", "adapter-login-status"],
-    ] as const)("finishes %s sign-in when its connection becomes visible before the completion poll", async (adapterType, provider, label, sessionId, statusKey) => {
+    it("finishes codex_local sign-in when its connection becomes visible before the login poll", async () => {
       mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
       mockAgentsApi.hire.mockRejectedValueOnce(new Error("Temporary hire failure"));
-      const { root, queryClient } = await openStep4({ adapterType });
-      await pickSource(label);
+      const { root, queryClient } = await openStep4({ adapterType: "codex_local" });
+      await pickSource(/OpenAI/);
       for (let i = 0; i < 6; i++) await flushReact();
       try {
         // The connection activity event arrives before the login poll. It must
@@ -2029,23 +1814,23 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         await act(async () => {
           queryClient.setQueryData(["ai-connections", "company-new"], {
             currentUserId: "user-1",
-            connections: [{ id: "managed-connection", grantId: "managed-grant", companyId: "company-new", provider, method: "subscription", name: "My subscription", ownership: "personal", ownerUserId: "user-1", status: "connected", isDefault: true }],
+            connections: [{ id: "managed-connection", grantId: "managed-grant", companyId: "company-new", provider: "openai", method: "subscription", name: "My subscription", ownership: "personal", ownerUserId: "user-1", status: "connected", isDefault: true }],
           });
         });
         for (let i = 0; i < 4; i++) await flushReact();
-        expect(document.body.textContent).toContain(adapterType === "claude_local" ? "authorization code" : "Q2RJ-E1YIF");
+        expect(document.body.textContent).toContain("Q2RJ-E1YIF");
         expect(mockAgentsApi.hire).not.toHaveBeenCalled();
         await act(async () => {
           queryClient.setQueryData(
-            adapterType === "claude_local" ? [statusKey, "company-new", sessionId] : [statusKey, "company-new", adapterType, sessionId],
-            { sessionId, status: "authenticated", expiresAt: new Date(Date.now() + 600_000).toISOString() },
+            ["adapter-login-status", "company-new", "codex_local", "codex-session-1"],
+            { sessionId: "codex-session-1", status: "authenticated" },
           );
         });
         for (let i = 0; i < 120 && !mockAgentsApi.hire.mock.calls.length; i++) {
           await act(async () => { await new Promise(resolve => setTimeout(resolve, 25)); });
         }
         expect(mockAgentsApi.hire).toHaveBeenCalledTimes(1);
-        expect(mockAgentsApi.hire).toHaveBeenCalledWith("company-new", expect.objectContaining({ runtimeConfig: expect.objectContaining({ aiConnection: { provider, method: "subscription", mode: "responsible_user" } }) }));
+        expect(mockAgentsApi.hire).toHaveBeenCalledWith("company-new", expect.objectContaining({ runtimeConfig: expect.objectContaining({ aiConnection: { provider: "openai", method: "subscription", mode: "responsible_user" } }) }));
         for (let i = 0; i < 4; i++) await flushReact();
         expect(document.body.textContent).toContain("Temporary hire failure");
         const retry = [...document.body.querySelectorAll("button")].find(button => button.textContent?.trim() === "Connect");
@@ -2054,7 +1839,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         await act(async () => { retry!.click(); });
         for (let i = 0; i < 6; i++) await flushReact();
         expect(mockAgentsApi.hire).toHaveBeenCalledTimes(2);
-        expect(mockAgentsApi.startClaudeSetupTokenLogin.mock.calls.length + mockAgentsApi.startAdapterAuthLogin.mock.calls.length).toBe(1);
+        expect(mockAgentsApi.startAdapterAuthLogin).toHaveBeenCalledTimes(1);
       } finally {
         await act(async () => root.unmount());
       }
@@ -2245,24 +2030,92 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       for (let i = 0; i < 8; i++) await flushReact();
     }
 
-    it("starts the claude_local sign-in on Connect when the signal reports no ready credential", async () => {
+    /** The Claude status panel, once the step has rendered it. */
+    function claudeCliPanel(): HTMLElement {
+      const panel = document.body.querySelector<HTMLElement>('[data-testid="claude-cli-sign-in-status"]');
+      expect(panel, "the claude CLI status panel should render").toBeTruthy();
+      return panel!;
+    }
+
+    it("shows the server's claude CLI status and how to sign it in for a Claude subscription, and signs nothing in", async () => {
+      // A Claude subscription is the claude CLI signed in on this server. The
+      // step has no Claude sign-in of its own: it reports what the CLI says for
+      // the environment the agent would run in, and how to sign the CLI in.
+      mockEnvironmentsApi.list.mockResolvedValue([LOCAL_ENVIRONMENT]);
+      mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
       mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
       const { root } = await openStep4({ adapterType: "claude_local" });
 
-      // Nothing before the press. The card *is* the sign-in now, so it does not
-      // exist until the step has been asked to start one — which is the whole
-      // difference between this step and the one it replaced.
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
+      await pickSource(/Claude/);
+
+      const panel = claudeCliPanel();
+      expect(panel.textContent).toContain(CLAUDE_CLI_SIGN_IN_TITLE);
+      expect(panel.textContent).toContain("The claude CLI on this server is not signed in.");
+      expect(panel.textContent).toContain(CLAUDE_CLI_SIGN_IN_STEPS[0]);
+      expect(panel.textContent).toContain("/login");
+      expect(panel.textContent).toContain("Check again");
+      expect(mockAgentsApi.getAdapterAuthSignal).toHaveBeenCalledWith(
+        "company-new",
+        "claude_local",
+        "env-local-1",
+      );
+      // Nothing signs in and nothing hires on its own. The panel does not gate
+      // the step either: Continue runs the environment test, which reports the
+      // real state.
+      expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
+      expect(managedApi.startLocalLogin).not.toHaveBeenCalled();
+      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      const cta = [...document.body.querySelectorAll("button")].pop()!;
+      expect(cta.textContent?.trim()).toBe("Continue");
+      expect(cta.hasAttribute("disabled")).toBe(false);
+      expect(document.body.textContent).not.toContain("Sign in to Claude");
+
+      await act(async () => root.unmount());
+    });
+
+    it("does not offer the server's claude CLI when the agent would run in a sandbox", async () => {
+      // The suite default resolves the login environment to a sandbox. A Claude
+      // subscription works only through the claude CLI signed in on this
+      // server, so the step asks for an API key instead of showing sign-in steps
+      // that could never help.
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
+      const { root } = await openStep4({ adapterType: "claude_local" });
 
       await pickSource(/Claude/);
 
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).toHaveBeenCalled();
-      // Connect started a sign-in rather than hiring. The ordering is the point:
-      // a hire here would create an agent with no credential to run on.
+      expect(document.body.querySelector('[data-testid="claude-cli-sign-in-status"]')).toBeNull();
+      expect(document.body.textContent).toContain("Claude in this environment needs an Anthropic API key.");
+      expect(document.body.textContent).not.toContain(CLAUDE_CLI_SIGN_IN_TITLE);
+      const cta = [...document.body.querySelectorAll("button")].pop()!;
+      expect(cta.textContent?.trim()).toBe("Continue");
+      expect(cta.hasAttribute("disabled")).toBe(true);
       expect(mockAgentsApi.hire).not.toHaveBeenCalled();
-      expect(document.body.textContent).toContain(
-        "Sign in to Claude then come back and enter authorization code",
-      );
+
+      await act(async () => root.unmount());
+    });
+
+    it("shows the claude CLI as signed in when the server reports it, and hires on Continue", async () => {
+      mockEnvironmentsApi.list.mockResolvedValue([LOCAL_ENVIRONMENT]);
+      mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "present" });
+      const { root } = await openStep4({ adapterType: "claude_local" });
+
+      await pickSource(/Claude/);
+
+      const panel = claudeCliPanel();
+      expect(panel.textContent).toContain("The claude CLI on this server is signed in.");
+      expect(panel.textContent).not.toContain("/login");
+      expect(panel.textContent).not.toContain("Check again");
+      // The panel shares the auth-signal read with the step. A signed-in CLI is
+      // not a provider connection, so the step's own line about one stays away.
+      expect(document.body.textContent).not.toContain("An existing provider connection is available.");
+      // Signed in is not a reason to hire unasked: Continue is the press.
+      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+
+      await pressArcPrimary();
+
+      expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(1);
+      expect(mockAgentsApi.hire).toHaveBeenCalledTimes(1);
 
       await act(async () => root.unmount());
     });
@@ -2271,8 +2124,8 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // The sequence, end to end, as the step actually runs it: the row is the
       // question, answering it starts the sign-in, and the button reports where
       // that has got to rather than offering an action it cannot perform.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
+      const { root } = await openStep4({ adapterType: "codex_local" });
 
       // Collapse is read off the row's own layout, not off how many tiles are
       // in the DOM: the leaving tile exits through AnimatePresence, and in
@@ -2287,16 +2140,17 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // Nothing chosen yet on a fresh arrival: the row is a question.
       expect(rowCentred()).toBe(false);
 
-      await pickSource(/Claude/);
+      await pickSource(/OpenAI/);
+      for (let i = 0; i < 6; i++) await flushReact();
 
       // The row has been answered, so it now shows only the answer — leaving
       // the alternative up would invite a press that has to cancel a live
       // session to honour.
       expect(rowCentred()).toBe(true);
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).toHaveBeenCalled();
+      expect(mockAgentsApi.startAdapterAuthLogin).toHaveBeenCalled();
 
       // And the button has become the sign-in rather than a step advance.
-      expect(cta()).toBe("Sign in to Claude");
+      expect(cta()).toBe("Sign in to OpenAI");
 
       // Back unwinds rather than leaving the step: the row is a question again.
       const back = [...document.body.querySelectorAll("button")].find((b) =>
@@ -2314,160 +2168,28 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
-    it("submits the browser code on the paste, not on the first keystroke", async () => {
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      await pickSource(/Claude/);
-
-      const field = document.body.querySelector(
-        'input[aria-label="Authorization code"]',
-      ) as HTMLInputElement | null;
-      expect(field, "the Claude card should offer a code field").toBeTruthy();
-
-      // The trap this pins. `isValidBrowserCode` reads like a completeness
-      // check and is not one — it accepts any printable ASCII from a single
-      // character up — so an auto-submit keyed off the value fires here, on the
-      // first character of anyone typing the code rather than pasting it, and
-      // clears the field they are typing into.
-      await act(async () => {
-        setControlledValue(field!, "Q");
-      });
-      for (let i = 0; i < 4; i++) await flushReact();
-      expect(mockAgentsApi.submitClaudeSetupTokenBrowserCode).not.toHaveBeenCalled();
-
-      // The paste is the answer, so it goes without a press. Order matches a
-      // real paste: the event lands before the value changes.
-      await act(async () => {
-        field!.dispatchEvent(new Event("paste", { bubbles: true }));
-        setControlledValue(field!, "Q2RJ-E1YIF-authorization-code");
-      });
-      for (let i = 0; i < 4; i++) await flushReact();
-      expect(mockAgentsApi.submitClaudeSetupTokenBrowserCode).toHaveBeenCalledWith(
-        "company-new",
-        "claude-session-1",
-        "Q2RJ-E1YIF-authorization-code",
-      );
-      // And it stays on screen. Clearing the field on submit emptied it in the
-      // same frame the paste landed, so the only feedback for the seconds that
-      // followed was an input that had just gone blank — reported from staging
-      // as the paste looking dropped, or the step looking stuck.
-      expect(field!.value).toBe("Q2RJ-E1YIF-authorization-code");
-      // As dots. The code is kept so the customer can see the paste landed,
-      // and that is all the field needs to show of it.
-      expect(field!.type).toBe("password");
-      // And the button answers the paste itself. The status here never reaches
-      // authenticated, so this is "Connecting" before any server confirmation —
-      // waiting for that left about a second of a button still reading
-      // "Waiting for code" after the code had gone in.
-      expect(
-        [...document.body.querySelectorAll("button")].pop()?.textContent?.trim(),
-      ).toBe("Connecting");
-
-      await act(async () => root.unmount());
-    });
-
-    it("does not hire on the paste alone, before the login is stored", async () => {
-      // "Connecting" appears at the paste now, ahead of the server confirming
-      // anything. The two-second hold used to start at that same moment, so
-      // moving one without the other would hire at the paste plus two seconds
-      // whether or not a credential existed. The status here stays pending, so
-      // the login is never stored.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      await pickSource(/Claude/);
-
-      const field = document.body.querySelector(
-        'input[aria-label="Authorization code"]',
-      ) as HTMLInputElement;
-      await act(async () => {
-        field.dispatchEvent(new Event("paste", { bubbles: true }));
-        setControlledValue(field, "Q2RJ-E1YIF-authorization-code");
-      });
-      for (let i = 0; i < 4; i++) await flushReact();
-
-      const cta = () =>
-        [...document.body.querySelectorAll("button")].pop()?.textContent?.trim();
-      // The paste really did start Connecting; without this the assertion
-      // below would hold for a flow that never got that far.
-      expect(cta(), "the paste should have started Connecting").toBe("Connecting");
-
-      await act(async () => {
-        await new Promise((resolve) => window.setTimeout(resolve, CONNECTED_HOLD_MS + 400));
-      });
-      for (let i = 0; i < 4; i++) await flushReact();
-
-      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
-      expect(cta()).toBe("Connecting");
-
-      await act(async () => root.unmount());
-    });
-
-    it("gives the button back when the pasted code is refused", async () => {
-      // The other half of answering the paste early: a button that says
-      // "Connecting" before the server answers has to stop saying it when the
-      // answer is no, or it spins on a login that is not coming.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      mockAgentsApi.submitClaudeSetupTokenBrowserCode.mockRejectedValueOnce(
-        new Error("That authorization code was not accepted."),
-      );
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      await pickSource(/Claude/);
-
-      const cta = () =>
-        [...document.body.querySelectorAll("button")].pop()?.textContent?.trim();
-      expect(cta()).toBe("Sign in to Claude");
-
-      const field = document.body.querySelector(
-        'input[aria-label="Authorization code"]',
-      ) as HTMLInputElement;
-      await act(async () => {
-        field.dispatchEvent(new Event("paste", { bubbles: true }));
-        setControlledValue(field, "Q2RJ-E1YIF-authorization-code");
-      });
-      for (let i = 0; i < 8; i++) await flushReact();
-
-      expect(mockAgentsApi.submitClaudeSetupTokenBrowserCode).toHaveBeenCalledTimes(1);
-      expect(document.body.textContent).toContain("That authorization code was not accepted.");
-      expect(cta()).toBe("Sign in to Claude");
-      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
-
-      await act(async () => root.unmount());
-    });
-
-    it("does not reopen the card when a pasted code fails after Back", async () => {
-      // The panel stays mounted through Back's exit, so its report of a failed
-      // submit can land mid-exit. Restoring the button there reopened the card
-      // the customer was leaving, without the address Back had cleared.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      let refuse: (error: Error) => void = () => {};
-      mockAgentsApi.submitClaudeSetupTokenBrowserCode.mockImplementationOnce(
-        () =>
-          new Promise((_resolve, reject) => {
-            refuse = reject;
-          }),
-      );
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      await pickSource(/Claude/);
-
-      const field = document.body.querySelector(
-        'input[aria-label="Authorization code"]',
-      ) as HTMLInputElement;
-      await act(async () => {
-        field.dispatchEvent(new Event("paste", { bubbles: true }));
-        setControlledValue(field, "Q2RJ-E1YIF-authorization-code");
-      });
-      for (let i = 0; i < 4; i++) await flushReact();
-
-      const cta = () =>
-        [...document.body.querySelectorAll("button")].pop()?.textContent?.trim();
-      expect(mockAgentsApi.submitClaudeSetupTokenBrowserCode).toHaveBeenCalledTimes(1);
-      expect(cta(), "the paste should have started Connecting").toBe("Connecting");
-
-      // Hold the exit open so the refusal lands inside it. Without a
-      // `matchMedia` to ask, every beat collapses to zero and the exit would be
-      // over before the refusal arrived — which would pass for the wrong reason.
+    it("does not hire when the login finishes after Back", async () => {
+      // A login can complete while Back's exit is still running, and reporting
+      // that success pulled the step back into "Connecting" and on into a hire
+      // the customer had backed away from.
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
       const realMatchMedia = window.matchMedia;
-      Object.defineProperty(window, "matchMedia", {
+      try {
+        const { root, queryClient } = await openStep4({ adapterType: "codex_local" });
+        await pickSource(/OpenAI/);
+        for (let i = 0; i < 6; i++) await flushReact();
+
+        // The login is running and the card is up.
+        expect(mockAgentsApi.startAdapterAuthLogin).toHaveBeenCalledTimes(1);
+        const cta = () =>
+          [...document.body.querySelectorAll("button")].pop()?.textContent?.trim();
+        expect(cta()).toBe("Sign in to OpenAI");
+
+        // Hold the exit open, so the success lands inside it. Without a
+        // `matchMedia` to ask, every beat collapses to zero and the exit would
+        // be over before the success arrived — which would pass for the wrong
+        // reason.
+        Object.defineProperty(window, "matchMedia", {
         configurable: true,
         writable: true,
         value: (query: string) => ({
@@ -2481,7 +2203,6 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           dispatchEvent: () => false,
         }),
       });
-      try {
         const back = [...document.body.querySelectorAll("button")].find((b) =>
           b.textContent?.trim().startsWith("Back"),
         );
@@ -2489,105 +2210,20 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           back!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         });
         await act(async () => {
-          refuse(new Error("That authorization code was not accepted."));
-        });
-        for (let i = 0; i < 4; i++) await flushReact();
-
-        // Still leaving: the button shows the step's resting face, not the
-        // sign-in it would have reopened.
-        expect(cta()).toBe("Next");
-
-        // And the exit finishes — the row is a question again. Waited in short
-        // slices, each its own `act`. One long `act` defers React's commits to
-        // its end, so a beat's timer fires on time but its phase only commits
-        // when the wait is over — and the next beat is scheduled only then. The
-        // exit crawls one step per wait and never gets back to the question.
-        for (let i = 0; i < 30; i++) {
-          await act(async () => {
-            await new Promise((resolve) => window.setTimeout(resolve, 50));
-          });
-        }
-        expect(
-          document.body
-            .querySelector('[role="radiogroup"]')!
-            .className.includes("justify-center"),
-        ).toBe(false);
-        expect(mockAgentsApi.hire).not.toHaveBeenCalled();
-      } finally {
-        Object.defineProperty(window, "matchMedia", {
-          configurable: true,
-          writable: true,
-          value: realMatchMedia,
-        });
-      }
-
-      await act(async () => root.unmount());
-    });
-
-    it("does not hire when the login finishes after Back", async () => {
-      // The same window from the other side. A login can complete while Back's
-      // exit is still running, and reporting that success pulled the step back
-      // into "Connecting" and on into a hire the customer had backed away from.
-      // No paste needed: here the server has already authenticated, and the
-      // completion read is simply slow.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      mockAgentsApi.getClaudeSetupTokenLoginStatus.mockResolvedValue({
-        sessionId: "claude-session-1",
-        status: "authenticated",
-        expiresAt: new Date(Date.now() + 600_000).toISOString(),
-      });
-      let finishCompletion: (value: { storedSessionId: string }) => void = () => {};
-      mockAgentsApi.completeClaudeSetupTokenLogin.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishCompletion = resolve;
-          }),
-      );
-      const realMatchMedia = window.matchMedia;
-      try {
-        const { root } = await openStep4({ adapterType: "claude_local" });
-        await pickSource(/Claude/);
-        for (let i = 0; i < 6; i++) await flushReact();
-
-        // The completion read is out and has not answered, and the card is up.
-        expect(mockAgentsApi.completeClaudeSetupTokenLogin).toHaveBeenCalledTimes(1);
-        const cta = () =>
-          [...document.body.querySelectorAll("button")].pop()?.textContent?.trim();
-        expect(cta()).toBe("Sign in to Claude");
-
-        // Hold the exit open, as above, so the success lands inside it.
-        Object.defineProperty(window, "matchMedia", {
-          configurable: true,
-          writable: true,
-          value: (query: string) => ({
-            matches: false,
-            media: query,
-            onchange: null,
-            addListener: () => {},
-            removeListener: () => {},
-            addEventListener: () => {},
-            removeEventListener: () => {},
-            dispatchEvent: () => false,
-          }),
-        });
-        const back = [...document.body.querySelectorAll("button")].find((b) =>
-          b.textContent?.trim().startsWith("Back"),
-        );
-        await act(async () => {
-          back!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-        });
-        await act(async () => {
-          finishCompletion({ storedSessionId: "stored-1" });
+          queryClient.setQueryData(
+            ["adapter-login-status", "company-new", "codex_local", "codex-session-1"],
+            { sessionId: "codex-session-1", status: "authenticated" },
+          );
         });
         for (let i = 0; i < 4; i++) await flushReact();
 
         expect(cta()).toBe("Next");
 
         // Past the exit, and past the full hold a late success would have
-        // started. In short slices, each its own `act`, for the reason given in
-        // the test above — and here it matters twice: a hire scheduled by a late
-        // "Connecting" is only scheduled once that phase commits, so one long
-        // `act` would hide the very hire this is looking for.
+        // started. In short slices, each its own `act`: one long `act` defers
+        // React's commits to its end, and a hire scheduled by a late
+        // "Connecting" is only scheduled once that phase commits — so one long
+        // wait would hide the very hire this is looking for.
         const slices = Math.ceil((CONNECTED_HOLD_MS + 1200) / 50);
         for (let i = 0; i < slices; i++) {
           await act(async () => {
@@ -2608,11 +2244,6 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           configurable: true,
           writable: true,
           value: realMatchMedia,
-        });
-        mockAgentsApi.getClaudeSetupTokenLoginStatus.mockResolvedValue({
-          sessionId: "claude-session-1",
-          status: "pending",
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
         });
       }
     }, 15_000);
@@ -2660,7 +2291,6 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // The displayed-code panel is the one under test: if the row picked a
       // source the other panel serves, the rest of this proves nothing.
       expect(mockAgentsApi.startAdapterAuthLogin).toHaveBeenCalled();
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
 
       const cta = [...document.body.querySelectorAll("button")].pop()!;
       expect(cta.textContent?.trim()).toBe("Sign in to OpenAI");
@@ -2683,17 +2313,16 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // a flicker, and Back stays live throughout. The hire behind that hold
       // knows nothing about the phase, so a timer left running took a customer
       // who had just backed out to Review with an agent hired anyway.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      // A session the server has already authenticated, so the panel completes
-      // and reports success on its own. The paste that normally gets it there
-      // is the sibling test's subject; this one is about what the success does.
-      mockAgentsApi.getClaudeSetupTokenLoginStatus.mockResolvedValue({
-        sessionId: "claude-session-1",
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
+      // A session the server has already authenticated, so the panel reports
+      // success on its own.
+      mockAgentsApi.getAdapterAuthLoginStatus.mockResolvedValue({
+        sessionId: "codex-session-1",
         status: "authenticated",
-        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        prompt: { url: "https://auth.openai.com/codex/device", code: "Q2RJ-E1YIF" },
       });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      await pickSource(/Claude/);
+      const { root } = await openStep4({ adapterType: "codex_local" });
+      await pickSource(/OpenAI/);
       for (let i = 0; i < 8; i++) await flushReact();
 
       const cta = () =>
@@ -2729,14 +2358,14 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // blocking anything — so they rendered for the window between the probe
       // returning and the step advancing, reading as an error thrown by the
       // sign-in that had just succeeded.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      mockAgentsApi.getClaudeSetupTokenLoginStatus.mockResolvedValue({
-        sessionId: "claude-session-1",
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
+      mockAgentsApi.getAdapterAuthLoginStatus.mockResolvedValue({
+        sessionId: "codex-session-1",
         status: "authenticated",
-        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        prompt: { url: "https://auth.openai.com/codex/device", code: "Q2RJ-E1YIF" },
       });
       mockAgentsApi.testEnvironment.mockResolvedValue({
-        adapterType: "claude_local",
+        adapterType: "codex_local",
         status: "warn",
         checks: [
           {
@@ -2758,8 +2387,8 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         }),
       );
 
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      await pickSource(/Claude/);
+      const { root } = await openStep4({ adapterType: "codex_local" });
+      await pickSource(/OpenAI/);
       for (let i = 0; i < 8; i++) await flushReact();
 
       // Past the deliberate hold, so the hire is running and its probe is done.
@@ -2785,9 +2414,9 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
     it("starts no login when Back interrupts the collapse", async () => {
       // Backing out before the card has opened has nothing to close. Unwinding
       // through the card beat regardless mounted the panel — which starts a
-      // server login on mount — only for the unmount to cancel it, and a cancel
-      // that fails holds the per-owner reservation until the server deadline,
-      // so the retry the customer is about to make cannot start.
+      // server login on mount — only for the unmount to leave it running, and
+      // the per-owner reservation holds until the server deadline, so the retry
+      // the customer is about to make cannot start.
       //
       // The beats collapse to zero without a `matchMedia` to ask, which is why
       // this stubs one: the collapse has to still be running when Back lands.
@@ -2807,13 +2436,13 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         }),
       });
       try {
-        mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-        const { root } = await openStep4({ adapterType: "claude_local" });
+        mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
+        const { root } = await openStep4({ adapterType: "codex_local" });
 
-        await pickSource(/Claude/);
+        await pickSource(/OpenAI/);
         // Still collapsing: the flushes above are microtasks and 0ms timers,
         // far inside the collapse's own duration.
-        expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
+        expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
 
         const back = [...document.body.querySelectorAll("button")].find((b) =>
           b.textContent?.trim().startsWith("Back"),
@@ -2827,7 +2456,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         });
         for (let i = 0; i < 6; i++) await flushReact();
 
-        expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
+        expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
         expect(document.body.textContent).toContain("Connect a model");
 
         await act(async () => root.unmount());
@@ -2897,68 +2526,6 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
-    it("shows the failure instead of starting a claude_local login when the active-session read fails", async () => {
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      mockAgentsApi.getActiveClaudeSetupTokenLoginSession.mockReset();
-      mockAgentsApi.getActiveClaudeSetupTokenLoginSession.mockRejectedValue(
-        new ApiError("Service unavailable", 503, null),
-      );
-      const { root } = await openStep4({ adapterType: "claude_local" });
-
-      await pickSource(/Claude/);
-
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
-      expect(document.body.textContent).toContain("Service unavailable");
-
-      await act(async () => root.unmount());
-    });
-
-    it("resumes the same claude_local session after Back, rather than starting a second", async () => {
-      // This is the behaviour that makes the card's Cancel removable. Back only
-      // hides the card — it deliberately does not release the session — so
-      // coming back has to adopt the one already running. If it started a
-      // fresh one instead, the removed Cancel would have been the only way out
-      // of a login the customer could no longer reach, and the per-owner cap
-      // would reject the second start.
-      const session = {
-        sessionId: "claude-session-1",
-        status: "pending",
-        expiresAt: new Date(Date.now() + 600_000).toISOString(),
-      };
-      let started = false;
-      mockAgentsApi.startClaudeSetupTokenLogin.mockImplementation(async () => {
-        started = true;
-        return session;
-      });
-      mockAgentsApi.getActiveClaudeSetupTokenLoginSession.mockReset();
-      mockAgentsApi.getActiveClaudeSetupTokenLoginSession.mockImplementation(async () =>
-        started ? session : null,
-      );
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-
-      await pickSource(/Claude/);
-      // The login is genuinely running: without this the assertion below holds
-      // for the wrong reason.
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).toHaveBeenCalledTimes(1);
-
-      const back = [...document.body.querySelectorAll("button")].find((b) =>
-        b.textContent?.trim().startsWith("Back"),
-      );
-      await act(async () => {
-        back!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      });
-      for (let i = 0; i < 12; i++) await flushReact();
-
-      await pickSource(/Claude/);
-      for (let i = 0; i < 8; i++) await flushReact();
-
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).toHaveBeenCalledTimes(1);
-      expect(mockAgentsApi.getActiveClaudeSetupTokenLoginSession).toHaveBeenCalled();
-
-      await act(async () => root.unmount());
-    });
-
     it("resumes the same codex_local session after Back, rather than starting a second", async () => {
       const session = { sessionId: "codex-session-1", status: "pending" };
       let started = false;
@@ -2993,19 +2560,18 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
-    it("starts the other source's login after backing out of the first", async () => {
-      // The abandonment case, raised in review against removing the card's
-      // Cancel: with no explicit release, does a source switch still get a
-      // login? It does. The server's lease is keyed on the adapter type as
-      // well as the company and environment, so the abandoned Claude session
-      // does not stand in the way of a Codex one — and it is collected on its
-      // own five-minute timer regardless (DEVICE_LOGIN_TIMEOUT_MS), with the
-      // reaper as the restart-safe backstop.
+    it("starts the OpenAI sign-in after backing out of Claude", async () => {
+      // Claude has no sign-in here, only the status of the server's claude CLI,
+      // so backing out of it leaves nothing running. The next source's login
+      // starts as if Claude had never been picked.
       mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
       const { root } = await openStep4({ adapterType: "claude_local" });
 
       await pickSource(/Claude/);
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).toHaveBeenCalledTimes(1);
+      // The suite's default environment is a sandbox, where a Claude
+      // subscription cannot run: the step asks for an API key instead.
+      expect(document.body.textContent).toContain("Claude in this environment needs an Anthropic API key.");
+      expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
 
       const back = [...document.body.querySelectorAll("button")].find((b) =>
         b.textContent?.trim().startsWith("Back"),
@@ -3019,18 +2585,18 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       for (let i = 0; i < 8; i++) await flushReact();
 
       expect(mockAgentsApi.startAdapterAuthLogin).toHaveBeenCalledTimes(1);
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).toHaveBeenCalledTimes(1);
+      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
 
       await act(async () => root.unmount());
     });
 
     it("hires on Connect, with no sign-in, when the signal reports a ready credential", async () => {
       mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "present" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
+      const { root } = await openStep4({ adapterType: "codex_local" });
 
       // Answer the row, then press: with a credential already in place there is
       // no sign-in to run, so the button goes straight to the hire.
-      await pickSource(/Claude/);
+      await pickSource(/OpenAI/);
       await pressArcPrimary();
 
       // The positive half is what makes this a test: a source that is already
@@ -3038,49 +2604,15 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // wherever there is no sign-in to do. Asserting only the absence of a
       // card would pass just as well if the button had stopped working.
       expect(mockAgentsApi.hire).toHaveBeenCalled();
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
+      expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
 
-      await act(async () => root.unmount());
-    });
-
-    it("renders no 'Use saved login' control", async () => {
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      expect(document.body.textContent).not.toContain("Use saved login");
       await act(async () => root.unmount());
     });
 
     it("reads the signal again after an adapter change", async () => {
       mockAdapterRegistry.list = [{ type: "claude_local" }, { type: "codex_local" }];
       mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-
-      expect(mockAgentsApi.getAdapterAuthSignal).toHaveBeenCalledWith(
-        "company-new",
-        "claude_local",
-        "env-sandbox-1",
-      );
-
-      const clickByText = async (match: (text: string) => boolean) => {
-        const el = [...document.body.querySelectorAll("button")].find((b) =>
-          match(b.textContent?.trim() ?? ""),
-        )!;
-        await act(async () => {
-          el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-        });
-        await flushReact();
-      };
-
-      // Straight to the tile. The adapter change used to be reached through an
-      // "Advanced settings" disclosure listing every non-recommended adapter;
-      // the step now offers Claude and Codex as tiles and spends that line on
-      // the credential switch instead. What is asserted below is unchanged —
-      // changing the source re-reads the signal — only the route there is.
-      // The tile's text is the label plus its credential tag, hence the prefix.
-      // That label is the provider name now, not the adapter type: this row
-      // asks which provider you are signing in to, so it reads through
-      // `MODEL_SOURCE_NAMES` rather than the display registry.
-      await clickByText((t) => t.startsWith("OpenAI"));
+      const { root } = await openStep4({ adapterType: "codex_local" });
 
       expect(mockAgentsApi.getAdapterAuthSignal).toHaveBeenCalledWith(
         "company-new",
@@ -3088,12 +2620,25 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         "env-sandbox-1",
       );
 
+      // Changing the source changes what the step reads. Claude in a sandbox
+      // cannot use the server's claude CLI, so there is no Claude status to
+      // read: the step asks for an API key instead.
+      await pickSource(/Claude/);
+
+      expect(mockAgentsApi.getAdapterAuthSignal).not.toHaveBeenCalledWith(
+        "company-new",
+        "claude_local",
+        "env-sandbox-1",
+      );
+      expect(document.body.textContent).toContain("Claude in this environment needs an Anthropic API key.");
+
       await act(async () => root.unmount());
     });
 
     describe("automatic subscription verification", () => {
+      // A Claude subscription is the server's claude CLI, never a connected
+      // account, so only the providers with a local sign-in are here.
       const providers = [
-        ["claude_local", "anthropic", /Claude/],
         ["codex_local", "openai", /OpenAI/],
       ] as const;
       const passed = { adapterType: "codex_local", status: "pass" as const, checks: [], testedAt: new Date().toISOString() };
@@ -3331,29 +2876,55 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           await settle();
           expect(mockAgentsApi.hire).not.toHaveBeenCalled();
           expect(document.body.textContent).not.toContain("is ready to work!");
-          if (navigation === "provider") expect(document.body.textContent).toContain("claude auth login");
+          if (navigation === "provider") expect(document.body.textContent).toContain(CLAUDE_CLI_SIGN_IN_TITLE);
         } finally { if (mounted) await act(async () => root.unmount()); }
       });
     });
 
-    it("shows local Claude instructions and saves its connection before hiring", async () => {
+    it("hires a Claude subscription with no Claude credential and no AI connection", async () => {
+      // The whole of the Claude subscription path: the server's claude CLI
+      // uses its own sign-in, so neither the probe nor the hire carries a
+      // Claude credential, and no AI connection is created or bound — even
+      // with a Claude subscription connection left over from before.
       localHealth.get.mockResolvedValue({ deploymentMode: "local_trusted" });
       mockEnvironmentsApi.list.mockResolvedValue([LOCAL_ENVIRONMENT]);
       mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
-      const { root } = await openStep4({ adapterType: "claude_local" });
+      const { root, queryClient } = await openStep4({ adapterType: "claude_local" });
+      await act(async () => queryClient.setQueryData(["ai-connections", "company-new"], {
+        currentUserId: "user-1",
+        connections: [{ id: "legacy", grantId: "legacy-grant", companyId: "company-new", provider: "anthropic", method: "subscription", name: "Old Claude subscription", ownership: "personal", ownerUserId: "user-1", status: "connected", isDefault: true }],
+      }));
+
       await pickSource(/Claude/);
-      expect(document.body.textContent).toContain("claude auth login");
-      expect(document.body.textContent).toContain("machine running Paperclip");
-      expect(document.body.textContent).not.toContain("No managed sandbox");
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
-      const connect = [...document.body.querySelectorAll("button")].find(b => b.textContent?.trim().startsWith("Connect"));
-      expect(connect).toBeTruthy();
-      await act(async () => connect!.click());
-      for (let i = 0; i < 6; i++) await flushReact();
-      expect(managedApi.connectLocal).toHaveBeenCalledWith("company-new", expect.objectContaining({ provider: "anthropic", method: "subscription", ownership: "personal" }));
-      expect(mockAgentsApi.hire).toHaveBeenCalled();
-      const hire = (mockAgentsApi.hire.mock.calls.at(-1) as unknown[])[1] as { runtimeConfig: { aiConnection: unknown } };
-      expect(hire.runtimeConfig.aiConnection).toEqual({ provider: "anthropic", method: "subscription", mode: "responsible_user" });
+      expect(claudeCliPanel().textContent).toContain(CLAUDE_CLI_SIGN_IN_TITLE);
+      expect(document.body.textContent).not.toContain("claude auth login");
+      expect(managedApi.startLocalLogin).not.toHaveBeenCalled();
+      expect(managedApi.checkLocalLogin).not.toHaveBeenCalled();
+
+      await pressArcPrimary();
+
+      expect(managedApi.connectLocal).not.toHaveBeenCalled();
+      expect(managedApi.create).not.toHaveBeenCalled();
+      expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(1);
+      const probe = (mockAgentsApi.testEnvironment.mock.calls.at(-1) as unknown[])[2] as {
+        adapterConfig: { env?: Record<string, unknown> };
+        aiConnection?: unknown;
+      };
+      expect(probe.aiConnection).toBeUndefined();
+      expect(probe.adapterConfig.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+
+      expect(mockAgentsApi.hire).toHaveBeenCalledTimes(1);
+      const hire = (mockAgentsApi.hire.mock.calls.at(-1) as unknown[])[1] as {
+        adapterType: string;
+        adapterConfig: { env?: Record<string, unknown> };
+        runtimeConfig: { aiConnection?: unknown };
+      };
+      expect(hire.adapterType).toBe("claude_local");
+      expect(hire.runtimeConfig.aiConnection).toBeUndefined();
+      expect(hire.adapterConfig.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      expect(JSON.stringify(hire)).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+      expect(hire).not.toHaveProperty("applyStoredClaudeLogin");
+      expect(hire).not.toHaveProperty("storedSessionId");
       await act(async () => root.unmount());
     });
 
@@ -3361,8 +2932,8 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       mockEnvironmentsApi.list.mockResolvedValue([LOCAL_ENVIRONMENT]);
       mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
       mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      expect(document.body.textContent).not.toContain("Sign in to Anthropic");
+      const { root } = await openStep4({ adapterType: "codex_local" });
+      expect(document.body.textContent).not.toContain("Sign in to OpenAI");
       expect(mockAgentsApi.getAdapterAuthSignal).not.toHaveBeenCalled();
       await act(async () => root.unmount());
     });
@@ -3373,28 +2944,29 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       // wizard state to replay blindly. The step must instead re-derive it
       // from the caller's active session, so a customer who reloads mid-login
       // sees their sign-in still running rather than the tile row again.
-      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
-      mockAgentsApi.getActiveClaudeSetupTokenLoginSession.mockResolvedValue({
-        sessionId: "claude-session-1",
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
+      mockAgentsApi.getActiveAdapterAuthLoginSession.mockResolvedValue({
+        sessionId: "codex-session-1",
         environmentId: "env-sandbox-1",
+        aiConnection: { provider: "openai", method: "subscription", name: "My OpenAI subscription", ownership: "personal", agentIds: [], allAgents: true },
         status: "waiting_for_user",
         expiresAt: null,
         failure: null,
-        panelMode: "submitted_browser_code",
-        prompt: { authorizationUrl: "https://claude.ai/oauth/authorize?code=true" },
+        panelMode: "displayed_code",
+        prompt: { url: "https://auth.openai.com/codex/device", code: "Q2RJ-E1YIF" },
       });
-      const { root } = await openStep4({ adapterType: "claude_local" });
-      // A reload's resume now runs one layer deeper than a fresh press: the
-      // step's own active-session read has to land before it opens the
-      // sequence, and only then does the mounted panel run its own resume
-      // read. Each is a further round trip `flushReact` has to catch up to.
+      const { root } = await openStep4({ adapterType: "codex_local" });
+      // A reload's resume runs one layer deeper than a fresh press: the step's
+      // own active-session read has to land before it opens the sequence, and
+      // only then does the mounted panel run its own resume read. Each is a
+      // further round trip `flushReact` has to catch up to.
       for (let i = 0; i < 10; i += 1) await flushReact();
 
       // No press: the resumed session is discovered on load and the card
       // shows the login already running.
-      expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
+      expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
       expect(document.body.textContent).toContain(
-        "Sign in to Claude then come back and enter authorization code",
+        "Sign in to OpenAI by providing the authorization code below",
       );
 
       await act(async () => root.unmount());

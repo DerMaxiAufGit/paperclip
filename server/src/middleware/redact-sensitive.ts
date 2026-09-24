@@ -68,10 +68,7 @@ const SENSITIVE_KEYS = new Set<string>([
   "webhook_secret",
   "webhooksecret",
   "paperclip_capability",
-  // The Claude setup-token login fields. `browserCode` carries the one-time
-  // sign-in code and `authorization_code` carries the OAuth code; neither may
-  // reach a log line.
-  "browsercode",
+  // An OAuth authorization code must never reach a log line.
   "authorization_code",
   "authorizationcode",
   // The workspace login handoff ticket (PAP-17572). It is a signed bearer
@@ -101,9 +98,9 @@ const URLISH_KEYS = new Set<string>([
   "sourceurl",
   "uri",
   "url",
-  // The Claude setup-token login URL. A structured `loginUrl` that reaches a log
-  // sink keeps its origin and path only; the OAuth query, fragment, and any
-  // credentials are stripped (SR-5 backstop).
+  // A sign-in URL (for example the `claude login` URL in the run metadata). A
+  // structured `loginUrl` that reaches a log sink keeps its origin and path
+  // only; the OAuth query, fragment, and any credentials are stripped.
   "loginurl",
   "login_url",
 ]);

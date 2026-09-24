@@ -7,8 +7,7 @@ const PLUGIN_ID = "paperclip.daytona-sandbox-provider";
 // persisted manifest raw and does not re-run the validator, so it never
 // canonicalizes a renamed capability.
 //
-// 0.1.3 renamed the login transport flag from `supportsSetupTokenLogin` to the
-// neutral `supportsLoginPty`.
+// 0.1.3 renamed the login transport capability flag to `supportsLoginPty`.
 // 0.1.4 adds the `concurrentSyncOperations` sandbox capability to the driver.
 // 0.1.5 adds the `duplexCommandStream` sandbox capability to the driver.
 // 0.1.6 adds private authenticated WebSocket ingress for paperclip_runner.

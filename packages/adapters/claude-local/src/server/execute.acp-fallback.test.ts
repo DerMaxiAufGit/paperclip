@@ -40,11 +40,11 @@ const {
 vi.mock("./acp.js", () => ({
   createClaudeAcpExecutor: () => executeClaudeAcp,
   resolveClaudeExecutionEngineForRun: async (ctx: { config: Record<string, unknown> }) =>
-    ctx.config.engine === "cli"
-      ? { engine: "cli", explicit: true }
-      : ctx.config.engine === "acp"
+    ctx.config.engine === "acp"
       ? { engine: "acp", explicit: true }
-      : { engine: "acp", explicit: false },
+      : ctx.config.engine === "cli"
+      ? { engine: "cli", explicit: true }
+      : { engine: "cli", explicit: false },
 }));
 
 vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
@@ -84,7 +84,7 @@ function buildContext(config: Record<string, unknown> = {}) {
   };
 }
 
-describe("claude_local ACP startup fallback", () => {
+describe("claude_local engine dispatch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -93,11 +93,13 @@ describe("claude_local ACP startup fallback", () => {
     vi.unstubAllEnvs();
   });
 
-  it("does not start CLI after default ACP fails", async () => {
+  it("runs the Claude CLI engine by default and never starts ACP", async () => {
     const ctx = buildContext();
-    await expect(execute(ctx as never)).rejects.toThrow('Unexpected "<<"');
-    expect(executeClaudeAcp).toHaveBeenCalledTimes(1);
-    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
+    await execute(ctx as never);
+    expect(executeClaudeAcp).not.toHaveBeenCalled();
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
+    const args = (runAdapterExecutionTargetProcess.mock.calls[0] as unknown as unknown[])[3] as string[];
+    expect(args.slice(0, 4)).toEqual(["--print", "--output-format", "stream-json", "--verbose"]);
   });
 
   it("trusts the Paperclip API URL when network access is allowlisted", async () => {
@@ -127,6 +129,7 @@ describe("claude_local ACP startup fallback", () => {
 
     await expect(execute(ctx as never)).rejects.toThrow('Unexpected "<<"');
 
+    expect(executeClaudeAcp).toHaveBeenCalledTimes(1);
     expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
   });
 });

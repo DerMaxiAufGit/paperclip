@@ -90,15 +90,14 @@ export async function closeHttpListenerForShutdown(input: {
 
 /**
  * Runs the final, ordered teardown of the server. It awaits the application
- * service cleanup first, so a live setup-token login session stops and releases
- * its sandbox lease before the database and the provider stop. The caller runs
- * `process.exit(0)` only after this helper resolves, so an orderly shutdown
- * never leaves a sandbox lease or confidential login state alive past the
- * process exit.
+ * service cleanup first, so every application service (schedulers, channels,
+ * worker pools) finishes its teardown before the database and the provider
+ * stop. The caller runs `process.exit(0)` only after this helper resolves, so
+ * an orderly shutdown never leaves a service running against a closed pool
+ * past the process exit.
  *
  * A step that rejects does not stop the teardown. The helper logs the error and
- * continues to the next step. A failed setup-token lease release stays a
- * durable record for the startup reaper; the helper surfaces it in the log
+ * continues to the next step, so a failed service cleanup surfaces in the log
  * instead of blocking the exit path.
  */
 export async function finalizeServerShutdown(input: {
@@ -142,9 +141,9 @@ export async function finalizeServerShutdown(input: {
     }
   }
 
-  // Await the application service cleanup, so a live setup-token login session
-  // releases its sandbox lease before the database and the provider stop. A
-  // rejected cleanup stays durable for the reaper; it does not block the exit.
+  // Await the application service cleanup, so every service finishes its
+  // teardown before the database and the provider stop. A rejected cleanup is
+  // logged; it does not block the exit.
   try {
     await input.shutdownAppServices?.();
   } catch (err) {

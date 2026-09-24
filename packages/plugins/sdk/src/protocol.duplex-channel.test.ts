@@ -18,7 +18,7 @@ import {
   type PluginDuplexChannelWriteParams,
 } from "./protocol.js";
 
-// The generic duplex channel messages model the setup-token pseudo-terminal
+// The generic duplex channel messages model the device-login pseudo-terminal
 // contract: open, write, stop, and close requests, plus data and exit
 // notifications. The host owns the route identifier. The worker returns a worker
 // session identifier that binds the data and the exit notification only. A close

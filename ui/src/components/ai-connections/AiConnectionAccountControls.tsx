@@ -4,7 +4,7 @@ import type { ConnectionGrant } from "@paperclipai/shared";
 import { RevokeGrantDialog } from "@/pages/apps/app-detail/IdentitiesSection";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { AI_PROVIDERS, aiMethodLabel, type AiConnectionSummary } from "./model";
+import { AI_PROVIDERS, aiMethodLabel, aiMethodUnsupportedMessage, type AiConnectionSummary } from "./model";
 
 /** AI-only account controls; identity, access and navigation belong to AppDetail. */
 export function AiConnectionAccountControls({
@@ -23,7 +23,10 @@ export function AiConnectionAccountControls({
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string>();
   const ownPersonal = account.ownership === "personal" && account.ownerUserId === currentUserId;
-  const available = account.status === "connected";
+  // A connection saved with a withdrawn method (a Claude subscription) cannot
+  // run, become the default, or be reconnected; it can only be revoked.
+  const unsupported = aiMethodUnsupportedMessage(account.provider, account.method);
+  const available = account.status === "connected" && !unsupported;
   const activeDefault = account.isDefault && available;
   return (
     <section className="space-y-4" aria-label="AI account settings">
@@ -53,10 +56,11 @@ export function AiConnectionAccountControls({
         <div className="min-w-0 text-sm">
           <p className="font-medium">{aiMethodLabel(account.provider, account.method)}</p>
           {account.accountLabel && <p className="break-words text-xs text-muted-foreground">{account.accountLabel}</p>}
+          {unsupported && <p role="status" className="text-xs text-muted-foreground">{unsupported} Connect an API key instead.</p>}
         </div>
         {!readOnly && grant.capabilities?.canRevoke && (
           <div className="flex flex-wrap items-center gap-2">
-            {<Button variant="outline" size="sm" onClick={onReconnect}><RefreshCw className="size-4" aria-hidden />Reconnect</Button>}
+            {!unsupported && <Button variant="outline" size="sm" onClick={onReconnect}><RefreshCw className="size-4" aria-hidden />Reconnect</Button>}
             {account.status !== "revoked" && <Button variant="ghost" size="sm" className="text-destructive" onClick={() => setRevoking(true)}><Unplug className="size-4" aria-hidden />Revoke identity</Button>}
           </div>
         )}

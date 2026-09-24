@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, screen, userEvent, waitFor } from "storybook/test";
 import { useEffect, useState } from "react";
 
+import { CLAUDE_CLI_SIGN_IN_TITLE } from "@/components/ClaudeCliSignInStatus";
 import { OnboardingWizard } from "@/components/OnboardingWizard";
 import { PillGuy } from "@/components/onboarding/PillGuy";
 import { Stepper } from "@/components/onboarding/Stepper";
@@ -143,8 +144,11 @@ async function advance(to: string) {
   await screen.findByRole("heading", { name: to }, { timeout: STEP_TIMEOUT_MS });
 }
 
-/** Naming advances with Next; the selected model source advances with Connect. */
-const PRIMARY = /^(Next|Connect)$/;
+/**
+ * Naming advances with Next; the selected model source advances with Connect,
+ * or with Continue for a Claude subscription, which has nothing to connect.
+ */
+const PRIMARY = /^(Next|Connect|Continue)$/;
 
 /**
  * Pick a model source, which the connect step needs before it will go forward.
@@ -363,7 +367,9 @@ export const PillMorph: StoryObj = {
 };
 
 // These mount the shipped onboarding flow, not ConnectModelPreview. Selecting
-// a source opens its actual login panel against the Storybook API fixtures.
+// a source opens its actual login panel against the Storybook API fixtures. A
+// Claude subscription opens the claude CLI status panel instead: Paperclip
+// never signs in to Claude.
 function signedOutConnectionFixture() {
   clearOnboardingDraft();
   setOnboardingFixtureState({ environments: "managed-sandbox", authSignal: "absent" });
@@ -380,7 +386,7 @@ async function openProviderConnection(provider: "Claude" | "OpenAI", mode: "subs
   if (mode === "api") {
     await screen.findByLabelText("API key", {}, { timeout: STEP_TIMEOUT_MS });
   } else if (provider === "Claude") {
-    await screen.findByLabelText("Authorization code", {}, { timeout: STEP_TIMEOUT_MS });
+    await screen.findByText(CLAUDE_CLI_SIGN_IN_TITLE, {}, { timeout: STEP_TIMEOUT_MS });
   } else {
     await screen.findByText("STORY-BOOK", {}, { timeout: STEP_TIMEOUT_MS });
   }
@@ -440,27 +446,41 @@ export const ConnectWithSavedChatGptSubscription: StoryObj = {
   },
 };
 
-export const ConnectWithSavedClaudeSubscription: StoryObj = {
-  beforeEach: () => {
-    setOnboardingFixtureState({ savedClaudeLogin: true, savedApiKeys: true, authSignal: "absent" });
-    return resetOnboardingFixtureState;
-  },
-  render: () => <WizardArc />,
-  play: async () => {
-    await advance("Connect a model");
-    await pickFirstSource();
-    await screen.findByRole("heading", { name: "Let's get started..." }, { timeout: STEP_TIMEOUT_MS });
-    await expect(screen.queryByRole("combobox", { name: "Saved API key" })).not.toBeInTheDocument();
-  },
-};
+/**
+ * A Claude subscription on this server's own machine. The panel reports the
+ * claude CLI's sign-in and nothing is connected: Continue tests the CLI and
+ * hires. Signed out, the panel shows how to sign the CLI in on the server.
+ */
+function localClaudeCliStory(signedIn: boolean): StoryObj {
+  return {
+    name: `Local Claude CLI · ${signedIn ? "signed in" : "signed out"}`,
+    beforeEach: () => {
+      setOnboardingFixtureState({ environments: "local", authSignal: signedIn ? "present" : "absent" });
+      return resetOnboardingFixtureState;
+    },
+    render: () => <WizardArc />,
+    play: async () => {
+      await advance("Connect a model");
+      await userEvent.click(screen.getByRole("radio", { name: /Claude/ }));
+      await screen.findByText(
+        signedIn ? "The claude CLI on this server is signed in." : "The claude CLI on this server is not signed in.",
+        {},
+        { timeout: STEP_TIMEOUT_MS },
+      );
+      await expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    },
+  };
+}
+
+export const LocalClaudeCliSignedOut = localClaudeCliStory(false);
+export const LocalClaudeCliSignedIn = localClaudeCliStory(true);
 
 /** Local terminal sign-in with the production wizard and controllable API responses. */
 function localSubscriptionStory(
-  provider: "Claude" | "OpenAI",
   state: "sign-in" | "detected" | "testing" | "retry" | "success",
 ): StoryObj {
   return {
-    name: `Local ${provider} · ${state}`,
+    name: `Local OpenAI · ${state}`,
     beforeEach: () => {
       setOnboardingFixtureState({
         environments: "local",
@@ -475,7 +495,7 @@ function localSubscriptionStory(
     render: () => <WizardArc />,
     play: async () => {
       await advance("Connect a model");
-      await userEvent.click(screen.getByRole("radio", { name: new RegExp(provider) }));
+      await userEvent.click(screen.getByRole("radio", { name: /OpenAI/ }));
       if (state === "detected") {
         await screen.findByRole("button", { name: "Connecting…" }, { timeout: STEP_TIMEOUT_MS });
         await expect(screen.getByRole("button", { name: "Connecting…" })).toBeDisabled();
@@ -507,13 +527,8 @@ function localSubscriptionStory(
   };
 }
 
-export const LocalClaudeSignInRequired = localSubscriptionStory("Claude", "sign-in");
-export const LocalCodexSignInRequired = localSubscriptionStory("OpenAI", "sign-in");
-export const LocalClaudeDetected = localSubscriptionStory("Claude", "detected");
-export const LocalCodexDetected = localSubscriptionStory("OpenAI", "detected");
-export const LocalClaudeTesting = localSubscriptionStory("Claude", "testing");
-export const LocalCodexTesting = localSubscriptionStory("OpenAI", "testing");
-export const LocalClaudeRetry = localSubscriptionStory("Claude", "retry");
-export const LocalCodexRetry = localSubscriptionStory("OpenAI", "retry");
-export const LocalClaudeSuccess = localSubscriptionStory("Claude", "success");
-export const LocalCodexSuccess = localSubscriptionStory("OpenAI", "success");
+export const LocalCodexSignInRequired = localSubscriptionStory("sign-in");
+export const LocalCodexDetected = localSubscriptionStory("detected");
+export const LocalCodexTesting = localSubscriptionStory("testing");
+export const LocalCodexRetry = localSubscriptionStory("retry");
+export const LocalCodexSuccess = localSubscriptionStory("success");

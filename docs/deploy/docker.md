@@ -73,6 +73,8 @@ docker run --name paperclip \
 
 Each adapter reads its provider's standard credentials — for example `ANTHROPIC_API_KEY` (Claude), `OPENAI_API_KEY` (Codex), and `GEMINI_API_KEY` or `GOOGLE_API_KEY` (Gemini). OpenCode is multi-provider and uses whichever provider key you supply.
 
+To run `claude_local` on a Claude subscription instead of an API key, sign in inside the container as the server user (`docker exec -it -u node paperclip claude`, then type `/login`). The sign-in is stored under `HOME=/paperclip` on the data volume. An `ANTHROPIC_API_KEY` overrides the sign-in, so leave it unset in that case. Paperclip never stores the sign-in and does not accept `CLAUDE_CODE_OAUTH_TOKEN`. See [Running Claude on a server](/adapters/claude-local#running-claude-on-a-server).
+
 > **Gemini key restrictions:** Google requires Gemini API keys to be *restricted* to the Gemini API (scoped in the Google Cloud console); unrestricted keys are blocked and `gemini_local` runs will fail with an auth error. Create a restricted key, or authenticate with `gemini auth login` (OAuth) and persist `~/.gemini` via the data volume so the credential survives container restarts.
 
 The image sets `GEMINI_SANDBOX=false` so the Gemini CLI does not try to launch its own (Docker-in-Docker) sandbox inside the container. The `gemini_local` adapter already passes `--sandbox=none` per run, so this env var only matters if you invoke `gemini` manually inside the container; override it if you have nested-container support and want CLI-level sandboxing.

@@ -134,93 +134,91 @@ test("explicit OpenAI API method survives continuing and reloading", async ({ pa
   await page.getByRole("button", { name: "Cancel", exact: true }).first().click();
 });
 
-for (const [provider, label] of [["anthropic", "Claude"], ["openai", "OpenAI"]]) {
-  test(`Connections reuses the agent provider step for ${label}`, async ({ page }, testInfo) => {
-    await page.goto(`/${prefix}/apps/connect?source=${provider}&method=ai-subscription`);
-    await page.getByRole("button", { name: /^(Save and continue|Continue)$/ }).click();
-    await expect(page.getByRole("radiogroup", { name: "Connect your model provider" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Connect for tool access instead" })).toHaveCount(0);
-    await page.getByRole("radio", { name: new RegExp(label) }).click();
-    if (provider === "anthropic") {
-      await expect(page.getByText(/Connect uses your local/)).toBeVisible();
-      await expect(page.getByText("claude auth login", { exact: true })).toBeVisible();
-    } else {
-      await expect(page.getByText(/Your existing terminal login stays separate/)).toBeVisible();
-      const command = page.getByText(/^CODEX_HOME=.* codex login$/);
-      await expect(command).toBeVisible();
-      const preparedCommand = await command.textContent();
-      await page.reload();
-      await page.getByRole("radio", { name: new RegExp(label) }).click();
-      await expect(command).toHaveText(preparedCommand!);
-    }
-    await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
-    // Let the shared tile-collapse and card-enter animations settle for visual review.
-    await page.waitForTimeout(1000);
-    await page.screenshot({ path: testInfo.outputPath(`${provider}-shared-provider-step.png`), fullPage: true });
-    await page.getByRole("button", { name: "Back", exact: true }).click();
-    await page.getByRole("button", { name: "Use API key instead", exact: true }).click();
-    await page.getByRole("radio", { name: new RegExp(label) }).click();
-    await expect(page.getByLabel("API key", { exact: true })).toBeVisible();
-    await expect(page.getByText(/Provide your .* API key to connect/)).toBeVisible();
-    await page.getByRole("button", { name: "Cancel", exact: true }).first().click();
-    await expect(page).toHaveURL(new RegExp(`/${prefix}/apps$`));
-  });
-}
+test("Connections reuses the agent provider step for OpenAI", async ({ page }, testInfo) => {
+  await page.goto(`/${prefix}/apps/connect?source=openai&method=ai-subscription`);
+  await page.getByRole("button", { name: /^(Save and continue|Continue)$/ }).click();
+  await expect(page.getByRole("radiogroup", { name: "Connect your model provider" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect for tool access instead" })).toHaveCount(0);
+  await page.getByRole("radio", { name: /OpenAI/ }).click();
+  await expect(page.getByText(/Your existing terminal login stays separate/)).toBeVisible();
+  const command = page.getByText(/^CODEX_HOME=.* codex login$/);
+  await expect(command).toBeVisible();
+  const preparedCommand = await command.textContent();
+  await page.reload();
+  await page.getByRole("radio", { name: /OpenAI/ }).click();
+  await expect(command).toHaveText(preparedCommand!);
+  await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
+  // Let the shared tile-collapse and card-enter animations settle for visual review.
+  await page.waitForTimeout(1000);
+  await page.screenshot({ path: testInfo.outputPath("openai-shared-provider-step.png"), fullPage: true });
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByRole("button", { name: "Use API key instead", exact: true }).click();
+  await page.getByRole("radio", { name: /OpenAI/ }).click();
+  await expect(page.getByLabel("API key", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Provide your .* API key to connect/)).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).first().click();
+  await expect(page).toHaveURL(new RegExp(`/${prefix}/apps$`));
+});
+
+// A Claude subscription is used only through the claude CLI signed in on the
+// Paperclip server, so Connections offers Claude as an API key and nothing else.
+test("Connections offers Claude as an API key only", async ({ page }, testInfo) => {
+  await page.goto(`/${prefix}/apps/connect?source=anthropic&method=ai-api_key`);
+  await page.getByRole("button", { name: /^(Save and continue|Continue)$/ }).click();
+  await expect(page.getByText("Provide your Claude API key to connect", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("API key", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Use subscription instead", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Sign in to Claude", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("anthropic-api-key-step.png"), fullPage: true });
+  await page.getByRole("button", { name: "Cancel", exact: true }).first().click();
+  await expect(page).toHaveURL(new RegExp(`/${prefix}/apps$`));
+});
 
 // Exercise the real onboarding login controllers; only provider/server replies
 // are simulated. No credentials, sandbox leases or accounts are created here.
-for (const [provider, label, adapter] of [["anthropic", "Claude", "claude_local"], ["openai", "OpenAI", "codex_local"]]) {
-  test(`Connections uses onboarding browser sign-in for ${label}`, async ({ page }, testInfo) => {
-    const environmentId = "11111111-1111-4111-8111-111111111111";
-    const sessionId = "22222222-2222-4222-8222-222222222222";
-    const base = `/api/companies/${companyId}`;
-    const sessions = provider === "anthropic" ? `${base}/setup-token-login-sessions` : `${base}/adapters/${adapter}/login-sessions`;
-    let starts = 0;
-    let cancels = 0;
-    let intent: Record<string, unknown> | undefined;
-    const session = () => ({ sessionId, environmentId, adapterType: adapter, status: provider === "anthropic" ? "awaiting_code" : "awaiting_user", expiresAt: new Date(Date.now() + 300000).toISOString(), aiConnection: intent, prompt: provider === "anthropic" ? { authorizationUrl: "https://provider.example/authorize" } : { url: "https://provider.example/authorize", code: "ABCD-EFGH" } });
-    await page.route(`**${base}/environments`, route => route.fulfill({ json: [{ id: environmentId, name: "Browser sign-in test sandbox", driver: "sandbox", status: "active", config: { provider: "browser-test" } }] }));
-    await page.route(`**${base}/environments/capabilities`, route => route.fulfill({ json: { sandboxProviders: { "browser-test": { supportsLoginPty: true } } } }));
-    await page.route(`**${sessions}**`, async route => {
-      const path = new URL(route.request().url()).pathname;
-      if (path.endsWith("/active")) return route.fulfill(starts ? { json: session() } : { status: 404, json: { error: "Not found" } });
-      if (path.endsWith("/cancel")) { cancels++; return route.fulfill({ json: {} }); }
-      if (path.endsWith("/prompt")) return route.fulfill({ json: { authorizationUrl: "https://provider.example/authorize" } });
-      if (path === sessions && route.request().method() === "POST") {
-        starts++;
-        const payload = route.request().postDataJSON();
-        expect(payload.environmentId).toBe(environmentId);
-        expect(payload.aiConnection.provider).toBe(provider);
-        intent = payload.aiConnection;
-      }
-      return route.fulfill({ json: session() });
-    });
-    await page.addInitScript(() => { window.open = (url) => { (window as unknown as { loginDestination: string }).loginDestination = String(url); return null; }; });
-    await page.goto(`/${prefix}/apps/connect?source=${provider}&method=ai-subscription`);
-    await page.getByRole("button", { name: /^(Save and continue|Continue)$/ }).click();
-    await page.getByRole("radio", { name: new RegExp(label) }).click();
-    const signIn = page.getByRole("button", { name: `Sign in to ${label}`, exact: true });
-    await expect(signIn).toBeEnabled();
-    await expect(page.getByText(/login on this machine/)).toHaveCount(0);
-    if (provider === "anthropic") await expect(page.locator('input[type="password"]')).toBeVisible();
-    else await expect(page.getByText("ABCD-EFGH", { exact: true })).toBeVisible();
-    await signIn.click();
-    expect(await page.evaluate(() => (window as unknown as { loginDestination: string }).loginDestination)).toBe("https://provider.example/authorize");
-    await expect(page.getByRole("button", { name: "Waiting for code", exact: true })).toBeDisabled();
-    // The shared footer label animates; capture after it has settled.
-    await page.waitForTimeout(600);
-    await page.screenshot({ path: testInfo.outputPath(`${provider}-onboarding-browser-login.png`), fullPage: true });
-    if (provider === "anthropic") {
-      const submitted = page.waitForRequest(request => request.url().endsWith(`${sessionId}/code`) && request.method() === "POST");
-      await page.locator('input[type="password"]').fill("storybook-fixture-code");
-      await page.locator('input[type="password"]').press("Enter");
-      await submitted;
-      await expect(page.getByRole("button", { name: "Connecting", exact: true })).toBeDisabled();
+// Codex's device login; Claude has no in-app sign-in.
+test("Connections uses onboarding browser sign-in for OpenAI", async ({ page }, testInfo) => {
+  const [provider, label, adapter] = ["openai", "OpenAI", "codex_local"];
+  const environmentId = "11111111-1111-4111-8111-111111111111";
+  const sessionId = "22222222-2222-4222-8222-222222222222";
+  const base = `/api/companies/${companyId}`;
+  const sessions = `${base}/adapters/${adapter}/login-sessions`;
+  let starts = 0;
+  let cancels = 0;
+  let intent: Record<string, unknown> | undefined;
+  const session = () => ({ sessionId, environmentId, adapterType: adapter, status: "awaiting_user", expiresAt: new Date(Date.now() + 300000).toISOString(), aiConnection: intent, prompt: { url: "https://provider.example/authorize", code: "ABCD-EFGH" } });
+  await page.route(`**${base}/environments`, route => route.fulfill({ json: [{ id: environmentId, name: "Browser sign-in test sandbox", driver: "sandbox", status: "active", config: { provider: "browser-test" } }] }));
+  await page.route(`**${base}/environments/capabilities`, route => route.fulfill({ json: { sandboxProviders: { "browser-test": { supportsLoginPty: true } } } }));
+  await page.route(`**${sessions}**`, async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/active")) return route.fulfill(starts ? { json: session() } : { status: 404, json: { error: "Not found" } });
+    if (path.endsWith("/cancel")) { cancels++; return route.fulfill({ json: {} }); }
+    if (path === sessions && route.request().method() === "POST") {
+      starts++;
+      const payload = route.request().postDataJSON();
+      expect(payload.environmentId).toBe(environmentId);
+      expect(payload.aiConnection.provider).toBe(provider);
+      intent = payload.aiConnection;
     }
-    await page.getByRole("button", { name: "Back", exact: true }).click();
-    await page.getByRole("radio", { name: new RegExp(label) }).click();
-    await expect(page.getByRole("button", { name: `Sign in to ${label}`, exact: true })).toBeEnabled();
-    expect(starts).toBe(1);
-    expect(cancels).toBe(0);
+    return route.fulfill({ json: session() });
   });
-}
+  await page.addInitScript(() => { window.open = (url) => { (window as unknown as { loginDestination: string }).loginDestination = String(url); return null; }; });
+  await page.goto(`/${prefix}/apps/connect?source=${provider}&method=ai-subscription`);
+  await page.getByRole("button", { name: /^(Save and continue|Continue)$/ }).click();
+  await page.getByRole("radio", { name: new RegExp(label) }).click();
+  const signIn = page.getByRole("button", { name: `Sign in to ${label}`, exact: true });
+  await expect(signIn).toBeEnabled();
+  await expect(page.getByText(/login on this machine/)).toHaveCount(0);
+  await expect(page.getByText("ABCD-EFGH", { exact: true })).toBeVisible();
+  await signIn.click();
+  expect(await page.evaluate(() => (window as unknown as { loginDestination: string }).loginDestination)).toBe("https://provider.example/authorize");
+  await expect(page.getByRole("button", { name: "Waiting for code", exact: true })).toBeDisabled();
+  // The shared footer label animates; capture after it has settled.
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: testInfo.outputPath(`${provider}-onboarding-browser-login.png`), fullPage: true });
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByRole("radio", { name: new RegExp(label) }).click();
+  await expect(page.getByRole("button", { name: `Sign in to ${label}`, exact: true })).toBeEnabled();
+  expect(starts).toBe(1);
+  expect(cancels).toBe(0);
+});

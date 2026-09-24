@@ -14,7 +14,7 @@ import {
   ISSUE_EXECUTION_WORKSPACE_PREFERENCES,
   issueExecutionWorkspaceSettingsSchema,
 } from "./issue.js";
-import { envConfigSchema } from "./secret.js";
+import { envConfigSchema, envConfigWithoutClaudeSubscriptionTokenSchema } from "./secret.js";
 import { isValidRoutineDateString } from "../routine-variables.js";
 import { objectWithoutDefaults } from "./partial.js";
 
@@ -77,7 +77,7 @@ export const createRoutineSchema = z.object({
   activityGatePolicy: z.enum(ROUTINE_ACTIVITY_GATE_POLICIES).optional(),
   activityGateScope: z.enum(ROUTINE_ACTIVITY_GATE_SCOPES).optional(),
   variables: z.array(routineVariableSchema).optional().default([]),
-  env: envConfigSchema.optional().nullable(),
+  env: envConfigWithoutClaudeSubscriptionTokenSchema.optional().nullable(),
 });
 
 export type CreateRoutine = z.infer<typeof createRoutineSchema>;
@@ -104,6 +104,7 @@ export const routineRevisionSnapshotRoutineV1Schema = z.object({
   activityGatePolicy: z.enum(ROUTINE_ACTIVITY_GATE_POLICIES).default("always"),
   activityGateScope: z.enum(ROUTINE_ACTIVITY_GATE_SCOPES).default("company"),
   variables: z.array(routineVariableSchema),
+  // Parses stored snapshots, which are written only from validated routines.
   env: envConfigSchema.nullable().default(null),
   responsibleUserId: z.string().nullable().default(null),
 }).strict();

@@ -48,7 +48,8 @@ const groups = [
   [
     "Authentication",
     [
-      ["Claude subscription", "claude-subscription"],
+      ["Claude API key", "claude-api-key"],
+      ["Claude subscription (claude CLI only)", "claude-subscription-unsupported"],
       ["ChatGPT subscription", "chat-gpt-subscription"],
       ["Grok subscription", "grok-subscription"],
       ["API key", "open-router-api-key"],
@@ -83,6 +84,8 @@ export const ReviewIndex: Story = {
       </p>
       <p className="text-sm">
         Personal defaults are per company, user, and provider; subscription or API key.
+        Claude connects with an API key only: a Claude subscription is used
+        through the claude CLI signed in on the Paperclip server.
         Connection selection never changes harness or model. Unavailable
         accounts block without fallback.
       </p>
@@ -130,15 +133,15 @@ export const ConnectFromExistingCatalog: Story = {
     await userEvent.click(canvas.getByRole("button", { name: /^(Save and continue|Continue)$/ }));
     const name = await canvas.findByLabelText("Connection name");
     await userEvent.clear(name); await userEvent.type(name, "My additional Claude account");
-    await userEvent.click(canvas.getByRole("button", { name: "Sign in" }));
-    await userEvent.type(await canvas.findByLabelText("Authorization code"), "fixture-code");
-    await userEvent.click(canvas.getByRole("button", { name: "Submit code" }));
-    await userEvent.click(canvas.getByRole("button", { name: "Use connection" }));
+    await expect(canvas.queryByRole("button", { name: "Use subscription instead" })).not.toBeInTheDocument();
+    await userEvent.type(canvas.getByLabelText("API key"), "fixture-key");
+    await userEvent.click(canvas.getByRole("button", { name: "Connect" }));
+    await userEvent.click(await canvas.findByRole("button", { name: "Use connection" }));
     await expect(await canvas.findByLabelText("AI account settings")).toBeVisible();
     await expect(canvas.getByRole("heading", { name: "My additional Claude account" })).toBeVisible();
     await userEvent.click(canvas.getByRole("link", { name: "Connectors" }));
     await expect(await canvas.findByRole("button", { name: "Open My additional Claude account permissions" })).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Open My Claude subscription permissions" })).toBeVisible();
+    await expect(canvas.getByRole("button", { name: "Open My Claude API key permissions" })).toBeVisible();
   },
 };
 export const Connections: Story = { args: { host: "connections" } };
@@ -260,20 +263,23 @@ const waiting = {
   authorizationUrl: "#storybook-provider-simulator",
   code: "DEMO-CODE",
 };
-export const ClaudeSubscription: Story = {
-  args: { ...authArgs, initialAuthState: waiting },
+/** The sign-in lifecycle stories use ChatGPT: Claude has no subscription sign-in. */
+const subscriptionRequirement = {
+  ...AI_REVIEW_REQUIREMENT,
+  provider: "openai" as const,
+  method: "subscription" as const,
 };
 export const ChatGptSubscription: Story = {
   args: {
     ...authArgs,
-    requirement: { ...AI_REVIEW_REQUIREMENT, provider: "openai" },
+    requirement: subscriptionRequirement,
     initialAuthState: waiting,
   },
 };
 export const GrokSubscription: Story = {
   args: {
     ...authArgs,
-    requirement: { ...AI_REVIEW_REQUIREMENT, provider: "xai" },
+    requirement: { ...subscriptionRequirement, provider: "xai" },
     initialAuthState: waiting,
   },
 };
@@ -281,6 +287,24 @@ export const ClaudeApiKey: Story = {
   args: {
     ...authArgs,
     requirement: { ...AI_REVIEW_REQUIREMENT, method: "api_key" },
+  },
+};
+/**
+ * A stored requirement that still names a Claude subscription. There is no
+ * sign-in to offer: the claude CLI signed in on the server is the only
+ * subscription path, so the step says so and offers only Cancel.
+ */
+export const ClaudeSubscriptionUnsupported: Story = {
+  args: {
+    ...authArgs,
+    requirement: { ...AI_REVIEW_REQUIREMENT, method: "subscription" },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("status")).toHaveTextContent(/claude CLI signed in on this server/);
+    await expect(canvas.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+    await expect(canvas.queryByRole("textbox")).not.toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "Cancel" })).toBeVisible();
   },
 };
 export const OpenAiApiKey: Story = {
@@ -314,17 +338,18 @@ export const GrokApiKey: Story = {
   },
 };
 export const PreparingLogin: Story = {
-  args: { ...authArgs, initialAuthState: { phase: "starting" } },
+  args: { ...authArgs, requirement: subscriptionRequirement, initialAuthState: { phase: "starting" } },
 };
 export const Connected: Story = {
   args: { ...authArgs, initialAuthState: { phase: "connected" } },
 };
 export const Cancelled: Story = {
-  args: { ...authArgs, initialAuthState: { phase: "cancelled" } },
+  args: { ...authArgs, requirement: subscriptionRequirement, initialAuthState: { phase: "cancelled" } },
 };
 export const ExpiredAttempt: Story = {
   args: {
     ...authArgs,
+    requirement: subscriptionRequirement,
     initialAuthState: {
       phase: "expired",
       message:
@@ -335,6 +360,7 @@ export const ExpiredAttempt: Story = {
 export const UnsupportedEnvironment: Story = {
   args: {
     ...authArgs,
+    requirement: subscriptionRequirement,
     initialAuthState: {
       phase: "unsupported",
       message:
@@ -345,7 +371,6 @@ export const UnsupportedEnvironment: Story = {
 export const InvalidCredentials: Story = {
   args: {
     ...authArgs,
-    requirement: { ...AI_REVIEW_REQUIREMENT, method: "api_key" },
     initialAuthState: {
       phase: "error",
       message:
@@ -392,12 +417,8 @@ export const FirstOnboarding: Story = {
   args: { host: "onboarding", initialConnections: [], initialStage: "auth" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "Sign in" }));
-    await userEvent.type(
-      canvas.getByLabelText("Authorization code"),
-      "storybook-code",
-    );
-    await userEvent.click(canvas.getByRole("button", { name: "Submit code" }));
+    await userEvent.type(canvas.getByLabelText("API key"), "storybook-key");
+    await userEvent.click(canvas.getByRole("button", { name: "Connect" }));
     await userEvent.click(
       canvas.getByRole("button", { name: "Use connection" }),
     );
@@ -407,9 +428,7 @@ export const FirstOnboarding: Story = {
         name: "Create another agent using existing connections",
       }),
     );
-    await expect(
-      canvas.getByText("For you: My Claude subscription"),
-    ).toBeVisible();
+    await expect(canvas.getByText("For you: My Claude API")).toBeVisible();
     await expect(canvas.getByTestId("ai-harness")).toHaveTextContent(
       "Claude Code",
     );
@@ -424,10 +443,9 @@ export const InlineTaskConnection: Story = {
     await userEvent.click(await canvas.findByRole("button", { name: "Connect" }));
     const dialog = within(await body.findByRole("dialog"));
     await userEvent.click(await dialog.findByRole("button", { name: /^(Save and continue|Continue)$/ }));
-    await userEvent.click(await dialog.findByRole("button", { name: "Sign in" }));
-    await userEvent.type(dialog.getByLabelText("Authorization code"), "fixture-task-code");
-    await userEvent.click(dialog.getByRole("button", { name: "Submit code" }));
-    await userEvent.click(dialog.getByRole("button", { name: "Use connection" }));
+    await userEvent.type(await dialog.findByLabelText("API key"), "fixture-task-key");
+    await userEvent.click(dialog.getByRole("button", { name: "Connect" }));
+    await userEvent.click(await dialog.findByRole("button", { name: "Use connection" }));
     await expect(await canvas.findByText("Claude connected")).toBeVisible();
     await expect(canvas.getByTestId("connection-intent-focus-target")).toHaveFocus();
   },
@@ -438,7 +456,7 @@ export const InlineTaskReuse: Story = {
     const canvas = within(canvasElement); const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(await canvas.findByRole("button", { name: "Connect / Use existing" }));
     const dialog = within(await body.findByRole("dialog"));
-    await userEvent.click(await dialog.findByRole("button", { name: "My Claude subscription" }));
+    await userEvent.click(await dialog.findByRole("button", { name: "My Claude API key" }));
     await expect(await canvas.findByText("Claude connected")).toBeVisible();
   },
 };
@@ -471,13 +489,13 @@ export const CancelAndRestoreFocus: Story = {
     await userEvent.click(
       canvas.getByRole("button", { name: "Connect another account" }),
     );
-    await userEvent.click(canvas.getByRole("button", { name: "Sign in" }));
+    await userEvent.type(canvas.getByLabelText("API key"), "storybook-key");
     await userEvent.click(canvas.getByRole("button", { name: "Cancel" }));
     await expect(
       canvas.getByRole("button", { name: "Connect another account" }),
     ).toHaveFocus();
     await expect(
-      canvas.getByText("For you: My Claude subscription"),
+      canvas.getByText("For you: My Claude API key"),
     ).toBeVisible();
   },
 };
@@ -506,11 +524,10 @@ export const ReconnectExisting: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await userEvent.click(await canvas.findByRole("button", { name: "Reconnect" }));
-    await userEvent.click(await canvas.findByRole("button", { name: "Sign in" }));
-    await userEvent.type(await canvas.findByLabelText("Authorization code"), "fixture-reconnect");
-    await userEvent.click(canvas.getByRole("button", { name: "Submit code" }));
-    await userEvent.click(canvas.getByRole("button", { name: "Use connection" }));
-    await expect(await canvas.findByRole("heading", { name: "My Claude subscription" })).toBeVisible();
+    await userEvent.type(await canvas.findByLabelText("API key"), "fixture-reconnect-key");
+    await userEvent.click(canvas.getByRole("button", { name: "Connect" }));
+    await userEvent.click(await canvas.findByRole("button", { name: "Use connection" }));
+    await expect(await canvas.findByRole("heading", { name: "My Claude API key" })).toBeVisible();
     await expect(canvas.getByLabelText("AI account settings")).toHaveTextContent("Your default");
   },
 };
@@ -550,6 +567,6 @@ export const MobilePicker: Story = {
   globals: { viewport: { value: "mobile1", isRotated: false } },
 };
 export const MobileAuthentication: Story = {
-  args: { ...authArgs, initialAuthState: waiting },
+  args: { ...authArgs, requirement: subscriptionRequirement, initialAuthState: waiting },
   globals: { viewport: { value: "mobile1", isRotated: false } },
 };

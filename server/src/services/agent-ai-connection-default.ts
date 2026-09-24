@@ -9,7 +9,7 @@ import {
 // Only keys read by the child's provider express a child auth override.
 // A config copied from another provider can retain unrelated keys.
 const PROVIDER_AUTH_ENV_KEYS: Record<AiProvider, readonly string[]> = {
-  anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"],
+  anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"],
   openai: ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_HOME", "OPENAI_BASE_URL"],
   openrouter: ["OPENROUTER_API_KEY", "OPENCODE_AUTH_JSON", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "PAPERCLIP_OPENCODE_PROVIDERS"],
   xai: ["XAI_API_KEY", "GROK_API_KEY", "GROK_HOME", "XAI_BASE_URL"],
@@ -35,6 +35,10 @@ export function defaultAiConnectionForHire(
   // The selected provider's personal default supplies the actual sign-in method
   // at run time. A provider without an account can be connected on the first task.
   for (const provider of AI_PROVIDERS) {
+    // A Claude subscription is used only through the claude CLI signed in on
+    // this server (unmanaged claude_local). Never force a managed Anthropic
+    // API-key binding onto a claude_local hire whose manager did not choose one.
+    if (provider === "anthropic" && adapterType === "claude_local") continue;
     const binding = { provider, method: "api_key", mode: "responsible_user" } as const;
     if (compatible(binding)) return withChildAuthPrecedence(binding);
   }

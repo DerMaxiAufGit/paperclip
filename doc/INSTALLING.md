@@ -100,6 +100,13 @@ filesystem/network confinement and in-place Codex workspaces require explicit
 CLI selection. CLI sandbox defaults and explicit restrictions are described in
 the adapter configuration documentation.
 
+`claude_local` is the exception: an unset, `auto`, or `cli` engine runs the
+Claude CLI engine, and the ACP engine must be selected explicitly with
+`engine: acp`. The Claude ACP engine and every remote target need an Anthropic
+API key (or Bedrock/Vertex). A Claude subscription runs only through the
+`claude` CLI signed in on the Paperclip server, as the user that runs the
+service. See [Running Claude on a server](../docs/adapters/claude-local.md#running-claude-on-a-server).
+
 ## Managed Install Layout
 
 Managed code is separate from instance data:
@@ -207,6 +214,13 @@ explains and confirms that system-level action before running it.
 Use one server process per instance. `paperclipai run` refuses to start when
 the same instance is already supervised; stop the service first or use
 `--force` only when you intentionally accept the single-writer risk.
+
+The service runs as the user who installed it. `claude_local` agents on a
+Claude subscription use that user's `claude` sign-in, so install Claude Code
+and sign in (`claude`, then `/login`) as the same user. Check the result with
+`claude auth status`. See
+[Running Claude on a server](../docs/adapters/claude-local.md#running-claude-on-a-server),
+which also has a system-wide systemd unit example with `User=`.
 
 ## Update And Rollback
 

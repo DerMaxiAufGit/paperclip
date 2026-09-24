@@ -121,7 +121,8 @@ export function NewAgentWizard({ initialScreen = "name", initialAdapter = null, 
   const [connections, setConnections] = useState<Record<string, ConnectionMethod | undefined>>(() => {
     if (initialScreen !== "runtime" && initialScreen !== "saved") return {};
     const key = initialAdapter === "paperclip_runner" ? `${initialAdapter}/${initialRunnerProvider}` : initialAdapter ?? "claude_local";
-    return { [key]: initialConnectionMethod };
+    // Claude through a runner works with an Anthropic API key only.
+    return { [key]: key === "paperclip_runner/Claude (ACPX)" ? "api" : initialConnectionMethod };
   });
   const [modelOpen, setModelOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -303,7 +304,7 @@ export function NewAgentWizard({ initialScreen = "name", initialAdapter = null, 
         <AnimatePresence mode="wait" initial={false}><motion.div key={screen} {...stepMotion}>
         {screen === "connect" && connectionProvider ? <OnboardingCard className="mx-auto">
           <div className="mb-8"><OnboardingHeading title="Connect a model" lede={`Connect ${name || "Darnold"} to ${connectionProvider}.`} center /></div>
-          <ProviderConnectionPreview provider={connectionProvider} initialMethod={connectedMethod ?? initialConnectionMethod} initialWaiting={initialConnectionWaiting}
+          <ProviderConnectionPreview provider={connectionProvider} apiKeyOnly={isAcpx} initialMethod={connectedMethod ?? initialConnectionMethod} initialWaiting={initialConnectionWaiting}
             onConnected={method => { resetTest(); setConnections(previous => ({ ...previous, [connectionKey]: method })); go("runtime"); }} />
         </OnboardingCard> : screen === "saved" ? <div className="flex max-w-2xl flex-col gap-6">
           <div className="flex flex-col gap-6 rounded-lg border border-border p-6">
@@ -312,7 +313,7 @@ export function NewAgentWizard({ initialScreen = "name", initialAdapter = null, 
               <dt className="text-muted-foreground">Adapter</dt><dd>{display.label}</dd>
               {selected !== "cursor_cloud" && <><dt className="text-muted-foreground">Model</dt><dd className="break-all font-mono text-xs">{draft.model || "Default"}</dd></>}
               {isRunner && <><dt className="text-muted-foreground">Provider</dt><dd>{runnerProvider}</dd></>}
-              {connectionProvider && <><dt className="text-muted-foreground">Connection</dt><dd>{connectionProvider} · {connectedMethod === "api" ? "API key" : connectedMethod === "subscription" ? "Subscription" : "Not connected"}</dd></>}
+              {connectionProvider && <><dt className="text-muted-foreground">Connection</dt><dd>{connectionProvider} · {connectedMethod === "api" ? "API key" : connectedMethod === "subscription" ? connectionProvider === "Claude" ? "claude CLI on this server" : "Subscription" : "Not connected"}</dd></>}
               <dt className="text-muted-foreground">Environment</dt><dd>{selected === "cursor_cloud" ? "Cursor Cloud" : environment}</dd>
             </dl>
             <p className="text-sm text-muted-foreground">Your agent has not started running.</p>

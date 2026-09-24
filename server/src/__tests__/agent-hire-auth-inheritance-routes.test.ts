@@ -38,10 +38,6 @@ if (!embeddedPostgresSupport.supported) {
 
 type Db = ReturnType<typeof createDb>;
 
-// The fixed Claude Code OAuth binding. It is a user-secret reference to the
-// fixed key. Any other shape is a replacement or a weaker binding.
-const FIXED_CLAUDE_OAUTH_BINDING = { type: "user_secret_ref", key: "CLAUDE_CODE_OAUTH_TOKEN" } as const;
-
 function agentActor(companyId: string, agentId: string): Express.Request["actor"] {
   return { type: "agent", agentId, companyId, source: "agent_jwt" };
 }
@@ -281,10 +277,11 @@ describeEmbeddedPostgres("hired agent provider credential inheritance", () => {
   it("keeps the child-supplied ANTHROPIC_API_KEY and inherits no Claude credential at all", async () => {
     const companyId = await seedCompany();
     const childSecret = await createCompanySecret(companyId, "ant-child-key");
-    // The parent holds the fixed Claude OAuth binding, which is normally
+    const parentSecret = await createCompanySecret(companyId, "ant-parent-auth-token");
+    // The parent holds an ANTHROPIC_AUTH_TOKEN reference, which is normally
     // inheritable, but the child already supplies its own Claude credential.
     const parent = await seedParentAgent(companyId, "claude_local", {
-      CLAUDE_CODE_OAUTH_TOKEN: { ...FIXED_CLAUDE_OAUTH_BINDING },
+      ANTHROPIC_AUTH_TOKEN: secretRef(parentSecret.id),
     });
 
     const res = await hire(agentActor(companyId, parent.id), companyId, {
@@ -297,7 +294,7 @@ describeEmbeddedPostgres("hired agent provider credential inheritance", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const childEnv = childEnvOf(res);
     expect(childEnv.ANTHROPIC_API_KEY).toMatchObject({ type: "secret_ref", secretId: childSecret.id });
-    expect(childEnv.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(childEnv.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
   it("does not inherit a plain environment value", async () => {
@@ -374,12 +371,12 @@ describeEmbeddedPostgres("hired agent provider credential inheritance", () => {
     expect(children).toHaveLength(0);
   });
 
-  it("does not inherit a claude_local credential, including the fixed OAuth binding, from a hiring agent in another company", async () => {
+  it("does not inherit a claude_local credential from a hiring agent in another company", async () => {
     const parentCompanyId = await seedCompany();
     const targetCompanyId = await seedCompany();
     const parent = await seedParentAgent(parentCompanyId, "claude_local", {
       ANTHROPIC_API_KEY: secretRef((await createCompanySecret(parentCompanyId, "ant-other-company")).id),
-      CLAUDE_CODE_OAUTH_TOKEN: { ...FIXED_CLAUDE_OAUTH_BINDING, version: 1 },
+      ANTHROPIC_AUTH_TOKEN: secretRef((await createCompanySecret(parentCompanyId, "ant-other-company-token")).id),
     });
 
     const res = await hire(agentActor(targetCompanyId, parent.id), targetCompanyId, {
@@ -458,46 +455,33 @@ describeEmbeddedPostgres("hired agent provider credential inheritance", () => {
     expect(Object.keys(childEnvOf(res))).toHaveLength(0);
   });
 
-  it("inherits the fixed Claude OAuth binding, keeps its version, and leaks no token value", async () => {
+  it("never inherits a parent's legacy CLAUDE_CODE_OAUTH_TOKEN reference", async () => {
     const companyId = await seedCompany();
+    const apiKeySecret = await createCompanySecret(companyId, "ant-parent-key");
+    // A parent row written before Paperclip stopped storing Claude subscription
+    // tokens can still carry a CLAUDE_CODE_OAUTH_TOKEN reference. The hire copies
+    // the Anthropic API key and never copies the subscription token reference.
     const parent = await seedParentAgent(companyId, "claude_local", {
-      CLAUDE_CODE_OAUTH_TOKEN: { ...FIXED_CLAUDE_OAUTH_BINDING, version: 3 },
+      ANTHROPIC_API_KEY: secretRef(apiKeySecret.id),
+      CLAUDE_CODE_OAUTH_TOKEN: { type: "user_secret_ref", key: "CLAUDE_CODE_OAUTH_TOKEN", version: 3 },
     });
 
     const res = await hire(agentActor(companyId, parent.id), companyId, {
-      name: "Claude OAuth Child",
+      name: "Claude Child Of Legacy Parent",
       role: "engineer",
       adapterType: "claude_local",
     });
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const childAgentId = res.body.agent.id as string;
-    expect(childEnvOf(res).CLAUDE_CODE_OAUTH_TOKEN).toMatchObject({
-      type: "user_secret_ref",
-      key: "CLAUDE_CODE_OAUTH_TOKEN",
-      version: 3,
-    });
-    // The response body carries the reference only, never a token value.
-    expect(JSON.stringify(res.body)).not.toContain("sk-");
+    const childEnv = childEnvOf(res);
+    expect(childEnv.ANTHROPIC_API_KEY).toMatchObject({ type: "secret_ref", secretId: apiKeySecret.id });
+    expect(childEnv.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
 
     const declarations = await db
       .select()
       .from(userSecretDeclarations)
       .where(eq(userSecretDeclarations.targetId, childAgentId));
-    expect(declarations).toHaveLength(1);
-    expect(declarations[0]).toMatchObject({
-      envKey: "CLAUDE_CODE_OAUTH_TOKEN",
-      configPath: "env.CLAUDE_CODE_OAUTH_TOKEN",
-      versionSelector: "3",
-    });
-
-    const hireActivity = await db
-      .select()
-      .from(activityLog)
-      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "agent.hire_created")));
-    expect(hireActivity).toHaveLength(1);
-    const detailsText = JSON.stringify(hireActivity[0]!.details);
-    expect(detailsText).not.toContain("adapterConfig");
-    expect(detailsText).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(declarations).toHaveLength(0);
   });
 });

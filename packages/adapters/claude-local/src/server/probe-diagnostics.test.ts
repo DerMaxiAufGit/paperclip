@@ -3,70 +3,20 @@ import {
   buildClaudeLoginRequiredHint,
   classifyThrownErrorClass,
   logSandboxProbeDiagnostic,
-  normalizeClaudeLoginUrl,
 } from "./probe-diagnostics.js";
 
-describe("normalizeClaudeLoginUrl", () => {
-  it("accepts an allowlisted https Claude host with no query or fragment", () => {
-    expect(normalizeClaudeLoginUrl("https://claude.ai/login")).toBe("https://claude.ai/login");
-  });
-
-  it("accepts an allowlisted Anthropic subdomain", () => {
-    expect(normalizeClaudeLoginUrl("https://console.anthropic.com/login")).toBe(
-      "https://console.anthropic.com/login",
-    );
-  });
-
-  it("rejects a URL with a query", () => {
-    expect(normalizeClaudeLoginUrl("https://claude.ai/login?token=secret")).toBeNull();
-  });
-
-  it("rejects a URL with a fragment", () => {
-    expect(normalizeClaudeLoginUrl("https://claude.ai/login#access_token=secret")).toBeNull();
-  });
-
-  it("rejects a non-https URL", () => {
-    expect(normalizeClaudeLoginUrl("http://claude.ai/login")).toBeNull();
-  });
-
-  it("rejects a non-allowlisted host", () => {
-    expect(normalizeClaudeLoginUrl("https://evil.example.com/claude-login")).toBeNull();
-  });
-
-  it("rejects a look-alike host that only ends with the brand word", () => {
-    expect(normalizeClaudeLoginUrl("https://claude.ai.evil.com/login")).toBeNull();
-    expect(normalizeClaudeLoginUrl("https://notclaude.ai/login")).toBeNull();
-  });
-
-  it("rejects a URL that embeds credentials or a port", () => {
-    expect(normalizeClaudeLoginUrl("https://user:pass@claude.ai/login")).toBeNull();
-    expect(normalizeClaudeLoginUrl("https://claude.ai:8443/login")).toBeNull();
-  });
-
-  it("returns null for empty or malformed input", () => {
-    expect(normalizeClaudeLoginUrl(null)).toBeNull();
-    expect(normalizeClaudeLoginUrl(undefined)).toBeNull();
-    expect(normalizeClaudeLoginUrl("not a url")).toBeNull();
-  });
-});
-
 describe("buildClaudeLoginRequiredHint", () => {
-  it("names a safe login URL in the hint", () => {
-    expect(buildClaudeLoginRequiredHint("https://claude.ai/login")).toBe(
-      "Run `claude login` and complete sign-in at https://claude.ai/login, then retry.",
-    );
+  it("tells the operator to sign in with the claude CLI on the Paperclip host", () => {
+    const hint = buildClaudeLoginRequiredHint({ targetIsRemote: false });
+    expect(hint).toContain("run `claude` as the user Paperclip runs as");
+    expect(hint).toContain("`/login`");
+    expect(hint).not.toContain("ANTHROPIC_API_KEY");
   });
 
-  it("falls back to the fixed hint for an unsafe URL", () => {
-    expect(buildClaudeLoginRequiredHint("https://evil.example.com/claude-login?leak=secret")).toBe(
-      "Run `claude login` in this environment, then retry the probe.",
-    );
-  });
-
-  it("falls back to the fixed hint for a null URL", () => {
-    expect(buildClaudeLoginRequiredHint(null)).toBe(
-      "Run `claude login` in this environment, then retry the probe.",
-    );
+  it("points a remote target at ANTHROPIC_API_KEY instead of a sign-in", () => {
+    const hint = buildClaudeLoginRequiredHint({ targetIsRemote: true });
+    expect(hint).toContain("ANTHROPIC_API_KEY");
+    expect(hint).not.toContain("/login");
   });
 });
 

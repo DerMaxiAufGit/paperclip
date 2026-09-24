@@ -77,6 +77,10 @@ const sandboxTarget: AdapterExecutionTarget = {
   },
 };
 
+// Remote targets need an Anthropic API key; the Claude subscription is limited
+// to the claude CLI signed in on the Paperclip host.
+const SANDBOX_API_KEY_ENV = { ANTHROPIC_API_KEY: "sk-ant-probe-fixture" };
+
 const initLine =
   '{"type":"system","subtype":"init","cwd":"/home/daytona/paperclip-workspace","session_id":"abc","tools":["Bash","Read"]}';
 
@@ -103,7 +107,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude", model: "claude-opus-4-8" },
+      config: { engine: "cli", command: "claude", model: "claude-opus-4-8", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -139,7 +143,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -170,7 +174,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -187,7 +191,8 @@ describe("claude sandbox hello probe diagnostics", () => {
 
   it("keeps an auth-required probe marker out of every check", async () => {
     // The auth-required stdout and stderr carry a marker. The login-required
-    // checks must not repeat it, and the login gate code must stay stable.
+    // check must not repeat it. Claude offers no in-environment login, so no
+    // login gate code appears.
     const marker = "NONPATTERNMARKERauthcli";
     probeResult.value = {
       exitCode: 1,
@@ -202,14 +207,16 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
 
-    expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(true);
-    // The login gate code stays stable so the user interface can offer login.
-    expect(result.checks.some((check) => check.code === "adapter_auth_missing")).toBe(true);
+    const authRequired = result.checks.find((check) => check.code === "claude_hello_probe_auth_required");
+    expect(authRequired).toBeTruthy();
+    // A remote target authenticates with an API key; the hint says so.
+    expect(authRequired?.hint).toContain("ANTHROPIC_API_KEY");
+    expect(result.checks.some((check) => check.code === "adapter_auth_missing")).toBe(false);
     const checkText = JSON.stringify(result.checks);
     expect(checkText).not.toContain(marker);
     const loggedText = JSON.stringify(warnSpy.mock.calls);
@@ -218,12 +225,12 @@ describe("claude sandbox hello probe diagnostics", () => {
     warnSpy.mockRestore();
   });
 
-  it("classifies an invalid or expired token as adapter_auth_missing without leaking the token", async () => {
-    // Grounded on the real Claude CLI output for CLAUDE_CODE_OAUTH_TOKEN=invalid.
-    // The probe exits non-zero and the result event reports a 401 authentication
-    // failure with an "Invalid bearer token" message. A synthetic bearer marker
-    // rides along on a retry line, so the test proves the raw text never reaches
-    // a check.
+  it("classifies a rejected credential as auth-required without leaking it", async () => {
+    // Grounded on the real Claude CLI output for a rejected credential. The probe
+    // exits non-zero and the result event reports a 401 authentication failure
+    // with an "Invalid bearer token" message. A synthetic bearer marker rides
+    // along on a retry line, so the test proves the raw text never reaches a
+    // check.
     const marker = "SUPERSECRETbearerMARKERcli";
     probeResult.value = {
       exitCode: 1,
@@ -239,15 +246,15 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
 
-    // An auth failure returns the canonical login gate code, so the user
-    // interface can offer login.
+    // An auth failure is reported as auth-required. Claude offers no
+    // in-environment login, so no login gate code appears.
     expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(true);
-    expect(result.checks.some((check) => check.code === "adapter_auth_missing")).toBe(true);
+    expect(result.checks.some((check) => check.code === "adapter_auth_missing")).toBe(false);
     // The raw probe text, including the bearer marker, never reaches a check.
     expect(JSON.stringify(result.checks)).not.toContain(marker);
     warnSpy.mockRestore();
@@ -269,7 +276,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -296,7 +303,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -323,7 +330,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -361,7 +368,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -401,7 +408,7 @@ describe("claude sandbox hello probe diagnostics", () => {
       testEnvironment({
         companyId: "company-1",
         adapterType: "claude_local",
-        config: { engine: "cli", command: "claude" },
+        config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
         executionTarget: sandboxTarget,
         environmentName: "Daytona",
       }),
@@ -428,7 +435,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -451,7 +458,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -471,7 +478,7 @@ describe("claude sandbox hello probe diagnostics", () => {
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
+      config: { engine: "cli", command: "claude", env: SANDBOX_API_KEY_ENV },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
     });
@@ -488,7 +495,7 @@ describe("claude auth mode hints", () => {
     '{"type":"result","subtype":"success","is_error":false,"result":"hello","session_id":"abc"}',
   ].join("\n");
 
-  it("reports the configured subscription token for remote targets", async () => {
+  it("fails a remote target that only has a subscription token, without probing or forwarding it", async () => {
     probeResult.value = { exitCode: 0, stdout: successStdout, stderr: "" };
 
     const result = await testEnvironment({
@@ -503,13 +510,39 @@ describe("claude auth mode hints", () => {
       environmentName: "Daytona",
     });
 
-    const hint = result.checks.find((check) => check.code === "claude_oauth_token_configured");
-    expect(hint).toBeTruthy();
-    expect(hint?.level).toBe("info");
-    expect(hint?.detail).toContain("configured environment variables");
-    expect(
-      result.checks.some((check) => check.code === "claude_anthropic_api_key_overrides_subscription"),
-    ).toBe(false);
+    expect(result.status).toBe("fail");
+    expect(result.checks).toEqual([
+      expect.objectContaining({
+        code: "adapter_engine_unavailable",
+        level: "error",
+        message:
+          "Claude on remote targets needs an Anthropic API key; subscription use is limited to the claude CLI signed in on this server.",
+      }),
+    ]);
+    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
+  });
+
+  it("never forwards a subscription token to a remote probe that has an API key", async () => {
+    probeResult.value = { exitCode: 0, stdout: successStdout, stderr: "" };
+
+    await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: {
+        engine: "cli",
+        command: "claude",
+        env: { ANTHROPIC_API_KEY: "api-test-key", CLAUDE_CODE_OAUTH_TOKEN: "oauth-test-token" },
+      },
+      executionTarget: sandboxTarget,
+      environmentName: "Daytona",
+    });
+
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalled();
+    for (const call of runAdapterExecutionTargetProcess.mock.calls as unknown as unknown[][]) {
+      const env = (call[4] as { env?: Record<string, string> } | undefined)?.env ?? {};
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      expect(env.ANTHROPIC_API_KEY).toBe("api-test-key");
+    }
   });
 
   it("reports an intentionally selected managed API account without a subscription warning", async () => {
@@ -543,7 +576,8 @@ describe("claude auth mode hints", () => {
     expect(
       result.checks.some((check) => check.code === "claude_anthropic_api_key_overrides_subscription"),
     ).toBe(true);
-    expect(result.checks.some((check) => check.code === "claude_oauth_token_configured")).toBe(false);
+    expect(JSON.stringify(result.checks)).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(JSON.stringify(result.checks)).not.toContain("oauth-test-token");
   });
 });
 
@@ -670,6 +704,67 @@ describe("claude CLI local hello probe hardening", () => {
     } finally {
       await rm(runtimeDir, { recursive: true, force: true });
     }
+  });
+
+  it("never passes or reports a CLAUDE_CODE_OAUTH_TOKEN from the adapter config or the host on a local probe", async () => {
+    probeResult.value = { exitCode: 0, stdout: successStdout, stderr: "" };
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-host-token";
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: {
+        engine: "cli",
+        command: "claude",
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth-config-token" },
+      },
+      executionTarget: null,
+      environmentName: null,
+    });
+
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalled();
+    for (const call of runAdapterExecutionTargetProcess.mock.calls as unknown as unknown[][]) {
+      const env = (call[4] as { env?: Record<string, string> } | undefined)?.env ?? {};
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      expect(JSON.stringify(env)).not.toContain("oauth-");
+    }
+    // The command resolver never sees the token either.
+    for (const call of ensureAdapterExecutionTargetCommandResolvable.mock.calls as unknown as unknown[][]) {
+      const env = (call[3] as Record<string, string | undefined> | undefined) ?? {};
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    }
+    // The Test reports the claude CLI's own sign-in, never the token.
+    expect(result.checks.some((check) => check.code === "claude_subscription_mode_possible")).toBe(true);
+    const checkText = JSON.stringify(result.checks);
+    expect(checkText).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(checkText).not.toContain("oauth-");
+  });
+
+  it("tells the operator to sign in with the claude CLI when the local probe needs login", async () => {
+    probeResult.value = {
+      exitCode: 1,
+      stdout: [
+        initLine,
+        '{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Please run /login","session_id":"abc"}',
+      ].join("\n"),
+      stderr: "",
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: { engine: "cli", command: "claude" },
+      executionTarget: null,
+      environmentName: null,
+    });
+
+    const authRequired = result.checks.find((check) => check.code === "claude_hello_probe_auth_required");
+    expect(authRequired).toMatchObject({ level: "warn" });
+    expect(authRequired?.hint).toContain("run `claude` as the user Paperclip runs as");
+    expect(authRequired?.hint).toContain("`/login`");
+    expect(result.checks.some((check) => check.code === "adapter_auth_missing")).toBe(false);
+    warnSpy.mockRestore();
   });
 
   it("names the local host target on every result", async () => {

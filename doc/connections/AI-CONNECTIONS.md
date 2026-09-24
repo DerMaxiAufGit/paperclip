@@ -7,8 +7,10 @@ reuse `AdapterLoginPanel`, its existing login controllers, and `AdapterLoginChro
 Onboarding and new-agent setup retain upstream's `SavedProviderKeySelect` and
 `useSavedProviderKeys`, including saved-key references and account-specific Codex
 homes. Managed default/shared accounts are additional choices in that same
-selector. Selecting “Sign in to another account” survives background refreshes;
-Claude authorization paste keeps upstream's immediate Connecting feedback.
+selector. Selecting “Sign in to another account” survives background refreshes.
+Claude has no sign-in controller: its subscription option shows only whether the
+`claude` CLI on the Paperclip server is signed in (see
+[Claude subscriptions](#claude-subscriptions)).
 
 Storybook's simulated controllers and page annotations do not run in the app.
 
@@ -18,7 +20,7 @@ The shared `AI_CONNECTION_CAPABILITIES` contract defines these combinations:
 
 | Provider | Sign-in method | Existing harness |
 | --- | --- | --- |
-| Claude / Anthropic | Claude subscription token or Anthropic API key | Claude |
+| Claude / Anthropic | Anthropic API key (a Claude subscription is never a connection; see [Claude subscriptions](#claude-subscriptions)) | Claude |
 | OpenAI | ChatGPT/Codex subscription or OpenAI API key | Codex |
 | OpenRouter | API key | OpenCode, with an `openrouter/` model |
 | Grok / xAI | Grok subscription or xAI API key | Grok |
@@ -52,19 +54,51 @@ A connection choice never changes the harness, model, or provider routing.
 Changing those separately may make a binding incompatible; saving then requires
 a compatible choice. Agent configuration cannot grant access to another account.
 
-Personal defaults are unique per company, user, and provider. A Claude bot can use one user’s subscription and another user’s API key without changing its harness or model. Explicit shared selections remain pinned to the selected account and method.
+Personal defaults are unique per company, user, and provider. A Codex bot can use one user’s ChatGPT subscription and another user’s API key without changing its harness or model. Explicit shared selections remain pinned to the selected account and method.
 The first successful personal connection sets a default only when none exists.
 The additive `ai_provider_defaults` table preserves the legacy per-method preferences. Migration selects each user’s most recently updated provider preference (including unavailable accounts), and rerunning it never overwrites a provider default. New writes maintain the legacy table for older servers. A database trigger propagates older servers’ explicit default updates to the provider default. Inserting an additional method default does not replace an existing provider default.
 
 Revocation retains the unavailable default; connecting another account does not
 silently replace it. Change it explicitly on the account detail page.
 
+## Claude subscriptions
+
+Paperclip never reads, stores, forwards, or injects a Claude sign-in. A Claude
+subscription is used only by the `claude_local` CLI engine, which runs the
+official `claude` binary on the Paperclip server with the sign-in of the
+operating system user that runs Paperclip. Setup is described in
+[Running Claude on a server](../../docs/adapters/claude-local.md#running-claude-on-a-server).
+The reason is Anthropic's
+[Claude Code legal and compliance terms](https://code.claude.com/docs/en/legal-and-compliance):
+third-party developers may not offer Claude.ai login, route requests through
+Free/Pro/Max plan credentials on behalf of their users, or collect, store, or
+intermediate Claude.ai credentials or session tokens.
+
+- `AI_CONNECTION_CAPABILITIES` has no Anthropic `subscription` method. Creating,
+  reconnecting, or completing an Anthropic subscription connection is rejected
+  with the message “Claude subscriptions are used through the claude CLI signed
+  in on this server; Paperclip does not import Claude sign-ins.” The local
+  sign-in routes (`/local/attempts`, `/local/check`, and `/local`) reject the
+  `anthropic` provider with 422 and the same message.
+- `CLAUDE_CODE_OAUTH_TOKEN` is rejected as an env key wherever Paperclip stores
+  env (agent, project, routine, environment, issue override, company import,
+  secret binding proposals), and Paperclip removes it from every process it
+  starts, including ACP, SSH, and sandbox launches.
+- A database migration deletes the Anthropic subscription connections that
+  earlier versions stored, with their grants, env bindings, and secrets. Until
+  it runs, such a connection is listed as unavailable so its owner can remove
+  it, and it never runs.
+- The agent setup status panel reads the `claude_local` auth-signal route, which
+  runs only `claude auth status` on the server. Anthropic API-key connections
+  work as before, on every engine and execution target. The Claude ACP engine
+  and remote targets require one (or Bedrock/Vertex).
+
 ## Storage and API
 
 AI connections pair `connectionPurpose: ai` with `transport: runtime_auth`.
 Database checks and the shared discriminator enforce the pair. These entries
 cannot participate in tool discovery, MCP gateways, execution, or channels.
-Anthropic offers Claude subscription and Claude API key; the unsupported duplicate REST API option is excluded. Catalog
+Anthropic offers only the Claude API key; the Claude subscription entry is removed, and the unsupported duplicate REST API option is excluded. Catalog
 validation also pairs AI metadata with runtime authentication and rejects unsupported
 sign-in methods. Provider artwork and source provenance live in
 `ui/public/brands/apps/manifest.json`; OpenRouter uses its official sign-in assets,
@@ -173,7 +207,9 @@ references and leaves every agent's legacy authentication unchanged. Reconnectin
 an indexed account creates a private grant credential instead of rotating the
 legacy secret. Subsequent reconnects rotate that private credential. Unknown
 ownership and filesystem-only subscriptions remain unresolved. The migration is
-repeatable and does not classify unknown credentials as company-shared.
+repeatable and does not classify unknown credentials as company-shared. Claude
+subscription entries are no longer supported; the removal migration described in
+[Claude subscriptions](#claude-subscriptions) deletes them.
 
 Imported accounts initially need validation. Agent settings show “Existing
 authentication — not managed by Connections” until adoption. The adoption
@@ -183,12 +219,13 @@ the server preserves the managed binding and will not restore legacy fallback.
 
 ## Local subscription sign-in
 
-Local installations do not need a sandbox to connect a subscription. Connections,
-onboarding, and agent setup share `LocalProviderLoginInstructions` and
-`useLocalAiLogin`. In local-trusted mode, Claude checks the operator’s existing
-Claude Code login. Authenticated self-hosted users instead get a separate
-`CLAUDE_CONFIG_DIR` for `claude auth login`; checking and saving only read that
-attempt’s credential files, never the server operator’s account or Keychain.
+Local installations do not need a sandbox to connect a Codex or Grok subscription.
+Connections, onboarding, and agent setup share `LocalProviderLoginInstructions`
+and `useLocalAiLogin`. Claude does not use this flow: Paperclip does not import
+the operator’s Claude Code login and does not create a separate
+`CLAUDE_CONFIG_DIR` for `claude auth login`. Claude setup shows the
+`claude auth status` result for the server instead (see
+[Claude subscriptions](#claude-subscriptions)).
 
 Codex and Grok start a separate terminal sign-in for each connection or reconnect.
 The shared component shows a server-generated command with a fresh `CODEX_HOME`
@@ -210,7 +247,7 @@ subsequently update only that grant. Reconnect preserves IDs and access settings
 Starting an isolated attempt requires normal company-scoped AI-connection creation
 permission. Checks, completion, cancellation, and resumption are owner-bound.
 Authenticated users cannot import host credentials or use another user’s attempt.
-Claude Keychain reads remain limited to the explicit local-trusted default-home import. A failed verification creates
+Paperclip never reads Claude sign-in files or the Claude Keychain entry. A failed verification creates
 no healthy connection. Preview-era Codex/Grok managed connections without the
 isolated-subscription marker require reconnect before another managed execution;
 unmanaged legacy agents retain their existing authentication paths.
@@ -250,9 +287,9 @@ authentication with a live account.
 Local subscription screens share the same credential check on entry and when the
 window regains focus. Waiting screens also poll until sign-in verifies. A successful
 check shows the account is signed in; only **Connect** creates or reconnects the grant.
-In local-trusted mode, Claude checks the local operator’s Claude Code login.
-Authenticated Claude users, plus all Codex and Grok users, check only their
-connection-specific login home. The health response selects credential isolation,
+Codex and Grok users check only their connection-specific login home. Claude has
+no local sign-in screen; its status panel reports `claude auth status` from the
+server and offers a **Check again** action. The health response selects credential isolation,
 not whether a self-hosted user may sign in.
 
 Leaving and returning to a local sign-in screen resumes its active attempt. Navigation
@@ -274,7 +311,7 @@ provider key with `AI_REPAIR_TEST_KEY`. The test verifies these boundaries befor
 revoking credentials or submitting work. Delete the disposable instance and revoke
 its provider key after the test; failed tests may leave a paused task for inspection.
 
-Authenticated public deployments must configure a trusted runtime host (`PAPERCLIP_TRUSTED_MCP_RUNTIME_HOST` or `PAPERCLIP_TOOL_RUNTIME_TRUSTED_HOST`) before offering server-host subscription login, matching the local stdio runtime boundary. Health reports this capability so setup can offer a supported environment or API key instead of an unusable terminal command. Private authenticated self-hosted instances support isolated local login without that extra setting. Isolated Claude credential files must be private, owned by the server user, bounded, and free of symlinks.
+Authenticated public deployments must configure a trusted runtime host (`PAPERCLIP_TRUSTED_MCP_RUNTIME_HOST` or `PAPERCLIP_TOOL_RUNTIME_TRUSTED_HOST`) before offering server-host subscription login, matching the local stdio runtime boundary. Health reports this capability so setup can offer a supported environment or API key instead of an unusable terminal command. Private authenticated self-hosted instances support isolated local login without that extra setting. This applies to Codex and Grok; Claude has no server-host subscription login in Paperclip.
 
 ### Hiring and delegated work
 

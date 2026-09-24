@@ -42,29 +42,14 @@ describe("buildNewAgentHirePayload", () => {
     });
   });
 
-  it("sends the apply-existing flag when the owner applies a stored Claude login", () => {
+  it("sends no Claude sign-in claim or flag for a claude_local agent", () => {
     const payload = buildNewAgentHirePayload({
-      name: "Stored Claude",
-      effectiveRole: "general",
-      configValues: {
-        ...defaultCreateValues,
-        adapterType: "claude_local",
-        claudeApplyStoredLogin: true,
-      },
-      adapterConfig: {},
-    });
-    expect(payload).toMatchObject({ applyStoredClaudeLogin: true });
-    // Apply-existing carries no stored-session claim.
-    expect("storedSessionId" in payload).toBe(false);
-  });
-
-  it("omits the apply-existing flag when the owner does not apply a stored login", () => {
-    const payload = buildNewAgentHirePayload({
-      name: "Fresh Claude",
+      name: "Claude CLI",
       effectiveRole: "general",
       configValues: { ...defaultCreateValues, adapterType: "claude_local" },
       adapterConfig: {},
     });
+    expect("storedSessionId" in payload).toBe(false);
     expect("applyStoredClaudeLogin" in payload).toBe(false);
   });
 

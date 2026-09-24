@@ -49,7 +49,7 @@ External plugin adapters (install via the adapter manager or API):
 
 - `droid_local`: runs your local Factory Droid CLI (`@henkey/droid-paperclip-adapter`)
 
-For local CLI adapters (`claude_local`, `codex_local`, `opencode_local`, `hermes_local`, `droid_local`), Paperclip assumes the CLI is already installed and authenticated on the host machine. For `hermes_gateway`, Paperclip assumes the Hermes API server is already running, reachable from the Paperclip server, and configured with an API key. The older `@paperclipai/adapter-hermes-gateway` npm package is only a deprecated compatibility shim; the adapter type remains `hermes_gateway`.
+For local CLI adapters (`claude_local`, `codex_local`, `opencode_local`, `hermes_local`, `droid_local`), Paperclip assumes the CLI is already installed and authenticated on the host machine. For `claude_local` on a Claude subscription, "authenticated" means the `claude` CLI is signed in as the user that Paperclip runs as (see [Running Claude on a server](/adapters/claude-local#running-claude-on-a-server)). For `hermes_gateway`, Paperclip assumes the Hermes API server is already running, reachable from the Paperclip server, and configured with an API key. The older `@paperclipai/adapter-hermes-gateway` npm package is only a deprecated compatibility shim; the adapter type remains `hermes_gateway`.
 
 ## 3.2 Runtime behavior
 
@@ -162,7 +162,9 @@ Typical failure causes:
 
 Claude-specific note:
 
-- If `ANTHROPIC_API_KEY` is set in adapter env or host environment, Claude uses API-key auth instead of subscription login. Paperclip surfaces this as a warning in environment tests, not a hard error.
+- A Claude subscription works only with the `claude_local` CLI engine (the default) on the Paperclip server. The `claude` binary uses the sign-in of the operating system user that Paperclip runs as. Sign in as that user with `claude`, then `/login`, and check with `claude auth status`. See [Running Claude on a server](/adapters/claude-local#running-claude-on-a-server).
+- Paperclip never stores or forwards a Claude sign-in, and it rejects `CLAUDE_CODE_OAUTH_TOKEN` in every stored env map (agent, project, routine, environment). The ACP engine and remote targets (SSH, sandboxes, runners) need an API credential (`ANTHROPIC_API_KEY`, a gateway `ANTHROPIC_AUTH_TOKEN`, or Bedrock/Vertex/Foundry) and fail before launch without it.
+- If `ANTHROPIC_API_KEY` is set in adapter env or host environment, Claude uses API-key auth instead of the `claude` CLI sign-in. Paperclip surfaces this as a warning in environment tests, not a hard error.
 
 ## 9. Security and risk notes
 

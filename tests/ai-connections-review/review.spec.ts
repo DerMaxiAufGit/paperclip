@@ -57,7 +57,7 @@ for (const id of stories) {
       await expect(page.getByTestId("ai-component-boundary")).toContainText("App component: AiConnectionPicker");
       await expect(page.getByText("Your personal accounts", { exact: true })).toHaveCount(0);
       await expect(page.getByRole("button", { name: /Make default|Authorize for/ })).toHaveCount(0);
-      await expect(page.getByText("For you: My Claude subscription", { exact: true })).toBeVisible();
+      await expect(page.getByText("For you: My Claude API key", { exact: true })).toBeVisible();
     }
     if (id.endsWith("review-index")) {
       const links = await page
@@ -82,7 +82,8 @@ for (const theme of ["light", "dark"]) {
       await page.setViewportSize({ width, height: 960 });
       for (const story of [
         "responsible-user",
-        "claude-subscription",
+        "claude-api-key",
+        "claude-subscription-unsupported",
         "identity-matrix",
         "management",
       ]) {

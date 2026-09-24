@@ -426,6 +426,46 @@ it("preserves an explicit OpenCode permission mode at the runner spawn boundary"
   expect(launches[0]!.environment.PAPERCLIP_OPENCODE_COMMAND).toBeUndefined();
 });
 
+it("forwards the Anthropic API key but never the Claude subscription token at the runner spawn boundary", () => {
+  const launches: RunnerProcessLaunchSpec[] = [];
+  spawnRunner({
+    connection: { mode: "connect", connectUrl: "ws://127.0.0.1:43127" },
+    stateDirectory: "/tmp/paperclip-runner-test",
+    identity,
+    ticket: "bootstrap-ticket",
+    maxOutboxBytes: 256 * 1024,
+    p0ReserveBytes: 64 * 1024,
+    runnerVersion: expectedRunnerVersion,
+    runnerDigest: expectedRunnerDigest,
+    environment: {
+      PATH: "/bin",
+      ANTHROPIC_API_KEY: "anthropic-provider-key",
+      CLAUDE_CODE_OAUTH_TOKEN: "claude-subscription-token-must-not-cross",
+    },
+    processLauncher: (spec) => {
+      launches.push(spec);
+      return {
+        child: {
+          pid: 42,
+          exitCode: null,
+          signalCode: null,
+          kill: () => true,
+        },
+        completion: Promise.resolve({
+          code: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+        }),
+      };
+    },
+  });
+
+  expect(launches).toHaveLength(1);
+  expect(launches[0]!.environment.ANTHROPIC_API_KEY).toBe("anthropic-provider-key");
+  expect(launches[0]!.environment).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+});
+
 it("preserves only bounded GitHub credential projection at the runner spawn boundary", () => {
   const launches: RunnerProcessLaunchSpec[] = [];
   spawnRunner({

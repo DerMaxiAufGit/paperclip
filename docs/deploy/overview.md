@@ -53,3 +53,11 @@ Or update it later:
 ```sh
 pnpm paperclipai configure --section server
 ```
+
+## Claude subscriptions on a server
+
+In every mode, a Claude subscription is used only by the `claude` CLI on the
+Paperclip server, signed in as the operating system user that runs Paperclip.
+Paperclip never stores or forwards the sign-in. Remote targets and the Claude
+ACP engine need an Anthropic API key. See
+[Running Claude on a server](/adapters/claude-local#running-claude-on-a-server).

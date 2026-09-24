@@ -67,6 +67,14 @@ export type AiConnectionBinding = z.infer<typeof aiConnectionBindingSchema>;
 export const aiConnectionMetadataSchema = z.object(requirement).strict();
 export type AiConnectionMetadata = z.infer<typeof aiConnectionMetadataSchema>;
 
+/**
+ * Paperclip never imports, stores or injects a Claude sign-in. A Claude
+ * subscription is used only by the official `claude` CLI signed in on the
+ * Paperclip server itself (the claude_local CLI engine).
+ */
+export const CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE =
+  "Claude subscriptions are used through the claude CLI signed in on this server; Paperclip does not import Claude sign-ins.";
+
 /** Existing integrations only. This table describes compatibility, never routing. */
 export const AI_CONNECTION_CAPABILITIES: Record<
   AiProvider,
@@ -79,11 +87,10 @@ export const AI_CONNECTION_CAPABILITIES: Record<
 > = {
   anthropic: {
     name: "Claude",
+    // API key only. A Claude subscription is used solely through the official
+    // `claude` CLI signed in on the Paperclip server itself; Paperclip never
+    // imports, stores or injects a Claude sign-in.
     methods: {
-      subscription: {
-        adapters: ["claude_local"],
-        envKey: "CLAUDE_CODE_OAUTH_TOKEN",
-      },
       api_key: { adapters: ["claude_local"], envKey: "ANTHROPIC_API_KEY" },
     },
   },
@@ -185,7 +192,12 @@ export const createAiConnectionSchema = z
   .strict()
   .superRefine((v, ctx) => {
     if (!AI_CONNECTION_CAPABILITIES[v.provider].methods[v.method])
-      ctx.addIssue({ code: "custom", message: "Unsupported sign-in method" });
+      ctx.addIssue({
+        code: "custom",
+        message: v.provider === "anthropic" && v.method === "subscription"
+          ? CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE
+          : "Unsupported sign-in method",
+      });
     if (
       v.method === "api_key"
         ? !v.apiKey || Boolean(v.loginSessionId)

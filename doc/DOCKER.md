@@ -228,6 +228,12 @@ Notes:
 
 - Without API keys, the app still runs normally.
 - Adapter environment checks in Paperclip will surface missing auth/CLI prerequisites.
+- To run `claude_local` on a Claude subscription instead of an API key, sign in
+  inside the container as the server user: `docker exec -it -u node paperclip claude`,
+  then type `/login`. The sign-in is stored under `HOME=/paperclip` on the data
+  volume. Do not also pass `ANTHROPIC_API_KEY`, because an API key overrides the
+  sign-in. Paperclip never stores the sign-in and rejects `CLAUDE_CODE_OAUTH_TOKEN`.
+  See [Running Claude on a server](../docs/adapters/claude-local.md#running-claude-on-a-server).
 
 ## Podman Quadlet (systemd)
 

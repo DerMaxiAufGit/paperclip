@@ -138,7 +138,6 @@
     "server/src/__tests__/routines-e2e.test.ts": 20181,
     "server/src/__tests__/routines-routes.test.ts": 6778,
     "server/src/__tests__/secret-proposals-routes.test.ts": 21824,
-    "server/src/__tests__/secrets-routes-claude-oauth-service.test.ts": 11110,
     "server/src/__tests__/secrets-routes.test.ts": 10410,
     "server/src/__tests__/sidebar-preferences-routes.test.ts": 4495,
     "server/src/__tests__/summary-slot-routes.test.ts": 6451,

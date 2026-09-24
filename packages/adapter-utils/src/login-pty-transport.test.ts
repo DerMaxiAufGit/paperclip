@@ -4,28 +4,24 @@ import {
   type LoginPtySession,
 } from "./login-pty-transport.js";
 
-// The Enter byte the terminal login UI reads to submit the browser code. The
-// login runner appends this byte to the code. The transport forwards the bytes
-// unchanged, so the pseudo-terminal receives the code and then the Enter byte.
-const ENTER = "\r";
+// A fixed device-login command. The transport never inspects the command; the
+// sandbox provider maps it to the pseudo-terminal it opens.
+const DEVICE_LOGIN_COMMAND = "codex login --device-auth";
 
 /**
- * A fake pseudo-terminal session. It records each input write, drives the output
- * stream on demand, and records the stop and the close. The tests use it in
- * place of a real pseudo-terminal, so the transport runs with no sandbox.
+ * A fake pseudo-terminal session. It drives the output stream on demand and
+ * records the close. The tests use it in place of a real pseudo-terminal, so the
+ * transport runs with no sandbox.
  */
 function createFakePtySession(): LoginPtySession & {
-  writes: string[];
   emit: (chunk: string) => void;
   finish: (exitCode: number | null) => void;
-  killed: number;
   closed: number;
   // Resolves when the transport registers the output listener. The session
   // streams only after it opens, so a test waits on this before it drives the
-  // output or stops the child.
+  // output.
   ready: Promise<void>;
 } {
-  const writes: string[] = [];
   let listener: ((chunk: string) => void) | null = null;
   let resolveWait: ((value: { exitCode: number | null }) => void) | null = null;
   const waitPromise = new Promise<{ exitCode: number | null }>((resolve) => {
@@ -35,7 +31,6 @@ function createFakePtySession(): LoginPtySession & {
   const ready = new Promise<void>((resolve) => {
     markReady = resolve;
   });
-  let killed = 0;
   let closed = 0;
   return {
     ready,
@@ -43,15 +38,11 @@ function createFakePtySession(): LoginPtySession & {
       listener = next;
       markReady?.();
     },
-    write(data: string): void {
-      writes.push(data);
-    },
+    write(): void {},
     wait(): Promise<{ exitCode: number | null }> {
       return waitPromise;
     },
-    kill(): void {
-      killed += 1;
-    },
+    kill(): void {},
     async close(): Promise<void> {
       closed += 1;
     },
@@ -62,12 +53,6 @@ function createFakePtySession(): LoginPtySession & {
     finish(exitCode: number | null): void {
       resolveWait?.({ exitCode });
     },
-    get writes(): string[] {
-      return writes;
-    },
-    get killed(): number {
-      return killed;
-    },
     get closed(): number {
       return closed;
     },
@@ -75,20 +60,19 @@ function createFakePtySession(): LoginPtySession & {
 }
 
 describe("createLoginPtyTransport", () => {
-  it("delivers delayed input to the process", async () => {
+  it("opens the session for the given command", async () => {
     const session = createFakePtySession();
-    const transport = createLoginPtyTransport(async () => session);
+    const opened: string[] = [];
+    const transport = createLoginPtyTransport(async (command) => {
+      opened.push(command);
+      return session;
+    });
 
-    const started = transport.start("claude setup-token", () => {});
-    await session.ready;
-    // The input arrives after the start and after the first output, so the
-    // transport delivers it to the running process, not before it.
-    session.emit("... the url below to sign in ...");
-    transport.write("ABCD");
+    const started = transport.start(DEVICE_LOGIN_COMMAND, () => {});
     session.finish(0);
     await started;
 
-    expect(session.writes).toEqual(["ABCD"]);
+    expect(opened).toEqual([DEVICE_LOGIN_COMMAND]);
   });
 
   it("returns incremental terminal output to the runner", async () => {
@@ -96,7 +80,7 @@ describe("createLoginPtyTransport", () => {
     const received: string[] = [];
     const transport = createLoginPtyTransport(async () => session);
 
-    const started = transport.start("claude setup-token", (chunk) => {
+    const started = transport.start(DEVICE_LOGIN_COMMAND, (chunk) => {
       received.push(chunk);
     });
     await session.ready;
@@ -112,45 +96,23 @@ describe("createLoginPtyTransport", () => {
     await started;
   });
 
-  it("delivers the Enter byte after the browser code", async () => {
-    const session = createFakePtySession();
-    const transport = createLoginPtyTransport(async () => session);
-
-    const started = transport.start("claude setup-token", () => {});
-    await session.ready;
-    // The runner writes the code plus the Enter byte in one write. The transport
-    // forwards the bytes unchanged, so the code comes first and the Enter byte
-    // comes last.
-    transport.write("WXYZ" + ENTER);
-    session.finish(0);
-    await started;
-
-    const delivered = session.writes.join("");
-    expect(delivered).toBe("WXYZ" + ENTER);
-    expect(delivered.endsWith(ENTER)).toBe(true);
-    expect(delivered.indexOf("WXYZ")).toBeLessThan(delivered.lastIndexOf(ENTER));
-  });
-
   it("resolves start with the child exit code", async () => {
     const session = createFakePtySession();
     const transport = createLoginPtyTransport(async () => session);
 
-    const started = transport.start("claude setup-token", () => {});
+    const started = transport.start(DEVICE_LOGIN_COMMAND, () => {});
     session.finish(7);
 
     await expect(started).resolves.toEqual({ exitCode: 7 });
   });
 
-  it("stops the child with a direct kill", async () => {
+  it("refuses a second start", async () => {
     const session = createFakePtySession();
     const transport = createLoginPtyTransport(async () => session);
 
-    const started = transport.start("claude setup-token", () => {});
-    await session.ready;
-    transport.stop();
-    expect(session.killed).toBe(1);
-
-    session.finish(null);
+    const started = transport.start(DEVICE_LOGIN_COMMAND, () => {});
+    await expect(transport.start(DEVICE_LOGIN_COMMAND, () => {})).rejects.toThrow(/already started/);
+    session.finish(0);
     await started;
   });
 
@@ -158,7 +120,7 @@ describe("createLoginPtyTransport", () => {
     const session = createFakePtySession();
     const transport = createLoginPtyTransport(async () => session);
 
-    const started = transport.start("claude setup-token", () => {});
+    const started = transport.start(DEVICE_LOGIN_COMMAND, () => {});
     session.finish(0);
     await started;
 
@@ -166,63 +128,14 @@ describe("createLoginPtyTransport", () => {
     expect(session.closed).toBe(1);
   });
 
-  it("stays safe when stop and dispose run before start", async () => {
+  it("stays safe when dispose runs before start", async () => {
     const session = createFakePtySession();
     const transport = createLoginPtyTransport(async () => session);
 
-    // The runner may stop or dispose before it starts the child. The transport
-    // must not throw, and it must not open a session for a run it already stopped.
-    transport.stop();
+    // The runner may dispose before it starts the child. The transport must not
+    // throw, and it must not close a session it never opened.
     await transport.dispose();
 
-    expect(session.killed).toBe(0);
     expect(session.closed).toBe(0);
-  });
-
-  it("kills a session that opens after an early stop", async () => {
-    const session = createFakePtySession();
-    let resolveOpen!: () => void;
-    const openGate = new Promise<void>((resolve) => {
-      resolveOpen = resolve;
-    });
-    const transport = createLoginPtyTransport(async () => {
-      await openGate;
-      return session;
-    });
-
-    const started = transport.start("claude setup-token", () => {});
-    // The stop arrives while the session is still opening. The transport must
-    // kill the child as soon as the session exists.
-    transport.stop();
-    resolveOpen();
-    session.finish(null);
-    await started;
-
-    expect(session.killed).toBe(1);
-  });
-
-  it("buffers input that arrives before the session opens", async () => {
-    const session = createFakePtySession();
-    let resolveOpen!: () => void;
-    const openGate = new Promise<void>((resolve) => {
-      resolveOpen = resolve;
-    });
-    const transport = createLoginPtyTransport(async () => {
-      await openGate;
-      return session;
-    });
-
-    const started = transport.start("claude setup-token", () => {});
-    transport.write("EARLY" + ENTER);
-    expect(session.writes).toEqual([]);
-
-    resolveOpen();
-    // Let the pending open resolve and flush the buffered input.
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(session.writes).toEqual(["EARLY" + ENTER]);
-
-    session.finish(0);
-    await started;
   });
 });

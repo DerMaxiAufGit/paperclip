@@ -456,8 +456,7 @@ export interface EnvironmentDriverAcquireInput {
   applyCustomImageTemplate?: boolean;
   /**
    * The latest time the acquired lease may stay active. A caller with an
-   * independent deadline (for example the setup-token login session) sets it,
-   * so the driver bounds the persisted lease expiry to this time. The driver
+   * independent deadline sets it, so the driver bounds the persisted lease expiry to this time. The driver
    * records the earlier of this time and the provider expiry. Null or undefined
    * keeps the provider expiry only, so all other callers keep the current
    * behavior.
@@ -465,11 +464,11 @@ export interface EnvironmentDriverAcquireInput {
   requestedExpiresAt?: Date | null;
   /**
    * Re-check the environment company binding inside the lease insert
-   * transaction. The login acquire paths set this so a managed reconciliation
-   * that binds the sandbox to another company between the route guard and this
-   * acquire cannot let the login run in a foreign-company sandbox. The lease
-   * insert then rejects a foreign-company environment with the 403
-   * `environment_company_mismatch` and holds no lease. An unbound
+   * transaction. The adapter environment Test probe sets this so a managed
+   * reconciliation that binds the sandbox to another company between the route
+   * guard and this acquire cannot let the probe run in a foreign-company
+   * sandbox. The lease insert then rejects a foreign-company environment with
+   * the 403 `environment_company_mismatch` and holds no lease. An unbound
    * (instance-global) environment stays open. Other callers keep the current
    * behavior.
    */
@@ -2117,10 +2116,8 @@ function createSandboxEnvironmentDriver(
           // between the route guard and this insert, so the insert fails closed
           // with `environment_company_mismatch`. This call already provisioned the
           // remote plugin sandbox above, so tear it down now. Without this step
-          // the rejected insert leaks a live sandbox that no lease row tracks. The
-          // Claude login runs on a plugin-backed sandbox, so this path is the one
-          // the login uses. Do not tear down a reused sandbox that an earlier
-          // lease still owns.
+          // the rejected insert leaks a live sandbox that no lease row tracks. Do
+          // not tear down a reused sandbox that an earlier lease still owns.
           if (!reusableLease || acquiredLease.providerLeaseId !== reusableLease.providerLeaseId) {
             // Record the durable pending-cleanup row before the teardown, then
             // tear the sandbox down. On a successful teardown the handler releases
@@ -2471,8 +2468,8 @@ function createSandboxEnvironmentDriver(
         );
       }
 
-      // Plugin-backed provider path. The Claude login runs on a plugin-backed
-      // sandbox, so this path tears down the login orphan.
+      // Plugin-backed provider path. A login sandbox runs on a plugin-backed
+      // provider, so this path tears down a login orphan.
       if (!isBuiltinSandboxProvider(recordedProvider)) {
         if (!pluginWorkerManager) {
           throw new Error(

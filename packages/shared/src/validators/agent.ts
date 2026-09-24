@@ -8,7 +8,7 @@ import {
   INBOX_MINE_ISSUE_STATUS_FILTER,
 } from "../constants.js";
 import { agentAdapterTypeSchema } from "../adapter-type.js";
-import { envConfigSchema } from "./secret.js";
+import { envConfigSchema, rejectClaudeSubscriptionTokenEnvKeys } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { objectWithoutDefaults } from "./partial.js";
@@ -52,6 +52,7 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
       path: ["env"],
     });
   }
+  rejectClaudeSubscriptionTokenEnvKeys(envValue, ctx, ["env"]);
 });
 
 export const createAgentInstructionsBundleSchema = z.object({
@@ -93,15 +94,6 @@ export const createAgentSchema = z.object({
   budgetMonthlyCents: z.number().int().nonnegative().optional().default(0),
   permissions: agentPermissionsSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional().nullable(),
-  // The optional stored-session claim from a completed Claude login session. It
-  // is the non-secret `storedSessionId`; it carries no token. The agent-create
-  // transaction consumes it as the one-time stored-session claim.
-  storedSessionId: z.string().min(1).max(256).optional(),
-  // The optional apply-existing flag. When true, the caller binds the fixed
-  // Claude OAuth token reference to the owner stored value with no new login
-  // round trip. The server permits the no-claim bind only for a user actor and
-  // only when that owner already has a stored value. It carries no token.
-  applyStoredClaudeLogin: z.boolean().optional(),
   // Narrow intent flag set by the onboarding wizard when it hires the very first
   // agent (the chief of staff). It is not an agent column: the server consumes
   // it to seed the server-owned chief-of-staff persona over the agent's entry

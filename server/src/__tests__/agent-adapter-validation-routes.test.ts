@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import request from "supertest";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE } from "@paperclipai/shared";
 import type { ServerAdapterModule } from "../adapters/index.js";
 
 const mockAgentService = vi.hoisted(() => ({
@@ -413,12 +414,41 @@ describe("agent routes adapter validation", () => {
     expect(env.CODEX_HOME).toBeUndefined();
   });
 
-  it("forwards a claude_local→process adapter move that drops the OAuth binding to the service unchanged", async () => {
-    // The agent has the fixed Claude Code OAuth binding on the claude_local
+  it("rejects a CLAUDE_CODE_OAUTH_TOKEN env key on agent create and update", async () => {
+    // Paperclip never stores or injects a Claude subscription token. The shared
+    // adapter-config validator rejects the key (in any letter case) before the
+    // route reaches the service.
+    const app = await createApp();
+    const created = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post("/api/companies/company-1/agents")
+        .send({
+          name: "Claude Agent",
+          adapterType: "claude_local",
+          adapterConfig: { env: { CLAUDE_CODE_OAUTH_TOKEN: { type: "plain", value: "sk-ant-oat01-example" } } },
+        }),
+    );
+    expect(created.status, JSON.stringify(created.body)).toBe(400);
+    expect(JSON.stringify(created.body)).toContain(CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE);
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+
+    const updated = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch("/api/agents/11111111-1111-4111-8111-111111111111")
+        .send({
+          adapterConfig: { env: { claude_code_oauth_token: "sk-ant-oat01-example" } },
+        }),
+    );
+    expect(updated.status, JSON.stringify(updated.body)).toBe(400);
+    expect(JSON.stringify(updated.body)).toContain(CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("forwards a claude_local→process adapter move that drops the API-key binding to the service unchanged", async () => {
+    // The agent has an ANTHROPIC_API_KEY secret binding on the claude_local
     // adapter. A PATCH moves the agent to the process adapter and sends an empty
     // env in the same request. The route must forward the new adapter type and
-    // the dropped binding to the service without a re-injection, so the
-    // service-enforced binding invariant sees the removal and rejects it.
+    // the dropped binding to the service without a re-injection.
     const agentId = "11111111-1111-4111-8111-111111111111";
     mockAgentService.getById.mockResolvedValue({
       id: agentId,
@@ -432,7 +462,7 @@ describe("agent routes adapter validation", () => {
       reportsTo: null,
       capabilities: null,
       adapterType: "claude_local",
-      adapterConfig: { env: { CLAUDE_CODE_OAUTH_TOKEN: { type: "user_secret_ref", key: "CLAUDE_CODE_OAUTH_TOKEN" } } },
+      adapterConfig: { env: { ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "secret-1" } } },
       runtimeConfig: {},
       budgetMonthlyCents: 0,
       spentMonthlyCents: 0,
@@ -459,10 +489,9 @@ describe("agent routes adapter validation", () => {
     // The route forwards the requested adapter type, so the service can see the
     // adapter move.
     expect(patch.adapterType).toBe("process");
-    // The route does not re-inject the fixed binding from the prior config, so
-    // the service invariant sees the removal.
+    // The route does not re-inject the binding from the prior config.
     const env = ((patch.adapterConfig as Record<string, unknown>).env as Record<string, unknown> | undefined) ?? {};
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
   it("isolates CODEX_HOME when updating a codex_local agent to set its own OPENAI_API_KEY", async () => {

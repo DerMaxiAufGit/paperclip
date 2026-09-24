@@ -316,9 +316,8 @@ export function createProductionLoginSessionReaperRuntime(
         .from(adapterAuthSessions)
         .where(
           and(
-            // The shared table also holds the setup-token rows. Filter by the
-            // closed set of displayed-code adapter types, so the orphan sweep
-            // reads only displayed-code rows.
+            // Filter by the closed set of displayed-code adapter types, so the
+            // orphan sweep reads only device-login rows.
             inArray(adapterAuthSessions.adapterType, DISPLAYED_CODE_ADAPTER_TYPES),
             inArray(adapterAuthSessions.status, [
               ...ADAPTER_AUTH_ACTIVE_STATUSES,

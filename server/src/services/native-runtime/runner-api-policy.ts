@@ -16,7 +16,7 @@ export function runnerApiRestriction(
       path,
     ) ||
     (!metadataRead &&
-      (/\/(secrets|setup-secret|secret-proposals|secret-provider-configs|user-secrets|user-secret-definitions|keys|board-api-keys|credentials|setup-token-login-sessions|board-claim|invites|join-requests|gateway-tokens|tokens|token|rotate-secret|terminal-session-token|claim-api-key)(\/|$)/.test(
+      (/\/(secrets|setup-secret|secret-proposals|secret-provider-configs|user-secrets|user-secret-definitions|keys|board-api-keys|credentials|board-claim|invites|join-requests|gateway-tokens|tokens|token|rotate-secret|terminal-session-token|claim-api-key)(\/|$)/.test(
         path,
       ) ||
         /^\/api\/companies\/\{companyId\}\/exports?(\/|$)/.test(path)))

@@ -1370,6 +1370,13 @@ describe("AppDetail", () => {
     expect(container.textContent).not.toContain("Connected");
   });
 
+  it("marks a saved Claude subscription connection as needing attention", async () => {
+    getConnectionMock.mockResolvedValue(connection({ connectionPurpose: "ai", transport: "runtime_auth", healthStatus: "ok", config: { ai: { provider: "anthropic", method: "subscription" } } }));
+    listConnectionGrantsMock.mockResolvedValue({ connection: { id: "conn-1" }, grants: [organizationGrant()], capabilities: fullCapabilities(), currentUserId: "user-1", members: [] });
+    await renderAppDetail();
+    expect(container.textContent).toContain("Needs attention");
+  });
+
   it("keeps the app header concise on every tab", async () => {
     mockParams.tab = "permissions";
     getConnectionMock.mockResolvedValue(perUserConnection());

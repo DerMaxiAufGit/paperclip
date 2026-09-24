@@ -16,7 +16,7 @@ export type FooterPrimaryIcon = "arrow" | "spinner" | "none";
  * boundary.
  *
  * The primary button animates between labels rather than swapping them. The
- * connect step walks it through four ("Next" → "Sign in to Claude" → "Waiting
+ * connect step walks it through four ("Next" → "Sign in to OpenAI" → "Waiting
  * for code" → "Connecting"), which are very different widths, and a control
  * that changes size instantly reads as a different control appearing. See
  * `CTA_WIDTH` and `CTA_LABEL_*` for why the two halves are timed apart.
@@ -38,7 +38,7 @@ export function FooterNav({
   /**
    * Defaults to the loading state's own reading — spinner while loading, arrow
    * otherwise — so callers that predate this prop are unchanged. The connect
-   * step sets it directly, because "Sign in to Claude" carries no icon while
+   * step sets it directly, because "Sign in to OpenAI" carries no icon while
    * "Waiting for code" carries a spinner without the step being `loading`: it
    * is waiting on another tab, not working.
    */

@@ -9,6 +9,7 @@ import {
   OnboardingLoginCard,
   OnboardingCardField,
   OnboardingLoginCodeRow,
+  ProviderApiKeyCard,
   onboardingCardInputClass,
 } from "./AdapterLoginChrome";
 
@@ -71,13 +72,48 @@ describe("the connect step's cards", () => {
   }
 
   it("gives every card field the same input, from one declaration", () => {
-    // The step asks for three different things in this row — a browser code, a
-    // key — and they sit one toggle apart in the same canvas, so a divergence
-    // between them is visible by flipping a switch. Sharing the declaration is
-    // what stops that; this is the assertion that the sharing is real.
+    // The connect step's key field and the credential card's key field sit in
+    // different hosts, so a divergence between them is visible by moving from
+    // one to the other. Sharing the declaration is what stops that; this is
+    // the assertion that the sharing is real.
     render(
       <>
-        <OnboardingCardField value="" onChange={() => {}} onSubmit={() => {}} />
+        <OnboardingCardField
+          label="API key"
+          placeholder="Enter API key here"
+          masked
+          value=""
+          onChange={() => {}}
+          onSubmit={() => {}}
+        />
+        <ProviderApiKeyCard
+          providerName="OpenAI"
+          placeholder="Enter API key here"
+          value=""
+          onChange={() => {}}
+          onSubmit={() => {}}
+        />
+      </>,
+    );
+
+    const [field, card] = [...container.querySelectorAll("input")];
+    expect(field!.className).toBe(onboardingCardInputClass);
+    expect(card!.className).toBe(field!.className);
+  });
+
+  it("masks only when asked", () => {
+    // The primitive leaves the choice to each card rather than guessing from
+    // the label. The key card asks. What this pins is that asking is what does
+    // it, and that not asking shows the value.
+    render(
+      <>
+        <OnboardingCardField
+          label="Connection name"
+          placeholder="Name this connection"
+          value=""
+          onChange={() => {}}
+          onSubmit={() => {}}
+        />
         <OnboardingCardField
           label="API key"
           placeholder="Enter API key here"
@@ -89,32 +125,9 @@ describe("the connect step's cards", () => {
       </>,
     );
 
-    const [code, key] = [...container.querySelectorAll("input")];
-    expect(code!.className).toBe(onboardingCardInputClass);
-    expect(key!.className).toBe(code!.className);
-  });
-
-  it("masks only when asked", () => {
-    // The primitive leaves the choice to each card rather than guessing from
-    // the label. The key card asks, and so does the Claude card for its code —
-    // that call site is pinned by the wizard's paste test. What this pins is
-    // that asking is what does it, and that not asking shows the value.
-    render(
-      <>
-        <OnboardingCardField value="" onChange={() => {}} onSubmit={() => {}} />
-        <OnboardingCardField
-          label="API key"
-          masked
-          value=""
-          onChange={() => {}}
-          onSubmit={() => {}}
-        />
-      </>,
-    );
-
-    const [code, key] = [...container.querySelectorAll("input")];
-    expect(code!.getAttribute("type")).toBe("text");
-    expect(code!.getAttribute("aria-label")).toBe("Authorization code");
+    const [plain, key] = [...container.querySelectorAll("input")];
+    expect(plain!.getAttribute("type")).toBe("text");
+    expect(plain!.getAttribute("aria-label")).toBe("Connection name");
     expect(key!.getAttribute("type")).toBe("password");
     expect(key!.getAttribute("aria-label")).toBe("API key");
   });
@@ -135,7 +148,7 @@ describe("the connect step's cards", () => {
     document.body.innerHTML = "";
     render(
       <OnboardingLoginCard instruction="Ready">
-        <OnboardingCardField value="" onChange={() => {}} onSubmit={() => {}} />
+        <OnboardingCardField label="API key" placeholder="Enter API key here" value="" onChange={() => {}} onSubmit={() => {}} />
       </OnboardingLoginCard>,
     );
     const ready = container.firstElementChild!.className;

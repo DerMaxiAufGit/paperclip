@@ -9,6 +9,9 @@ Run Paperclip locally with zero external dependencies.
 
 - Node.js 24.11+
 - pnpm 9+
+- For `claude_local` agents on a Claude subscription: Claude Code installed and
+  signed in (`claude`, then `/login`) as the user that runs Paperclip. See
+  [Running Claude on a server](/adapters/claude-local#running-claude-on-a-server).
 
 ## Start Dev Server
 

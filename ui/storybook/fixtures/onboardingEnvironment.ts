@@ -31,10 +31,9 @@ interface FixtureState {
   environments: OnboardingEnvironmentState;
   authSignal: AdapterAuthSignal;
   savedApiKeys: boolean;
-  savedClaudeLogin: boolean;
   savedCodexLogin: boolean;
   localLoginStatus: "sign_in_required" | "ready";
-  savedManagedSubscription: "anthropic" | "openai" | null;
+  savedManagedSubscription: "openai" | null;
   connectPending: boolean;
   testDelayMs: number;
   testPending: boolean;
@@ -49,7 +48,6 @@ export const onboardingFixtureState: FixtureState = {
   environments: "managed-sandbox",
   authSignal: "absent",
   savedApiKeys: false,
-  savedClaudeLogin: false,
   savedCodexLogin: false,
   localLoginStatus: "sign_in_required",
   savedManagedSubscription: null,
@@ -67,7 +65,6 @@ export function resetOnboardingFixtureState(): void {
   onboardingFixtureState.environments = "managed-sandbox";
   onboardingFixtureState.authSignal = "absent";
   onboardingFixtureState.savedApiKeys = false;
-  onboardingFixtureState.savedClaudeLogin = false;
   onboardingFixtureState.savedCodexLogin = false;
   onboardingFixtureState.localLoginStatus = "sign_in_required";
   onboardingFixtureState.savedManagedSubscription = null;
@@ -110,6 +107,10 @@ export function storybookEnvironmentCapabilities(): unknown {
   };
 }
 
+/**
+ * Also the answer the Claude status panel reads: `present` shows the server's
+ * claude CLI as signed in, anything else shows the steps to sign it in.
+ */
 export function storybookAuthSignal(): { status: AdapterAuthSignal } {
   return { status: onboardingFixtureState.authSignal };
 }

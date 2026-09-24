@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
+import { expect, userEvent, waitFor, within } from "storybook/test";
 import {
   AgentProviderConnection,
   type ProviderConnection,
@@ -55,7 +55,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "Production agent connection component with fixture API responses. Provider tests and subsequent hiring are simulated. Choose subscription or API key, reuse a saved connection, or enter a new key.",
+          "Production agent connection component with fixture API responses. Provider tests and subsequent hiring are simulated. Claude uses the claude CLI signed in on the server or an API key; Codex can reuse a saved subscription. Reuse a saved API key or enter a new one.",
       },
     },
   },
@@ -66,21 +66,38 @@ const meta = {
 } satisfies Meta<typeof ConnectionStory>;
 export default meta;
 type Story = StoryObj<typeof meta>;
-export const ClaudeSubscription: Story = {
+/**
+ * A Claude subscription is the claude CLI signed in on the server itself. The
+ * tile reports that sign-in; nothing is stored, and Connect tests the CLI.
+ */
+export const ClaudeCliSignedIn: Story = {
   beforeEach: () => {
-    setOnboardingFixtureState({
-      savedClaudeLogin: true,
-      authSignal: "present",
-    });
+    setOnboardingFixtureState({ authSignal: "present" });
     return resetOnboardingFixtureState;
   },
   play: async ({ canvasElement }) => {
-    await userEvent.click(await within(canvasElement).findByRole("radio"));
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("radio"));
+    await expect(
+      await canvas.findByText("The claude CLI on this server is signed in."),
+    ).toBeVisible();
+    const connect = canvas.getByRole("button", { name: "Connect" });
+    await waitFor(() => expect(connect).toBeEnabled());
+    await userEvent.click(connect);
+    await expect(
+      await canvas.findByText("Connection selected. Continue to agent configuration."),
+    ).toBeVisible();
   },
 };
-export const NewClaudeSubscription: Story = {
+/** Signed out, the tile shows how to sign the claude CLI in on the server. */
+export const ClaudeCliSignedOut: Story = {
   play: async ({ canvasElement }) => {
-    await userEvent.click(await within(canvasElement).findByRole("radio"));
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("radio"));
+    await expect(
+      await canvas.findByText("The claude CLI on this server is not signed in."),
+    ).toBeVisible();
+    await expect(canvas.getByRole("button", { name: "Check again" })).toBeVisible();
   },
 };
 export const NewCodexSubscription: Story = {

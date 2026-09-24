@@ -645,8 +645,8 @@ export interface PluginEnvironmentAcquireLeaseParams extends PluginEnvironmentDr
   executionWorkspaceSettings?: Record<string, unknown> | null;
   /**
    * The absolute latest time the acquired lease may stay active, as an ISO 8601
-   * timestamp. A caller with an independent deadline (for example the setup-token
-   * login session) sets it. A provider that materializes a sandbox must configure
+   * timestamp. A caller with an independent deadline (for example an adapter
+   * device-login session) sets it. A provider that materializes a sandbox must configure
    * a provider-side expiry at or before this time, and return the real provider
    * expiry in `PluginEnvironmentLease.expiresAt`. When the provider cannot bound
    * the sandbox at or before this time, it returns no expiry, so the server fails
@@ -1008,16 +1008,17 @@ export interface PluginRenderCloseEvent {
 // ---------------------------------------------------------------------------
 // Login pseudo-terminal (PTY) worker methods.
 // ---------------------------------------------------------------------------
-// The host drives one live Claude `setup-token` login pseudo-terminal inside a
-// sandbox provider worker. The host owns the route. It mints an opaque host
-// route identifier, carries that identifier in the open request, and keys the
-// close on that identifier. The worker registers the terminal under the host
-// route identifier and returns a worker session identifier for the output
-// notification binding only. The worker never keys a close on the worker
-// session identifier, so the host closes a worker-created terminal even when the
-// open reply was lost and no worker session identifier arrived. The worker sends
-// output and exit as notifications, never as a reply, so the host binds them by
-// the worker session identifier while the route is open.
+// The host drives one live adapter device-login pseudo-terminal (the Codex and
+// Grok device-auth flows) inside a sandbox provider worker. The host owns the
+// route. It mints an opaque host route identifier, carries that identifier in
+// the open request, and keys the close on that identifier. The worker registers
+// the terminal under the host route identifier and returns a worker session
+// identifier for the output notification binding only. The worker never keys a
+// close on the worker session identifier, so the host closes a worker-created
+// terminal even when the open reply was lost and no worker session identifier
+// arrived. The worker sends output and exit as notifications, never as a reply,
+// so the host binds them by the worker session identifier while the route is
+// open.
 
 /**
  * The closed set of login command identities. The host resolves the key from the
@@ -1025,7 +1026,7 @@ export interface PluginRenderCloseEvent {
  * key to a compile-time command. The open request carries no command string, so a
  * caller cannot select or override the command.
  */
-export type PluginLoginCommandKey = "claude" | "codex" | "grok";
+export type PluginLoginCommandKey = "codex" | "grok";
 
 /** The open request for one live login pseudo-terminal. The worker registers the terminal by `hostRouteId`. */
 export interface PluginLoginPtyOpenParams {

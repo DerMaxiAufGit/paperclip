@@ -196,8 +196,9 @@ export const pluginEnvironmentDriverDeclarationSchema = z.object({
   // The neutral transport capability: does the provider host an interactive
   // login on a real pseudo-terminal? Validate a literal boolean only.
   supportsLoginPty: z.boolean().optional(),
-  // Deprecated alias for `supportsLoginPty`. It exists only so an external
-  // plugin manifest that declares the old name still loads. Validate a literal
+  // Deprecated manifest alias for `supportsLoginPty`, kept for manifest
+  // compatibility: an external plugin manifest that declares the old name still
+  // loads. It names no separate login flow. Validate a literal
   // boolean only. The transform below canonicalizes it onto `supportsLoginPty`
   // and drops it, so every downstream reader reads only the canonical field.
   supportsSetupTokenLogin: z.boolean().optional(),

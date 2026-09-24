@@ -818,7 +818,7 @@ describe("runner E2E server isolation", () => {
         PAPERCLIP_API_KEY: "ambient-board-key",
         PAPERCLIP_AGENT_API_KEY: "ambient-agent-key",
         PAPERCLIP_TASK_BRIDGE_TOKEN: "ambient-task-token",
-        PAPERCLIP_SETUP_TOKEN: "ambient-setup-token",
+        PAPERCLIP_SETUP_TOKEN: "ambient-bootstrap-value",
         PAPERCLIP_SECRETS_MASTER_KEY: "ambient-master-key",
         PAPERCLIP_SECRETS_MASTER_KEY_FILE: "/outside/master.key",
         PAPERCLIP_STORAGE_S3_BUCKET: "production-bucket",

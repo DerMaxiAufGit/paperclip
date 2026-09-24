@@ -94,8 +94,11 @@ import {
   createDeviceLoginReaper,
   createProductionLoginSessionReaperRuntime,
 } from "./services/device-login-reaper.js";
-import { createProductionSetupTokenReaper } from "./services/setup-token-reaper.js";
 import { localAiLoginService } from "./services/local-ai-login.js";
+import {
+  removeLeftoverClaudeLoginHomes,
+  removeStaleClaudeConfigSeeds,
+} from "./services/claude-login-home-cleanup.js";
 import { resolveWorktreeRunExecutionActivationState } from "./services/instance-settings.js";
 import {
   parseAdapterRegistryEnv,
@@ -1177,6 +1180,13 @@ async function startServerWithDatabaseTeardown(
   const executionControlInterval = setInterval(sweepExecutionControl, EXECUTION_RECONCILIATION_INTERVAL_MS);
   executionControlInterval.unref?.();
   sweepExecutionControl();
+  // Best-effort removal of Claude login homes left in ai-local-logins by the
+  // removed Claude subscription-login capture. Codex/Grok homes are kept.
+  // Idempotent on every start; never throws and does not block startup.
+  void removeLeftoverClaudeLoginHomes({ logger });
+  // Best-effort removal of remote Claude config seeds that earlier builds wrote
+  // with the host settings.json `env` block or credential helpers.
+  void removeStaleClaudeConfigSeeds({ logger });
   const startHeartbeatSchedulerInterval = (callback: () => void) => {
     heartbeatSchedulerInterval = setInterval(callback, config.heartbeatSchedulerIntervalMs);
     heartbeatSchedulerInterval?.unref?.();
@@ -1392,32 +1402,6 @@ async function startServerWithDatabaseTeardown(
         }));
     };
 
-    // The restart-safe cleanup backstop for the Claude setup-token login flow. It
-    // runs on startup and on the scheduler interval, so a sandbox lease survives a
-    // server restart and a release failure. It releases any lease whose login
-    // session is terminal, past its deadline, or already consumed.
-    const setupTokenReaper = createProductionSetupTokenReaper({
-      db: db as any,
-      environmentRuntime: environmentRuntimeService(db as any, { pluginWorkerManager }),
-      log: (line) => logger.info(line),
-    });
-    const logSetupTokenReaperResult = (
-      result: Awaited<ReturnType<typeof setupTokenReaper.sweep>>,
-    ) => {
-      if (result.released > 0 || result.failed > 0) {
-        logger.info(result, "setup-token login reaper released leases");
-      }
-    };
-    const scheduleSetupTokenReaperSweep = () => {
-      if (heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(setupTokenReaper
-        .sweep()
-        .then(logSetupTokenReaperResult)
-        .catch((err) => {
-          logger.error({ err }, "setup-token login reaper sweep failed");
-        }));
-    };
-
     const worktreeRunExecutionActivation = await resolveWorktreeRunExecutionActivationState({
       getExperimental: () => instanceSettingsService(db).getExperimental(),
     });
@@ -1590,15 +1574,6 @@ async function startServerWithDatabaseTeardown(
         logger.error({ err }, "startup adapter login reaper sweep failed");
       });
 
-    // Run the setup-token login reaper once at startup, so a login sandbox lease
-    // that outlived a server restart releases before timer ticks start.
-    await setupTokenReaper
-      .sweep()
-      .then(logSetupTokenReaperResult)
-      .catch((err) => {
-        logger.error({ err }, "startup setup-token login reaper sweep failed");
-      });
-
     // Retry any orphan sandbox teardown left by a failed acquire before a server
     // restart, so a leaked sandbox does not stay allocated across the restart.
     await runEnvironmentLeaseCleanupSweep(0);
@@ -1664,7 +1639,6 @@ async function startServerWithDatabaseTeardown(
         scheduleGitHubConnectionContinuitySweep();
         scheduleTerminalWorkspaceSweep();
         scheduleAdapterLoginReaperSweep();
-        scheduleSetupTokenReaperSweep();
         scheduleEnvironmentLeaseCleanupSweep();
 
         if (heartbeatSchedulerStopped) return;
@@ -1980,10 +1954,10 @@ async function startServerWithDatabaseTeardown(
       ? () => embeddedPostgresSupervisor?.shutdown() ?? embeddedPostgres!.stop()
       : null;
 
-    // Await the ordered application teardown before the process exits. A live
-    // setup-token login session must stop and release its sandbox lease before
-    // the database and the provider stop, so an orderly shutdown never leaves a
-    // sandbox lease or confidential login state alive past the process exit.
+    // Await the ordered application teardown before the process exits. The
+    // application services (schedulers, channels, worker pools) stop before the
+    // database and the provider stop, so an orderly shutdown never leaves a
+    // service touching a closed pool past the process exit.
     // The HTTP listener closes first, while every service is still up, so a
     // request in flight is drained against a working server and none reaches
     // a route once the pool is gone; the programmatic close below then finds

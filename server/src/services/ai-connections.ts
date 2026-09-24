@@ -19,6 +19,7 @@ import {
 } from "@paperclipai/db";
 import {
   AI_CONNECTION_CAPABILITIES,
+  CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE,
   aiConnectionMetadataSchema,
   aiSubscriptionNeedsIsolatedLogin,
   isAiConnectionCompatible,
@@ -124,6 +125,10 @@ export function aiConnectionService(db: Db) {
       );
       if (!metadata.success) return [];
       const needsReconnect = aiSubscriptionNeedsIsolatedLogin(connection.config);
+      // A stored method this build no longer supports (a Claude subscription)
+      // stays visible so its owner can remove it, but it never runs.
+      const unsupportedMethod =
+        !AI_CONNECTION_CAPABILITIES[metadata.data.provider].methods[metadata.data.method];
       if (!canUseCredential(grant, userId, members.filter((m) => m.grantId === grant.id)))
         return [];
       return [
@@ -134,7 +139,9 @@ export function aiConnectionService(db: Db) {
           ...metadata.data,
           name: connection.name,
           accountLabel: grant.providerTenant?.name,
-          ...(needsReconnect ? { unavailableReason: "Reconnect with a separate sign-in to protect your existing terminal login." } : {}),
+          ...(unsupportedMethod
+            ? { unavailableReason: metadata.data.provider === "anthropic" ? CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE : "This sign-in method is no longer supported." }
+            : needsReconnect ? { unavailableReason: "Reconnect with a separate sign-in to protect your existing terminal login." } : {}),
           ownership:
             grant.kind === "user" ? ("personal" as const) : ("shared" as const),
           ownerUserId: grant.subjectUserId ?? undefined,
@@ -150,7 +157,7 @@ export function aiConnectionService(db: Db) {
                 : grant.status !== "active" ||
                     !connection.enabled ||
                     connection.status !== "active" ||
-                    connection.healthStatus !== "ok" || needsReconnect
+                    connection.healthStatus !== "ok" || needsReconnect || unsupportedMethod
                   ? ("needs_attention" as const)
                   : ("connected" as const),
         },
@@ -193,6 +200,12 @@ export function aiConnectionService(db: Db) {
       const metadata = aiConnectionMetadataSchema.parse(
         row.connection.config.ai,
       );
+      if (!AI_CONNECTION_CAPABILITIES[metadata.provider].methods[metadata.method])
+        throw unprocessable(
+          metadata.provider === "anthropic"
+            ? CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE
+            : "This sign-in method is no longer supported.",
+        );
       // Keep old servers' method preferences intact during an additive rollout.
       await tx.insert(aiConnectionDefaults)
         .values({ companyId, userId, ...metadata, grantId })
@@ -435,6 +448,14 @@ export function aiConnectionService(db: Db) {
     sessionId?: string,
     attemptStartedAt = new Date(),
   ) {
+    // Paperclip stores only credentials for supported methods. A Claude
+    // subscription is never stored: it stays with the claude CLI on the server.
+    if (!AI_CONNECTION_CAPABILITIES[input.provider].methods[input.method])
+      throw unprocessable(
+        input.provider === "anthropic"
+          ? CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE
+          : "Unsupported sign-in method",
+      );
     if (!(await membership(companyId, userId)))
       throw forbidden("An active company member must own this connection");
     const reconnect = input.connectionId
@@ -476,9 +497,7 @@ export function aiConnectionService(db: Db) {
           .from(adapterAuthSessions)
           .where(
             and(
-              input.provider === "anthropic"
-                ? eq(adapterAuthSessions.publicSessionId, sessionId)
-                : eq(adapterAuthSessions.id, sessionId),
+              eq(adapterAuthSessions.id, sessionId),
               eq(adapterAuthSessions.companyId, companyId),
               eq(adapterAuthSessions.startedByUserId, userId),
             ),
@@ -493,9 +512,7 @@ export function aiConnectionService(db: Db) {
             grantId: session.connectionGrantId,
           };
         if (
-          !["promoting", "submitting", "awaiting_code"].includes(
-            session.status,
-          ) ||
+          session.status !== "promoting" ||
           (session.expiresAt && session.expiresAt.getTime() <= Date.now())
         )
           throw unprocessable("The login attempt is no longer active");
@@ -625,7 +642,7 @@ export function aiConnectionService(db: Db) {
             status: "active",
             healthStatus: "ok",
             healthMessage: null,
-            config: { ...reconnect.connection.config, aiIsolatedSubscription: input.method === "subscription" && input.provider !== "anthropic" },
+            config: { ...reconnect.connection.config, aiIsolatedSubscription: input.method === "subscription" },
             updatedAt: new Date(),
           })
           .where(eq(toolConnections.id, id));
@@ -649,12 +666,12 @@ export function aiConnectionService(db: Db) {
             config: {
               sourceTemplateKey: input.provider,
               ai: { provider: input.provider, method: input.method },
-              aiIsolatedSubscription: input.method === "subscription" && input.provider !== "anthropic",
+              aiIsolatedSubscription: input.method === "subscription",
             },
             createdByUserId: userId,
           });
       let accountLabel: string | undefined;
-      if (input.method === "subscription" && input.provider !== "anthropic") {
+      if (input.method === "subscription") {
         try {
           const credential = JSON.parse(verifiedCredential);
           const claims = credential.tokens?.id_token
@@ -752,15 +769,8 @@ export function aiConnectionService(db: Db) {
             connectionId: id,
             connectionGrantId: grantId,
             connectionMethod: input.method,
-            ...(input.provider === "anthropic"
-              ? { status: "stored" as const }
-              : {}),
           })
-          .where(
-            input.provider === "anthropic"
-              ? eq(adapterAuthSessions.publicSessionId, sessionId)
-              : eq(adapterAuthSessions.id, sessionId),
-          );
+          .where(eq(adapterAuthSessions.id, sessionId));
       await logActivity(tx as unknown as Db, {
         companyId,
         actorType: "user",

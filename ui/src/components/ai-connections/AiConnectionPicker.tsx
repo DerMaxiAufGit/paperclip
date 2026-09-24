@@ -7,6 +7,7 @@ import {
   aiConnectionProblem,
   aiMethodLabel,
   bindingProblem,
+  defaultAiMethod,
   matchesAiRequirement,
   personalAiDefault,
   type AiConnectionBinding,
@@ -118,7 +119,7 @@ export function AiConnectionPicker({
               })),
             ]}
             onSelect={(id) => {
-              if (id === "responsible_user") onChange({provider: requirement.provider, method: personalDefault?.method ?? requirement.method ?? (requirement.provider === "openrouter" ? "api_key" : "subscription"), mode: "responsible_user"});
+              if (id === "responsible_user") onChange({provider: requirement.provider, method: personalDefault?.method ?? requirement.method ?? defaultAiMethod(requirement.provider), mode: "responsible_user"});
               else { const connection = compatible.find((item) => item.id === id)!; select("shared", connection); }
             }}
           />

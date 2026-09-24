@@ -90,6 +90,28 @@ describe("prepareClaudeConfigSeed", () => {
       .resolves.toBe(JSON.stringify({ theme: "dark", permissions: { defaultMode: "default" } }));
   });
 
+  it("never copies credential settings (env block or helper commands) into a remote seed", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-config-credentials-"));
+    cleanupDirs.push(root);
+    const sourceDir = path.join(root, "claude-source");
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.writeFile(path.join(sourceDir, "settings.json"), JSON.stringify({
+      theme: "dark",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-host", ANTHROPIC_API_KEY: "sk-ant-host" },
+      apiKeyHelper: "/usr/local/bin/print-key",
+      awsAuthRefresh: "aws sso login",
+      awsCredentialExport: "/usr/local/bin/aws-creds",
+      otelHeadersHelper: "/usr/local/bin/otel-headers",
+    }), "utf8");
+
+    const seedDir = await prepareClaudeConfigSeed(createEnv(root, sourceDir), vi.fn(async () => {}), "company-1");
+    const raw = await fs.readFile(path.join(seedDir, "settings.json"), "utf8");
+
+    expect(JSON.parse(raw)).toEqual({ theme: "dark", permissions: { defaultMode: "default" } });
+    expect(raw).not.toContain("sk-ant-oat01-host");
+    expect(raw).not.toContain("sk-ant-host");
+  });
+
   it("strips local-only settings from remote Claude config seeds", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-config-boundary-"));
     cleanupDirs.push(root);

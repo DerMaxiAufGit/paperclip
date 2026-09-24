@@ -57,7 +57,6 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
   getGeneral: vi.fn(async () => ({ censorUsernameInLogs: false })),
   getExperimental: vi.fn(async () => ({ enableManagedSandboxOnly: false })),
 }));
-const mockRunClaudeLogin = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
 
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
@@ -95,14 +94,6 @@ vi.mock("../services/environment-execution-target.js", () => ({
 vi.mock("../services/instance-settings.js", () => ({
   instanceSettingsService: () => mockInstanceSettingsService,
 }));
-
-vi.mock("@paperclipai/adapter-claude-local/server", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@paperclipai/adapter-claude-local/server")>();
-  return {
-    ...actual,
-    runClaudeLogin: mockRunClaudeLogin,
-  };
-});
 
 // NOTE: ../services/secrets.js is intentionally NOT mocked — the routes resolve
 // against the real embedded-postgres-backed secret service.
@@ -367,49 +358,6 @@ describeEmbeddedPostgres("agents adapter-config user-secret resolution routes", 
       expect(ev.actorType).toBe("user");
       expect(ev.responsibleUserId).toBe("user-1");
     }
-  });
-
-  // ── claude-login ──────────────────────────────────────────────────
-
-  it("claude-login resolves a declared required user_secret_ref; undeclared → binding_missing", async () => {
-    const definition = await seedUserSecretDefinitionWithValue("anthropic_key", "sk-owner");
-    const agentId = randomUUID();
-    mockAgentService.getById.mockResolvedValue({
-      id: agentId,
-      companyId: COMPANY_ID,
-      name: "Claude agent",
-      adapterType: "claude_local",
-      adapterConfig: {
-        env: { ANTHROPIC_API_KEY: { type: "user_secret_ref", key: "anthropic_key", version: "latest", required: true } },
-      },
-    });
-    beforeEachActor(boardUserActor);
-
-    // Undeclared → binding_missing (declared mode declaration guard active).
-    let app = await createApp();
-    let res = await request(app).post(`/api/agents/${agentId}/claude-login`).send({});
-    expect(res.status, JSON.stringify(res.body)).toBe(422);
-    expect(res.body).toMatchObject({ code: "binding_missing" });
-    expect(mockRunClaudeLogin).not.toHaveBeenCalled();
-
-    // Declare it at the resolver-injected configPath (env.<KEY>) for consumer agent:<agentId>.
-    await db.insert(userSecretDeclarations).values({
-      companyId: COMPANY_ID,
-      userSecretDefinitionId: definition.id,
-      targetType: "agent",
-      targetId: agentId,
-      configPath: "env.ANTHROPIC_API_KEY",
-      envKey: "ANTHROPIC_API_KEY",
-      versionSelector: "latest",
-      required: true,
-      allowMissingOverride: false,
-    });
-
-    app = await createApp();
-    res = await request(app).post(`/api/agents/${agentId}/claude-login`).send({});
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockRunClaudeLogin).toHaveBeenCalledTimes(1);
-    expect(mockRunClaudeLogin.mock.calls[0][0].config.env.ANTHROPIC_API_KEY).toBe("sk-owner");
   });
 });
 

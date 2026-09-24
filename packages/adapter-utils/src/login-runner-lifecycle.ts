@@ -1,9 +1,9 @@
-// The shared login-runner lifecycle contract. Both login runners use these
-// types: the Codex device-login runner and the Claude setup-token runner. The
-// module defines the runner outcome union, the result base type, the fixed-log
-// callback type, the timeout and cancellation options, the dispose contract, and
-// the timeout race helper. The module holds types and one pure helper only. It
-// does not change runner behavior.
+// The shared login-runner lifecycle contract. The adapter device-login runner
+// (the Codex and Grok device-auth flows) uses these types. The module defines
+// the runner outcome union, the result base type, the fixed-log callback type,
+// the timeout and cancellation options, the dispose contract, and the timeout
+// race helper. The module holds types and one pure helper only. It does not
+// change runner behavior.
 //
 // Security (secret handling): the outcome and the result carry only a fixed,
 // non-secret status. They never carry a URL, a code, or a token byte. The log
@@ -33,8 +33,8 @@ export interface LoginRunnerResult {
 export type LoginRunnerLog = (line: string) => void;
 
 /**
- * The shared lifecycle options. Both runners set the host-side timeout, accept an
- * optional cancellation signal, and accept an optional log sink. Each runner
+ * The shared lifecycle options. A runner sets the host-side timeout, accepts an
+ * optional cancellation signal, and accepts an optional log sink. Each runner
  * option type extends this base with its own callbacks.
  */
 export interface LoginRunnerLifecycleOptions {

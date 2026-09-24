@@ -711,15 +711,15 @@ describe("agent test-environment route", () => {
         driver: "sandbox",
         config: { provider: "fake-plugin" },
         envVars: {
-          CLAUDE_CODE_OAUTH_TOKEN: { type: "secret_ref", secretId: "secret-1" },
+          ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "secret-1" },
           FOO: { type: "plain", value: "env-foo" },
           PAPERCLIP_API_KEY: { type: "plain", value: "must-not-flow" },
         },
       });
       mockResolveEnvironmentExecutionTarget.mockResolvedValueOnce(sandboxExecutionTarget);
       mockSecretService.resolveEnvBindings.mockResolvedValueOnce({
-        env: { CLAUDE_CODE_OAUTH_TOKEN: "resolved-token", FOO: "env-foo" },
-        secretKeys: new Set(["CLAUDE_CODE_OAUTH_TOKEN"]),
+        env: { ANTHROPIC_API_KEY: "resolved-key", FOO: "env-foo" },
+        secretKeys: new Set(["ANTHROPIC_API_KEY"]),
         manifest: [],
       });
       const app = await createApp();
@@ -735,7 +735,7 @@ describe("agent test-environment route", () => {
       expect(mockSecretService.resolveEnvBindings).toHaveBeenCalledWith(
         "company-1",
         {
-          CLAUDE_CODE_OAUTH_TOKEN: { type: "secret_ref", secretId: "secret-1" },
+          ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "secret-1" },
           FOO: { type: "plain", value: "env-foo" },
         },
         expect.objectContaining({
@@ -746,7 +746,7 @@ describe("agent test-environment route", () => {
       expect(testEnvironmentSpy).toHaveBeenCalledTimes(1);
       // Environment env is the base layer; the agent's own env wins on conflicts.
       expect(testEnvironmentSpy.mock.calls[0]?.[0]?.config?.env).toEqual({
-        CLAUDE_CODE_OAUTH_TOKEN: "resolved-token",
+        ANTHROPIC_API_KEY: "resolved-key",
         FOO: "agent-foo",
       });
       expect(res.body.status).toBe("pass");

@@ -3,8 +3,8 @@ import { HttpError, unprocessable } from "../errors.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
-import { type Db, companySecrets, connectionGrants } from "@paperclipai/db";
+import { and, eq, isNotNull } from "drizzle-orm";
+import { type Db, aiProviderDefaults, companySecrets, connectionGrants } from "@paperclipai/db";
 import {
   AI_CONNECTION_CAPABILITIES,
   type AiConnectionBinding,
@@ -15,6 +15,50 @@ import { decideCodexAuthMerge } from "@paperclipai/adapter-codex-local/server";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 import { decideGrokAuthMerge } from "@paperclipai/adapter-grok-local/server";
+
+/**
+ * The AI connection binding a run actually uses. A responsible-user Anthropic
+ * binding on a claude_local agent needs the responsible user's own Anthropic
+ * default (an API key: Anthropic connections are API-key only). A member without
+ * one runs the agent unmanaged, on the claude CLI signed in on this server,
+ * instead of failing: that is where a Claude subscription runs, and the adapter
+ * still refuses ACP and remote targets without an API key, so this never
+ * injects or proxies a Claude sign-in. Every other binding, provider, and a run
+ * without a responsible user is returned unchanged.
+ */
+export async function resolveRunAiConnectionBinding(
+  db: Db,
+  input: {
+    companyId: string;
+    adapterType: string;
+    binding: AiConnectionBinding | undefined;
+    responsibleUserId: string | null | undefined;
+  },
+): Promise<AiConnectionBinding | undefined> {
+  const { binding, responsibleUserId } = input;
+  if (
+    !binding ||
+    binding.mode !== "responsible_user" ||
+    binding.provider !== "anthropic" ||
+    input.adapterType !== "claude_local" ||
+    !responsibleUserId
+  ) {
+    return binding;
+  }
+  const [anthropicDefault] = await db
+    .select({ grantId: aiProviderDefaults.grantId })
+    .from(aiProviderDefaults)
+    .where(
+      and(
+        eq(aiProviderDefaults.companyId, input.companyId),
+        eq(aiProviderDefaults.userId, responsibleUserId),
+        eq(aiProviderDefaults.provider, "anthropic"),
+        isNotNull(aiProviderDefaults.grantId),
+      ),
+    )
+    .limit(1);
+  return anthropicDefault ? binding : undefined;
+}
 
 export function isAiConnectionBusy(error: unknown): error is HttpError {
   return error instanceof HttpError && error.status === 422 &&
@@ -234,9 +278,11 @@ export async function prepareManagedAiRuntime(
     runnerProvider: input.config.provider,
     acpxAgent: input.config.acpxAgent,
   });
-  const subscriptionFile =
-    selection.attribution.method === "subscription" &&
-    input.binding.provider !== "anthropic";
+  // Only file-based CLI homes (OpenAI/Codex, Grok) carry a subscription. A
+  // Claude subscription is never managed here: it is used only by the claude
+  // CLI signed in on the server, and the capability table offers no Anthropic
+  // subscription method, so selection rejects such a connection.
+  const subscriptionFile = selection.attribution.method === "subscription";
   let home: string | undefined;
   try {
     const selectedGrantId = selection.grant.id;
@@ -251,6 +297,14 @@ export async function prepareManagedAiRuntime(
       throw unprocessable(
         "The selected default changed. Retry this execution.",
       );
+    const capability =
+      AI_CONNECTION_CAPABILITIES[input.binding.provider].methods[
+        selection.attribution.method
+      ];
+    if (!capability)
+      throw unprocessable("The selected AI connection is incompatible", {
+        code: "ai_connection_incompatible",
+      });
     const value = await service.credential(selection);
     home = await mkdtemp(
       path.join(
@@ -265,10 +319,6 @@ export async function prepareManagedAiRuntime(
       ...Object.fromEntries(AI_AUTH_ENV_KEYS.map((key) => [key, ""])),
       ...managedAiHomeEnvironment(home),
     };
-    const capability =
-      AI_CONNECTION_CAPABILITIES[input.binding.provider].methods[
-        selection.attribution.method
-      ]!;
     const authFile = path.join(providerHome, "auth.json");
     if (input.binding.provider === "openai")
       await writeFile(

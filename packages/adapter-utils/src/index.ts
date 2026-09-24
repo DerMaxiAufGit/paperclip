@@ -91,16 +91,13 @@ export { inferOpenAiCompatibleBiller } from "./billing.js";
 export {
   ADAPTER_LOGIN_PANEL_MODES,
   ADAPTER_LOGIN_TIMEOUT_POLICIES,
-  ADAPTER_LOGIN_COMPLETION_CLAIMS,
   assertValidAdapterLoginCapability,
   validateAdapterLoginCapability,
 } from "./login-capability.js";
 export type {
   AdapterLoginPanelMode,
   AdapterLoginTimeoutPolicy,
-  AdapterLoginCompletionClaim,
   AdapterLoginPrompt,
-  AdapterLoginCompletionContext,
   AdapterLoginCapability,
 } from "./login-capability.js";
 export { raceLoginRunnerExit } from "./login-runner-lifecycle.js";

@@ -1000,7 +1000,7 @@ describe.sequential("agent skill routes", () => {
           }),
         }),
       }),
-      { claudeLogin: { storedSessionId: null, ownerUserId: "local-board", applyExistingWithoutClaim: false } },
+      {},
     );
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
@@ -1050,7 +1050,7 @@ describe.sequential("agent skill routes", () => {
       expect.objectContaining({
         role: "security",
       }),
-      { claudeLogin: { storedSessionId: null, ownerUserId: "local-board", applyExistingWithoutClaim: false } },
+      {},
     );
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
@@ -1479,14 +1479,7 @@ describe.sequential("agent skill routes", () => {
           }),
         }),
       }),
-      {
-        claudeLogin: {
-          storedSessionId: null,
-          ownerUserId: "local-board",
-          applyExistingWithoutClaim: false,
-          inheritedFromAgentId: null,
-        },
-      },
+      {},
     );
     expect(mockApprovalService.create).toHaveBeenCalledWith(
       "company-1",

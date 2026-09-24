@@ -1800,6 +1800,99 @@ describe("company portability", () => {
     ]);
   });
 
+  it("never asks for, stores, or binds a declared Claude subscription token input, and warns about the skip", async () => {
+    const portability = companyPortabilityService({} as any);
+    agentSvc.list.mockResolvedValue([]);
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+    const files = {
+      "COMPANY.md": ["---", "name: Import", "includes:", "  - agents/coder/AGENTS.md", "---", ""].join("\n"),
+      "agents/coder/AGENTS.md": ["---", "name: Coder", "slug: coder", "kind: agent", "---", "", "# Coder", ""].join("\n"),
+      ".paperclip.yaml": [
+        "schema: paperclip/v1",
+        "agents:",
+        "  coder:",
+        "    adapter:",
+        "      type: claude_local",
+        "      config: {}",
+        "    inputs:",
+        "      env:",
+        "        CLAUDE_CODE_OAUTH_TOKEN:",
+        "          kind: secret",
+        "          requirement: required",
+        "",
+      ].join("\n"),
+    };
+    const include = { company: false, agents: true, projects: false, issues: false };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", files },
+      include,
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+    expect(preview.envInputs).toEqual([]);
+    const skippedWarning =
+      "Skipped CLAUDE_CODE_OAUTH_TOKEN for agent coder: Claude subscriptions run through the claude CLI signed in on this server.";
+    expect(preview.warnings).toContain(skippedWarning);
+
+    const result = await portability.importBundle({
+      source: { type: "inline", files },
+      include,
+      target: { mode: "existing_company", companyId: "company-1" },
+      collisionStrategy: "rename",
+      secretValues: { "agent:coder:CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-imported" },
+    }, "user-1");
+
+    expect(result.warnings.filter((warning) => warning === skippedWarning)).toHaveLength(1);
+    expect(secretSvc.create).not.toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ value: "sk-ant-oat01-imported" }),
+      expect.anything(),
+    );
+    for (const [, input] of agentSvc.create.mock.calls) {
+      expect(JSON.stringify(input)).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    }
+  });
+
+  it("warns when a project declares a Claude subscription token input, in any letter case", async () => {
+    const portability = companyPortabilityService({} as any);
+    projectSvc.list.mockResolvedValue([]);
+    const files = {
+      "COMPANY.md": ["---", 'name: "Import"', "---", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "projects:",
+        "  launch:",
+        "    inputs:",
+        "      env:",
+        "        claude_code_oauth_token:",
+        "          kind: secret",
+        "          requirement: optional",
+        "",
+      ].join("\n"),
+    };
+
+    const preview = await portability.previewImport({
+      source: { type: "inline", files },
+      include: { company: true, agents: false, projects: true, issues: false },
+      target: { mode: "new_company", newCompanyName: "Import" },
+      collisionStrategy: "rename",
+    });
+
+    expect(preview.envInputs).toEqual([]);
+    expect(preview.warnings).toContain(
+      "Skipped claude_code_oauth_token for project launch: Claude subscriptions run through the claude CLI signed in on this server.",
+    );
+  });
+
   it("materializes required agent env inputs from import secretValues as company secrets", async () => {
     const portability = companyPortabilityService({} as any);
     agentSvc.list.mockResolvedValue([]);

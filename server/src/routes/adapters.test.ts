@@ -42,27 +42,15 @@ describe("buildAdapterCapabilities login projection", () => {
     expect(caps.login).toBeUndefined();
   });
 
-  it("never projects the function members or a completion claim", () => {
-    const caps = buildAdapterCapabilities(
-      makeAdapter({
-        loginCapability: {
-          panelMode: "submitted_browser_code",
-          timeoutPolicy: "fixed",
-          getCommand: () => "vendor setup-token",
-          parsePrompt: () => null,
-          captureCredential: () => null,
-          completionClaim: "storedSessionId",
-        },
-      }),
-    );
-    expect(caps.login).toEqual({
-      panelMode: "submitted_browser_code",
-      timeoutPolicy: "fixed",
-    });
+  it("never projects the function members", () => {
+    const caps = buildAdapterCapabilities(makeAdapter({ loginCapability: displayedCodeLogin }));
     expect(caps.login).not.toHaveProperty("getCommand");
     expect(caps.login).not.toHaveProperty("parsePrompt");
-    expect(caps.login).not.toHaveProperty("captureCredential");
-    expect(caps.login).not.toHaveProperty("completionClaim");
+  });
+
+  it("projects no login object for claude_local, which has no in-app login", () => {
+    const caps = buildAdapterCapabilities(requireServerAdapter("claude_local"));
+    expect(caps.login).toBeUndefined();
   });
 
   it("projects panelMode and timeoutPolicy for the registered grok_local adapter, with no function member", () => {

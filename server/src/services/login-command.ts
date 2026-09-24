@@ -14,7 +14,7 @@
  * trusted adapter type. The worker maps the key to a compile-time command. The
  * union is exhaustive: a value outside it fails closed before the worker RPC.
  */
-export type LoginCommandKey = "claude" | "codex" | "grok";
+export type LoginCommandKey = "codex" | "grok";
 
 /**
  * The exhaustive map from the trusted adapter type to the login command key. The
@@ -22,7 +22,6 @@ export type LoginCommandKey = "claude" | "codex" | "grok";
  * configuration, a plugin manifest, or the provider driver key.
  */
 const ADAPTER_TYPE_TO_LOGIN_COMMAND_KEY: Readonly<Record<string, LoginCommandKey>> = {
-  claude_local: "claude",
   codex_local: "codex",
   grok_local: "grok",
 };
@@ -48,7 +47,7 @@ export function resolveLoginCommandKey(adapterType: string): LoginCommandKey {
 
 /** Reports whether a value is a member of the closed login command key set. */
 export function isLoginCommandKey(value: unknown): value is LoginCommandKey {
-  return value === "claude" || value === "codex" || value === "grok";
+  return value === "codex" || value === "grok";
 }
 
 /**
@@ -68,9 +67,6 @@ export function isLoginCommandSupportedAdapterType(adapterType: string): boolean
  */
 export const LOGIN_SESSION_HOME_ROOT = "/tmp/paperclip-adapter-login";
 
-/** Matches one lowercase-hyphenated UUID (version 4 layout not enforced). */
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
 /**
  * The exact absolute path shape for a login session home. The path is the fixed
  * root, one slash, and one UUID. The anchors reject a relative path, a path
@@ -80,18 +76,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const SESSION_HOME_PATTERN = new RegExp(
   `^${LOGIN_SESSION_HOME_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
 );
-
-/**
- * Derives the session home from a session UUID. It builds the exact
- * `/tmp/paperclip-adapter-login/<uuid>` path. It throws the fixed non-secret
- * error when the id is not a UUID, so a malformed id never becomes a home.
- */
-export function deriveLoginSessionHome(sessionUuid: string): string {
-  if (!UUID_PATTERN.test(sessionUuid)) {
-    throw new Error(LOGIN_SESSION_HOME_INVALID);
-  }
-  return `${LOGIN_SESSION_HOME_ROOT}/${sessionUuid}`;
-}
 
 /**
  * Validates the exact session home path shape. It throws the fixed non-secret

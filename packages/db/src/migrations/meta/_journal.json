@@ -1961,6 +1961,13 @@
       "when": 1789827314772,
       "tag": "0281_true_boom_boom",
       "breakpoints": true
+    },
+    {
+      "idx": 282,
+      "version": "7",
+      "when": 1790270962937,
+      "tag": "0282_remove_claude_subscription_credentials",
+      "breakpoints": true
     }
   ]
 }

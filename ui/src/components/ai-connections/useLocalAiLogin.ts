@@ -2,9 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import type { AiConnectionLoginIntent, LocalAiLoginAttempt, LocalAiLoginStatus } from "@paperclipai/shared";
 import { aiConnectionsApi } from "@/api/ai-connections";
 
-/** Every authentication host uses the same local credential check and login lifecycle. */
-export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLoginIntent, enabled: boolean, options: { allowHostClaude?: boolean } = {}) {
-  const isolated = intent.provider !== "anthropic" || !options.allowHostClaude;
+/**
+ * Every authentication host uses the same local credential check and login
+ * lifecycle. Each sign-in runs in its own isolated attempt on the server, for
+ * the OpenAI (Codex) and Grok subscriptions. There is no Claude path: a Claude
+ * subscription is used only through the claude CLI signed in on the server.
+ */
+export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLoginIntent, enabled: boolean) {
   const active = Boolean(companyId && enabled);
   const [attempt, setAttempt] = useState<LocalAiLoginAttempt | null>(null);
   const [status, setStatus] = useState<LocalAiLoginStatus["status"] | null>(null);
@@ -32,7 +36,7 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
     let checking = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const key = JSON.stringify([companyId, target, generation]);
-    if (isolated && current.current?.key !== key) {
+    if (current.current?.key !== key) {
       cancelCurrent();
       const input = { ...latestIntent.current, ...(restartRequested.current ? { restart: true } : {}) };
       restartRequested.current = false;
@@ -40,7 +44,7 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
       current.current = { key, companyId, request };
       pending.current = request.catch(() => {});
     }
-    const request = isolated ? current.current!.request : Promise.resolve(null);
+    const request = current.current!.request;
     async function check() {
       if (checking || cancelled) return;
       checking = true;
@@ -50,7 +54,7 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
         if (cancelled) return;
         setAttempt(result);
         const next = await aiConnectionsApi.checkLocalLogin(companyId!, {
-          ...latestIntent.current, ...(result ? { localSessionId: result.sessionId } : {}),
+          ...latestIntent.current, localSessionId: result.sessionId,
         });
         if (cancelled) return;
         setStatus(next.status);
@@ -75,9 +79,8 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
       // when the user returns and reaps abandoned attempts after expiry. Deleting
       // here made copied CODEX_HOME commands point at nonexistent directories.
     };
-  }, [companyId, active, isolated, target, generation]);
+  }, [companyId, active, target, generation]);
   return {
-    isolated,
     command: attempt?.command,
     status,
     preparing: active && !status && !error,
@@ -85,8 +88,8 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
     retry: () => { restartRequested.current = true; cancelCurrent(); setGeneration((value) => value + 1); },
     connect: (input = intent) => {
       if (!companyId) throw new Error("Choose a company before connecting.");
-      if (isolated && !attempt) throw new Error("Prepare local sign-in before connecting.");
-      return aiConnectionsApi.connectLocal(companyId, { ...input, ...(attempt ? { localSessionId: attempt.sessionId } : {}) });
+      if (!attempt) throw new Error("Prepare local sign-in before connecting.");
+      return aiConnectionsApi.connectLocal(companyId, { ...input, localSessionId: attempt.sessionId });
     },
   };
 }

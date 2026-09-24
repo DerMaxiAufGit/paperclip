@@ -45,12 +45,12 @@ import type {
 } from "@paperclipai/plugin-sdk";
 import { performSyncIn, performSyncOut, withProviderSpan } from "./file-sync.js";
 
-// The Claude `setup-token` login pseudo-terminal (PTY) session for this provider.
-// The session runs the login command on a real pseudo-terminal, streams the
-// terminal output, and delivers the delayed browser code plus the Enter byte. A
-// later phase binds the opener to `sandbox.process` and wraps it with the
-// `createLoginPtyTransport` factory from `@paperclipai/adapter-utils` to
-// build the transport the login runner drives.
+// The adapter device-login pseudo-terminal (PTY) session for this provider (the
+// Codex and Grok device-auth flows). The session runs the login command on a
+// real pseudo-terminal and streams the terminal output. The host wraps the
+// session opener with the `createLoginPtyTransport` factory from
+// `@paperclipai/adapter-utils` to build the transport the device-login runner
+// drives.
 export {
   createDaytonaLoginPtySessionOpener,
   openDaytonaLoginPtySession,

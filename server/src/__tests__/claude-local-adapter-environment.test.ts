@@ -266,6 +266,8 @@ describe("claude_local environment diagnostics", () => {
       config: {
         engine: "cli",
         command: process.execPath,
+        // Remote targets authenticate with an Anthropic API key only.
+        env: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       executionTarget: {
         kind: "remote",
@@ -307,6 +309,7 @@ describe("claude_local environment diagnostics", () => {
       config: {
         engine: "cli",
         command: "claude",
+        env: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       executionTarget: {
         kind: "remote",
@@ -395,8 +398,8 @@ if (settings.hooks || settings.mcpServers || settings.permissionMode || settings
   fail("local-only settings leaked into sandbox config");
 }
 if (fs.existsSync(path.join(configDir, "credentials.json"))) fail("host credentials leaked into sandbox config");
-const remoteCredentials = JSON.parse(fs.readFileSync(path.join(configDir, ".credentials.json"), "utf8"));
-if (remoteCredentials.token !== "remote") fail("sandbox credentials were not preserved");
+// Remote targets use an API key only; no Claude sign-in is copied into the managed config.
+if (fs.existsSync(path.join(configDir, ".credentials.json"))) fail("sandbox sign-in was copied into the managed config");
 if (fs.readFileSync(path.join(configDir, "CLAUDE.md"), "utf8") !== "seed instructions") {
   fail("CLAUDE.md seed was not materialized");
 }
@@ -416,7 +419,7 @@ console.log(JSON.stringify({ type: "result", result: "hello", usage: { input_tok
         config: {
           engine: "cli",
           command: commandPath,
-          env: { HOME: remoteHome },
+          env: { HOME: remoteHome, ANTHROPIC_API_KEY: "sk-ant-test" },
         },
         executionTarget: {
           kind: "remote",
@@ -454,6 +457,7 @@ console.log(JSON.stringify({ type: "result", result: "hello", usage: { input_tok
           command: commandPath,
           cwd: workspace,
           effort: "low",
+          env: { ANTHROPIC_API_KEY: "sk-ant-test" },
         },
         executionTarget: {
           kind: "remote",

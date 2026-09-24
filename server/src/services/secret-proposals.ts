@@ -1,4 +1,4 @@
-import { withAgentAppearance } from "@paperclipai/shared";
+import { CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE, isClaudeSubscriptionTokenEnvKey, withAgentAppearance } from "@paperclipai/shared";
 import { and, count, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -375,6 +375,14 @@ export function createSecretProposalsService(db: Db) {
     if (!CONFIG_PATH_RE.test(input.configPath)) throw unprocessable("configPath must use env.<KEY> or access.<ALIAS>");
     if (input.sourceConfigPath && !CONFIG_PATH_RE.test(input.sourceConfigPath)) {
       throw unprocessable("sourceConfigPath must use env.<KEY> or access.<ALIAS>");
+    }
+    // Paperclip never binds a Claude subscription credential into an agent env.
+    for (const path of [input.configPath, input.sourceConfigPath]) {
+      if (path?.startsWith("env.") && isClaudeSubscriptionTokenEnvKey(path.slice("env.".length))) {
+        throw unprocessable(CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE, {
+          code: "claude_subscription_token_unsupported",
+        });
+      }
     }
     if (!input.justification.trim()) throw unprocessable("Justification is required");
     if (input.justification.trim().length > 20_000) throw unprocessable("Justification must be at most 20000 characters");

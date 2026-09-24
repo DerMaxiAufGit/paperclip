@@ -233,6 +233,11 @@ fn assigned_gateway_binding_reaches_qualified_sidecar_without_unrelated_secrets(
                 "fixture-token-never-returned-in-test-output",
             )
             .env("UNRELATED_EVAL_SECRET", "must-not-cross-boundary")
+            .env("ANTHROPIC_API_KEY", "fixture-anthropic-api-key")
+            .env(
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "fixture-claude-subscription-token-must-not-cross",
+            )
             .status()
             .unwrap();
         assert!(status.success(), "isolated gateway environment test failed");
@@ -260,6 +265,15 @@ fn assigned_gateway_binding_reaches_qualified_sidecar_without_unrelated_secrets(
             "assigned gateway credential was dropped"
         );
         assert_eq!(response["hasUnrelatedSecret"], false);
+        assert_eq!(
+            response["hasAnthropicApiKey"],
+            agent == "claude",
+            "ANTHROPIC_API_KEY must reach only the claude sidecar"
+        );
+        assert_eq!(
+            response["hasClaudeOauthToken"], false,
+            "the Claude subscription token must never cross the ACPX sidecar boundary"
+        );
         sidecar.shutdown().unwrap();
     }
 }

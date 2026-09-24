@@ -39,10 +39,9 @@ export type AdapterLoginChrome = "panel" | "onboarding";
  * Deliberately not the display registry's label, which ten other surfaces read
  * and which names the tool that runs ("Codex CLI was not found on this host").
  * Also not `ADAPTER_LOGIN_PROVIDER`, which names the account being signed in to
- * — "Anthropic" is right in a settings panel listing credentials and wrong in a
- * sentence that reads "Sign in to Claude".
+ * in a settings panel listing credentials.
  *
- * Three names for two adapters is a tension worth stating rather than hiding.
+ * Three names for one adapter is a tension worth stating rather than hiding.
  * The concepts differ — vendor, tool, account — but if the product decides
  * otherwise, this is the one to delete.
  */
@@ -61,10 +60,10 @@ export function connectSourceName(adapterType: string): string {
  * The connect step's login card: an instruction, then the rows the customer
  * works through.
  *
- * The rows are the caller's, because the two login modes genuinely differ in
- * the last one — Claude takes a code back, OpenAI hands one out — while
- * everything above it is the same card. Passing children rather than a variant
- * flag keeps that difference where it actually lives.
+ * The rows are the caller's, because the cards differ in the last one — the
+ * device login hands out a code, the key card takes a key — while everything
+ * above it is the same card. Passing children rather than a variant flag keeps
+ * that difference where it actually lives.
  */
 export function OnboardingLoginCard({
   instruction,
@@ -125,7 +124,7 @@ export function OnboardingLoginCard({
       </motion.div>
       {/* A beat behind the sentence above it, so the card reads as one thing
           unfolding and the instruction has been read by the time the field is
-          ready to be pasted into. */}
+          ready to be used. */}
       <motion.div
         initial={{ opacity: 0, y: CARD_REVEAL_TRAVEL }}
         animate={{ opacity: 1, y: 0, transition: CARD_REVEAL_FIELD }}
@@ -325,10 +324,8 @@ export function OnboardingLoginCodeRow({
 /**
  * One row's worth of input, shared by every card that takes one.
  *
- * Exported rather than duplicated because the two inputs that use it — the
- * browser code here and the API key on the credential card — sit in the same
- * canvas one toggle apart, so a divergence between them is visible by flipping
- * a switch. They differ in what they hold, not in what they look like.
+ * Exported rather than duplicated so every API key field on the connect cards
+ * looks the same wherever it is drawn.
  */
 export const onboardingCardInputClass =
   "h-(--sz-44px) w-full rounded-lg bg-muted px-5 font-mono text-xs text-foreground " +
@@ -336,56 +333,35 @@ export const onboardingCardInputClass =
   "outline-none focus-visible:ring-ring/50 focus-visible:ring-(length:--rad-3)";
 
 /**
- * The card's single-line field, whatever the card is asking for.
+ * The card's single-line field: an API key typed or pasted in.
  *
- * Three cards use it and they want different things: a browser code pasted
- * back, and an API key typed or pasted in. Same row, same measurements — what
- * changes is the label, the placeholder, and whether the value should be masked.
- *
- * No Submit button beside it in the code case: the code arrives in one piece,
- * off the clipboard, so the paste is the answer and a press after it confirms
- * nothing the paste did not already say.
- *
- * `onPaste` is what that case submits on, and it is separate from `onChange` on
- * purpose. There is no shape that says "this code is complete" —
- * `isValidBrowserCode` accepts any run of printable ASCII from one character
- * up, deliberately, because the provider's exact format is not pinned down — so
- * a submit driven by the value alone fires on the first keystroke of anyone who
- * types instead of pasting. Enter stays for them. A key field simply omits it:
- * a key is not submitted by arriving, it is submitted by the step's own button.
+ * Enter submits. The value is not submitted by arriving; the step's own button
+ * submits it too.
  */
 export function OnboardingCardField({
   value,
   onChange,
   onSubmit,
-  onPaste,
   disabled,
-  label = "Authorization code",
-  placeholder = "Paste authorization code here",
+  label,
+  placeholder,
   masked = false,
   autoFocus = false,
 }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
-  onPaste?: () => void;
   disabled?: boolean;
-  label?: string;
-  placeholder?: string;
+  label: string;
+  placeholder: string;
   /**
    * Dots instead of the value. The key card asks for it because a provider key
-   * is a credential that goes on living. The Claude card asks too: its code
-   * stays in the field after the paste so the customer can see something
-   * landed, and that is all they need to see of it.
+   * is a credential that goes on living.
    */
   masked?: boolean;
   /**
-   * Take focus when the card opens.
-   *
-   * For the key card, where the field is the only thing being asked for and the
-   * card only opens because it was asked for. The code cards do not: their
-   * customer is on their way to another tab, and a caret waiting behind them is
-   * not where the next action is.
+   * Take focus when the card opens: the field is the only thing being asked
+   * for, and the card only opens because it was asked for.
    */
   autoFocus?: boolean;
 }) {
@@ -401,7 +377,6 @@ export function OnboardingCardField({
       value={value}
       disabled={disabled}
       onChange={(event) => onChange(event.target.value)}
-      onPaste={() => onPaste?.()}
       onKeyDown={(event) => {
         if (event.key === "Enter") {
           event.preventDefault();
@@ -413,17 +388,19 @@ export function OnboardingCardField({
   );
 }
 
-/** Shared authentication presentation. Hosts retain their existing session lifecycle. */
+/**
+ * Shared device-login presentation (Codex, Grok): the provider hands out a code
+ * the customer enters on the provider's page. Hosts retain their existing
+ * session lifecycle.
+ */
 export function ProviderSubscriptionCard({
   providerName,
   authorizationUrl,
-  mode,
   loading,
   children,
 }: {
   providerName: string;
   authorizationUrl?: string;
-  mode: "submitted_code" | "displayed_code";
   loading?: boolean;
   children: ReactNode;
 }) {
@@ -440,9 +417,7 @@ export function ProviderSubscriptionCard({
           >
             Sign in to {providerName}
           </a>
-          {mode === "submitted_code"
-            ? " then come back and enter authorization code"
-            : " by providing the authorization code below"}
+          {" by providing the authorization code below"}
         </>
       }
     >
@@ -466,22 +441,25 @@ export function ProviderApiKeyCard({
   );
 }
 
-/** Shared instructions for local subscription setup in every authentication host. */
+/**
+ * Shared instructions for local Codex and Grok subscription sign-in in every
+ * authentication host. Each sign-in runs in its own isolated attempt, so the
+ * operator's existing terminal login is never read or reused.
+ */
 export function LocalProviderLoginInstructions({ adapterType, login }: {
   adapterType: string;
-  login?: { isolated?: boolean; command?: string; preparing: boolean; status?: "ready" | "sign_in_required" | "expired" | null; error: string | null; retry: () => void };
+  login?: { command?: string; preparing: boolean; status?: "ready" | "sign_in_required" | "expired" | null; error: string | null; retry: () => void };
 }) {
   const [showCommand, setShowCommand] = useState(false);
-  const provider = adapterType === "claude_local" ? "Claude Code" : adapterType === "grok_local" ? "Grok CLI" : "Codex CLI";
-  const isolated = login?.isolated ?? (adapterType === "codex_local" || adapterType === "grok_local");
-  const command = isolated ? login?.command : "claude auth login";
+  const provider = adapterType === "grok_local" ? "Grok CLI" : "Codex CLI";
+  const command = login?.command;
   if (login?.preparing) return <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking local {provider} sign-in…</p>;
   const ready = login?.status === "ready";
   return <div className="min-w-0 max-w-full space-y-3 text-sm text-muted-foreground">
     {ready ? <>
       <p role="status" className="flex items-center gap-2 text-foreground"><Check className="size-4 shrink-0 text-(--status-task-icon-done)" />{provider} is signed in. Click Connect to use this account.</p>
       {!showCommand && <button type="button" className="underline underline-offset-4" onClick={() => setShowCommand(true)}>Use a different account</button>}
-    </> : <p>{isolated ? `Sign in to ${provider} for this connection on the machine running Paperclip. Your existing terminal login stays separate.` : `Connect uses your local ${provider} account on the machine running Paperclip.`}</p>}
+    </> : <p>Sign in to {provider} for this connection on the machine running Paperclip. Your existing terminal login stays separate.</p>}
     {(!ready || showCommand) && !login?.error && <>
       <p>Run this in a terminal on that machine and finish signing in in your browser. We’ll check automatically when you return.</p>
       {command && <div className="flex min-w-0 max-w-full items-start gap-2 rounded-md border bg-muted p-3 text-foreground">
@@ -490,6 +468,6 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
       </div>}
     </>}
     {login?.error && <p role="alert">{login.error}</p>}
-    {login && !login.preparing && (isolated || login.error) && <button type="button" className="underline underline-offset-4" onClick={login.retry}>{isolated ? "Start sign-in again" : "Check again"}</button>}
+    {login && !login.preparing && <button type="button" className="underline underline-offset-4" onClick={login.retry}>Start sign-in again</button>}
   </div>;
 }

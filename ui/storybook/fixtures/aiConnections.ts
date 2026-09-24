@@ -4,14 +4,19 @@ import type {
   AiConnectionSummary,
 } from "@/components/ai-connections/model";
 
+/**
+ * Claude connects with an API key only: a Claude subscription is used through
+ * the claude CLI signed in on the Paperclip server, never as an AI connection.
+ * The subscription examples below are ChatGPT and Grok.
+ */
 export const AI_REVIEW_REQUIREMENT = {
   companyId: "ai-review-company",
   provider: "anthropic",
-  method: "subscription",
+  method: "api_key",
 } satisfies AiConnectionRequirement;
 export const AI_REVIEW_BINDING = {
   provider: "anthropic",
-  method: "subscription",
+  method: "api_key",
   mode: "responsible_user",
 } satisfies AiConnectionBinding;
 export const AI_REVIEW_CONNECTIONS: AiConnectionSummary[] = [
@@ -20,9 +25,8 @@ export const AI_REVIEW_CONNECTIONS: AiConnectionSummary[] = [
     grantId: "grant-dotta",
     companyId: "ai-review-company",
     provider: "anthropic",
-    method: "subscription",
-    name: "My Claude subscription",
-    accountLabel: "dotta@example.test",
+    method: "api_key",
+    name: "My Claude API key",
     ownership: "personal",
     ownerUserId: "dotta",
     ownerName: "Dotta",
@@ -34,9 +38,8 @@ export const AI_REVIEW_CONNECTIONS: AiConnectionSummary[] = [
     grantId: "grant-second",
     companyId: "ai-review-company",
     provider: "anthropic",
-    method: "subscription",
-    name: "My research account",
-    accountLabel: "research@example.test",
+    method: "api_key",
+    name: "My research API key",
     ownership: "personal",
     ownerUserId: "dotta",
     ownerName: "Dotta",
@@ -47,9 +50,8 @@ export const AI_REVIEW_CONNECTIONS: AiConnectionSummary[] = [
     grantId: "grant-shared",
     companyId: "ai-review-company",
     provider: "anthropic",
-    method: "subscription",
+    method: "api_key",
     name: "Engineering Claude",
-    accountLabel: "engineering@example.test",
     ownership: "shared",
     status: "connected",
   },
@@ -58,9 +60,8 @@ export const AI_REVIEW_CONNECTIONS: AiConnectionSummary[] = [
     grantId: "grant-sam",
     companyId: "ai-review-company",
     provider: "anthropic",
-    method: "subscription",
-    name: "Sam’s Claude subscription",
-    accountLabel: "sam@example.test",
+    method: "api_key",
+    name: "Sam’s Claude API key",
     ownership: "personal",
     ownerUserId: "sam",
     ownerName: "Sam",

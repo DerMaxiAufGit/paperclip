@@ -1,7 +1,7 @@
 import { aiConnectionLoginIntentSchema } from "../ai-connections.js";
 import { z } from "zod";
 import { AGENT_ADAPTER_TYPES } from "../constants.js";
-import { ADAPTER_AUTH_SESSION_STATUSES } from "../types/agent.js";
+import { ADAPTER_AUTH_PANEL_MODES, ADAPTER_AUTH_SESSION_STATUSES } from "../types/agent.js";
 
 const isoDateTime = z.union([z.date(), z.string().datetime()]);
 
@@ -15,6 +15,9 @@ export const adapterAuthSessionFailureSchema = z.object({
   message: z.string().min(1).max(1000).nullable(),
 }).strict();
 export type AdapterAuthSessionFailure = z.infer<typeof adapterAuthSessionFailureSchema>;
+
+// The panel-mode schema. It accepts only the known panel modes.
+export const adapterAuthPanelModeSchema = z.enum(ADAPTER_AUTH_PANEL_MODES);
 
 // The public response schema. `.strict()` rejects an extra field, so a prompt, a
 // token, an account identifier, or a provider lease identifier never validates.

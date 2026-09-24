@@ -1660,8 +1660,9 @@ it.each([
   },
   {
     agent: "claude" as const,
-    allowed: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+    allowed: ["ANTHROPIC_API_KEY"],
     denied: [
+      "CLAUDE_CODE_OAUTH_TOKEN",
       "OPENROUTER_API_KEY",
       "OPENAI_API_KEY",
       "CODEX_API_KEY",

@@ -43,6 +43,50 @@ export const envBindingSchema = z.union([
 
 export const envConfigSchema = z.record(z.string(), envBindingSchema);
 
+// Paperclip never reads, stores, or forwards a Claude subscription credential.
+// A Claude subscription runs through the `claude` CLI that is signed in on the
+// server; API-key access uses `ANTHROPIC_API_KEY`. So no env map (agent,
+// project, routine, environment) may carry the subscription token key, in any
+// letter case.
+export const CLAUDE_CODE_OAUTH_TOKEN_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
+export const CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE =
+  "CLAUDE_CODE_OAUTH_TOKEN is not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.";
+
+/** Returns true when `key` names the Claude subscription token env var (case-insensitive). */
+export function isClaudeSubscriptionTokenEnvKey(key: string): boolean {
+  return key.trim().toUpperCase() === CLAUDE_CODE_OAUTH_TOKEN_ENV_KEY;
+}
+
+/**
+ * Adds one zod issue per env key that names the Claude subscription token. The
+ * issue path is `[...pathPrefix, key]`. A non-object `env` adds no issue; the
+ * env shape check reports that case.
+ */
+export function rejectClaudeSubscriptionTokenEnvKeys(
+  env: unknown,
+  ctx: z.RefinementCtx,
+  pathPrefix: ReadonlyArray<string | number> = [],
+): void {
+  if (typeof env !== "object" || env === null || Array.isArray(env)) return;
+  for (const key of Object.keys(env)) {
+    if (!isClaudeSubscriptionTokenEnvKey(key)) continue;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE,
+      path: [...pathPrefix, key],
+    });
+  }
+}
+
+/**
+ * The env map schema for every request that writes an env map (agent
+ * adapterConfig.env, project env, routine env, environment envVars). It rejects
+ * the Claude subscription token key in any letter case with a clean 400.
+ */
+export const envConfigWithoutClaudeSubscriptionTokenSchema = envConfigSchema.superRefine((env, ctx) => {
+  rejectClaudeSubscriptionTokenEnvKeys(env, ctx);
+});
+
 export const createSecretSchema = z.object({
   name: z.string().min(1),
   key: secretKeySchema.optional(),

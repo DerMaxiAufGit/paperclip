@@ -5,7 +5,8 @@ import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CONNECTION_INTENT_AGENT_GUIDANCE } from "@paperclipai/shared";
-import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
+import { isNeverForwardedChildEnvKey, sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
+export { NEVER_FORWARDED_CHILD_ENV_KEYS, isNeverForwardedChildEnvKey } from "./remote-execution-env.js";
 import {
   buildLocalProcessSandboxSpawnTarget,
   type LocalProcessSandboxOptions,
@@ -3388,6 +3389,13 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
+/** Delete every Claude subscription credential key (see `NEVER_FORWARDED_CHILD_ENV_KEYS`). */
+function deleteNeverForwardedChildEnvKeys(env: Record<string, string | undefined>): void {
+  for (const key of Object.keys(env)) {
+    if (isNeverForwardedChildEnvKey(key)) delete env[key];
+  }
+}
+
 export function sanitizeInheritedPaperclipEnv(
   baseEnv: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
@@ -4602,6 +4610,12 @@ export async function runChildProcess(
     for (const key of CLAUDE_CODE_NESTING_VARS) {
       delete rawMerged[key];
     }
+    // The child inherits the host env, so an explicit caller env cannot unset a
+    // host key. Delete a Claude subscription credential from the merged env
+    // here, so no spawned process ever receives one.
+    deleteNeverForwardedChildEnvKeys(rawMerged);
+    const remoteEnv = opts.remoteExecution ? { ...opts.env } : null;
+    if (remoteEnv) deleteNeverForwardedChildEnvKeys(remoteEnv);
 
     const mergedEnv = ensurePathInEnv(rawMerged);
     if (opts.localProcessSandbox?.homeDir) {
@@ -4609,7 +4623,7 @@ export async function runChildProcess(
     }
     void resolveSpawnTarget(command, args, opts.cwd, mergedEnv, {
       remoteExecution: opts.remoteExecution ?? null,
-      remoteEnv: opts.remoteExecution ? opts.env : null,
+      remoteEnv,
       localProcessSandbox: opts.localProcessSandbox ?? null,
     })
       .then((target) => {

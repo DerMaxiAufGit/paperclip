@@ -14,14 +14,14 @@ import {
   type LoginPtyLaunchDescriptor,
 } from "./login-pty.js";
 
-// The Enter byte the terminal login UI reads to submit the browser code.
+// The Enter byte that submits the launch line to the pseudo-terminal shell.
 const ENTER = "\r";
 
 const HOME = "/tmp/paperclip-adapter-login/11111111-2222-4333-8444-555555555555";
 
-const CLAUDE: LoginPtyLaunchDescriptor = { loginCommandKey: "claude", sessionHome: HOME };
 const CODEX: LoginPtyLaunchDescriptor = { loginCommandKey: "codex", sessionHome: HOME };
 const GROK: LoginPtyLaunchDescriptor = { loginCommandKey: "grok", sessionHome: HOME };
+const CODEX_LAUNCH_LINE = `exec env CODEX_HOME='${HOME}' codex login --device-auth`;
 
 /**
  * A fake login-home filesystem. It records each path the caller asks to create
@@ -145,12 +145,6 @@ describe("encodePosixShellArg", () => {
 });
 
 describe("composeLaunchLine", () => {
-  it("composes the Claude line with no CODEX_HOME", () => {
-    const line = composeLaunchLine(CLAUDE);
-    expect(line).toBe("exec claude setup-token");
-    expect(line).not.toContain("CODEX_HOME");
-  });
-
   it("composes the Codex line with exactly one encoded CODEX_HOME", () => {
     const line = composeLaunchLine(CODEX);
     expect(line).toBe(`exec env CODEX_HOME='${HOME}' codex login --device-auth`);
@@ -188,12 +182,12 @@ describe("openDaytonaLoginPtySession — session home", () => {
     const process = createFakeProcess();
     const fs = createFakeHomeFs();
 
-    await openDaytonaLoginPtySession(process, fs, CLAUDE);
+    await openDaytonaLoginPtySession(process, fs, GROK);
 
     // The provider created the exact directory and opened the terminal.
     expect(fs.created).toEqual([HOME]);
     expect(process.createCount).toBe(1);
-    expect(process.handle?.inputs[0]).toBe("exec claude setup-token" + ENTER);
+    expect(process.handle?.inputs[0]).toBe(`exec env GROK_HOME='${HOME}' grok login --device-auth` + ENTER);
   });
 
   it("sends the Codex launch line with the encoded CODEX_HOME", async () => {
@@ -202,10 +196,8 @@ describe("openDaytonaLoginPtySession — session home", () => {
 
     await openDaytonaLoginPtySession(process, fs, CODEX);
 
-    expect(process.handle?.inputs[0]).toBe(
-      `exec env CODEX_HOME='${HOME}' codex login --device-auth` + ENTER,
-    );
-    // The Claude line carries no CODEX_HOME; the Codex line carries exactly one.
+    expect(process.handle?.inputs[0]).toBe(CODEX_LAUNCH_LINE + ENTER);
+    // The Codex line carries exactly one CODEX_HOME.
     expect((process.handle?.inputs[0]?.match(/CODEX_HOME=/g) ?? []).length).toBe(1);
   });
 
@@ -216,8 +208,8 @@ describe("openDaytonaLoginPtySession — session home", () => {
     // A second login for the same home hits an existing directory. `mkdir -p`
     // succeeds on an existing directory, so the second session opens the same
     // as the first.
-    await openDaytonaLoginPtySession(process, fs, CLAUDE);
-    await openDaytonaLoginPtySession(process, fs, CLAUDE);
+    await openDaytonaLoginPtySession(process, fs, CODEX);
+    await openDaytonaLoginPtySession(process, fs, CODEX);
 
     expect(fs.created).toEqual([HOME, HOME]);
     expect(process.createCount).toBe(2);
@@ -229,11 +221,25 @@ describe("openDaytonaLoginPtySession — session home", () => {
 
     await expect(
       openDaytonaLoginPtySession(process, fs, {
-        loginCommandKey: "gemini" as unknown as "claude",
+        loginCommandKey: "gemini" as unknown as "codex",
         sessionHome: HOME,
       }),
     ).rejects.toThrow("LOGIN_PTY_DESCRIPTOR_REJECTED");
     // The provider never touched the filesystem or the terminal.
+    expect(fs.created).toEqual([]);
+    expect(process.createCount).toBe(0);
+  });
+
+  it("rejects the removed claude command key", async () => {
+    const process = createFakeProcess();
+    const fs = createFakeHomeFs();
+
+    await expect(
+      openDaytonaLoginPtySession(process, fs, {
+        loginCommandKey: "claude" as unknown as "codex",
+        sessionHome: HOME,
+      }),
+    ).rejects.toThrow("LOGIN_PTY_DESCRIPTOR_REJECTED");
     expect(fs.created).toEqual([]);
     expect(process.createCount).toBe(0);
   });
@@ -256,31 +262,31 @@ describe("openDaytonaLoginPtySession — session mechanics", () => {
   it("starts the login command on a pseudo-terminal with a fixed size", async () => {
     const process = createFakeProcess();
 
-    await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
+    await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
 
     expect(process.createOptions?.cols).toBe(120);
     expect(process.createOptions?.rows).toBe(30);
-    expect(process.handle?.inputs[0]).toBe("exec claude setup-token" + ENTER);
+    expect(process.handle?.inputs[0]).toBe(CODEX_LAUNCH_LINE + ENTER);
   });
 
   it("returns incremental terminal output to the listener", async () => {
     const process = createFakeProcess();
     const received: string[] = [];
 
-    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
+    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
     session.onData((chunk) => received.push(chunk));
 
-    process.handle?.emitText("the url below to sign in\n");
-    process.handle?.emitText("Paste code here if prompted\n");
+    process.handle?.emitText("Open this link in your browser\n");
+    process.handle?.emitText("Enter this one-time code: ABCD-1234\n");
 
-    expect(received).toEqual(["the url below to sign in\n", "Paste code here if prompted\n"]);
+    expect(received).toEqual(["Open this link in your browser\n", "Enter this one-time code: ABCD-1234\n"]);
   });
 
   it("buffers early output until the listener registers", async () => {
     const process = createFakeProcess();
     const received: string[] = [];
 
-    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
+    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
     process.handle?.emitText("early output ");
     process.handle?.emitText("more output");
     expect(received).toEqual([]);
@@ -289,24 +295,23 @@ describe("openDaytonaLoginPtySession — session mechanics", () => {
     expect(received).toEqual(["early output more output"]);
   });
 
-  it("delivers the browser code plus the Enter byte to the command", async () => {
+  it("delivers written input to the command", async () => {
     const process = createFakeProcess();
 
-    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
-    session.write("BROWSERCODE" + ENTER);
+    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
+    session.write("INPUT" + ENTER);
     // The write runs through the serialized chunk chain, so it lands on a later
     // microtask. Flush the chain before the assertion.
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(process.handle?.inputs[1]).toBe("BROWSERCODE" + ENTER);
-    expect(process.handle?.inputs[1]?.endsWith(ENTER)).toBe(true);
+    expect(process.handle?.inputs[1]).toBe("INPUT" + ENTER);
   });
 
   it("keeps a multibyte character whole across two output chunks", async () => {
     const process = createFakeProcess();
     const received: string[] = [];
 
-    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
+    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
     session.onData((chunk) => received.push(chunk));
 
     const euro = new TextEncoder().encode("€");
@@ -319,7 +324,7 @@ describe("openDaytonaLoginPtySession — session mechanics", () => {
   it("resolves wait with the command exit code", async () => {
     const process = createFakeProcess();
 
-    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
+    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
     process.handle?.finish(9);
 
     await expect(session.wait()).resolves.toEqual({ exitCode: 9 });
@@ -328,7 +333,7 @@ describe("openDaytonaLoginPtySession — session mechanics", () => {
   it("maps an absent exit code to null", async () => {
     const process = createFakeProcess();
 
-    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
+    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
     process.handle?.finish(undefined);
 
     await expect(session.wait()).resolves.toEqual({ exitCode: null });
@@ -337,7 +342,7 @@ describe("openDaytonaLoginPtySession — session mechanics", () => {
   it("kills the child and closes the session", async () => {
     const process = createFakeProcess();
 
-    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE);
+    const session = await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX);
     session.kill();
     expect(process.handle?.killed).toBe(1);
 
@@ -348,7 +353,7 @@ describe("openDaytonaLoginPtySession — session mechanics", () => {
   it("passes the working directory to the pseudo-terminal", async () => {
     const process = createFakeProcess();
 
-    await openDaytonaLoginPtySession(process, createFakeHomeFs(), CLAUDE, { cwd: "/workspace" });
+    await openDaytonaLoginPtySession(process, createFakeHomeFs(), CODEX, { cwd: "/workspace" });
 
     expect(process.createOptions?.cwd).toBe("/workspace");
   });
@@ -394,7 +399,7 @@ describe("createDaytonaLoginHomeFs — login-profile preamble", () => {
     const fs = createDaytonaLoginHomeFs(exec);
     const process = createFakeProcess();
 
-    await expect(openDaytonaLoginPtySession(process, fs, CLAUDE)).rejects.toThrow(
+    await expect(openDaytonaLoginPtySession(process, fs, CODEX)).rejects.toThrow(
       "LOGIN_PTY_HOME_REJECTED",
     );
     expect(process.createCount).toBe(0);
@@ -408,10 +413,10 @@ describe("createDaytonaLoginPtySessionOpener", () => {
       cwd: "/workspace",
     });
 
-    const session = await opener(CLAUDE);
+    const session = await opener(CODEX);
 
     expect(process.createOptions?.cwd).toBe("/workspace");
-    expect(process.handle?.inputs[0]).toBe("exec claude setup-token" + ENTER);
+    expect(process.handle?.inputs[0]).toBe(CODEX_LAUNCH_LINE + ENTER);
     expect(typeof session.onData).toBe("function");
     expect(typeof session.write).toBe("function");
     expect(typeof session.wait).toBe("function");

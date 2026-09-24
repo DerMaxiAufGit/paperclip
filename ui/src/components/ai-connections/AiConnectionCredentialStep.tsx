@@ -12,6 +12,7 @@ import { instanceSettingsApi } from "@/api/instanceSettings";
 import { queryKeys } from "@/lib/queryKeys";
 import { resolveAdapterTestEnvironmentId, resolveLocalDefaultEnvironmentId, resolveManagedSandboxEnvironmentId } from "@/lib/adapter-test-environment";
 import { resolveForcedKubernetesEnvironment } from "@/lib/forced-kubernetes-environment";
+import { AI_PROVIDERS, aiMethodSupported, aiMethodUnsupportedMessage } from "./model";
 
 type Props = {
   companyId: string;
@@ -30,8 +31,19 @@ type Props = {
 
 /** Connections hosts the same provider step as agent setup, with its own save intent. */
 export function AiConnectionCredentialStep(props: Props) {
-  if (props.provider === "openrouter") return <ApiKeyConnectionStep {...props} />;
-  return <SubscriptionConnectionStep {...props} />;
+  if (aiMethodSupported(props.provider, "subscription")) return <SubscriptionConnectionStep {...props} />;
+  // A saved subscription of a provider that no longer offers one (Claude) cannot
+  // be reconnected as a subscription or silently turned into an API key.
+  if (props.initialMethod === "subscription" && (props.fixedMethod || props.connectionId))
+    return <UnsupportedSubscriptionStep {...props} />;
+  return <ApiKeyConnectionStep {...props} />;
+}
+
+function UnsupportedSubscriptionStep({ provider, onCancel }: Props) {
+  return <div className="mx-auto w-full min-w-0 max-w-xl space-y-4">
+    <p role="status" className="text-sm text-muted-foreground">{aiMethodUnsupportedMessage(provider, "subscription")} Connect an API key instead.</p>
+    <div className="flex justify-between gap-2"><Button variant="ghost" onClick={onCancel}>Cancel</Button></div>
+  </div>;
 }
 
 function SubscriptionConnectionStep({ companyId, provider, initialMethod, fixedMethod, connectionId, name: initialName, ownership, agentIds, allAgents, environmentId: suppliedEnvironmentId, onComplete, onCancel }: Props) {
@@ -83,7 +95,7 @@ function SubscriptionConnectionStep({ companyId, provider, initialMethod, fixedM
     {loading ? <p role="status" className="text-sm text-muted-foreground">Preparing sign-in…</p> : <AgentProviderConnection
       key={environmentId ?? "local"}
       companyId={companyId}
-      adapterType={provider === "anthropic" ? "claude_local" : provider === "xai" ? "grok_local" : "codex_local"}
+      adapterType={provider === "xai" ? "grok_local" : "codex_local"}
       environmentId={environmentId}
       canLogin={canLogin}
       localEnvironment={environment?.driver === "local"}
@@ -107,7 +119,7 @@ function ApiKeyConnectionStep({ companyId, provider, connectionId, name: initial
   return <div className="mx-auto w-full min-w-0 max-w-xl space-y-4">
     <label className="block space-y-2 text-sm">Connection name<Input value={name} onChange={(event) => setName(event.target.value)} disabled={Boolean(connectionId)} /></label>
     {save.error && <p role="alert" className="text-sm text-destructive">{save.error.message}</p>}
-    <ProviderApiKeyCard providerName="OpenRouter" value={apiKey} onChange={setApiKey} onSubmit={() => save.mutate()} disabled={save.isPending} placeholder="Enter API key here" autoFocus />
+    <ProviderApiKeyCard providerName={AI_PROVIDERS[provider].name} value={apiKey} onChange={setApiKey} onSubmit={() => save.mutate()} disabled={save.isPending} placeholder="Enter API key here" autoFocus />
     <div className="flex justify-between gap-2"><Button variant="ghost" onClick={onCancel}>Cancel</Button><Button disabled={!name.trim() || !apiKey.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Connecting…" : "Connect"}</Button></div>
   </div>;
 }

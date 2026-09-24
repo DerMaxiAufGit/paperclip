@@ -28,6 +28,7 @@ import {
 import type { AdapterLoginPrompt } from "@paperclipai/adapter-utils";
 import {
   createLoginPtyTransport,
+  type LoginPtySession,
   type LoginPtySessionOpener,
 } from "@paperclipai/adapter-utils/login-pty-transport";
 import type { EnvironmentRuntimeService } from "./environment-runtime.js";
@@ -39,7 +40,6 @@ import {
   validateLoginSessionHome,
   type LoginCommandKey,
 } from "./login-command.js";
-import type { LoginPtyWorkerManagerLike } from "./setup-token-transport-binding.js";
 
 // The login-session service. It creates a login session, acquires a fresh
 // sandbox lease, runs `codex login --device-auth` through the runner, and owns
@@ -74,12 +74,10 @@ export const DEVICE_LOGIN_PROVIDER_UNSUPPORTED_CODE =
 export const LOGIN_LEASE_SESSION_TAG_KEY = "adapterLoginSessionId";
 
 /**
- * The closed set of displayed-code adapter types. The shared
- * `adapter_auth_sessions` table also holds a Claude setup-token row. That row
- * uses a different login panel mode. So every store read and every reaper scan
- * filters to this set, instead of trusting the raw row's own value. No route
- * makes a row of an adapter type outside `codex_local` reachable yet. A later
- * phase widens the set of reachable adapters, with no change to this filter.
+ * The closed set of displayed-code adapter types. Every store read and every
+ * reaper scan filters to this set, instead of trusting the raw row's own
+ * adapter type, so a row of any other adapter type on the shared
+ * `adapter_auth_sessions` table is never read or reaped by this service.
  */
 export const DISPLAYED_CODE_ADAPTER_TYPES: readonly AgentAdapterType[] = [
   "codex_local",
@@ -646,8 +644,8 @@ export function createDbAdapterAuthSessionStore(
         .from(adapterAuthSessions)
         .where(
           and(
-            // The shared table also holds the setup-token rows, so every reaper
-            // scan filters by the closed set of displayed-code adapter types.
+            // Every reaper scan filters by the closed set of displayed-code
+            // adapter types, so it never touches another adapter's row.
             inArray(adapterAuthSessions.adapterType, DISPLAYED_CODE_ADAPTER_TYPES),
             inArray(adapterAuthSessions.status, [...ADAPTER_AUTH_ACTIVE_STATUSES]),
             isNotNull(adapterAuthSessions.expiresAt),
@@ -1521,6 +1519,26 @@ export type OpenLoginPtySession = (
  *  the sandbox worker route. It carries no lease detail and no secret. */
 const CODEX_LOGIN_PTY_BIND_FAILED =
   "device login failed: the sandbox pseudo-terminal transport is not bound.";
+
+/**
+ * The narrow plugin worker manager surface the live opener needs. The manager
+ * owns the host route gate: it mints the host route identifier, reserves one
+ * route per worker, drives the open, binds the worker session identifier one
+ * time, routes output, and terminalizes the route.
+ */
+export interface LoginPtyWorkerManagerLike {
+  openLoginPtySession(
+    pluginId: string,
+    input: {
+      driverKey: string;
+      companyId: string;
+      environmentId: string;
+      providerLeaseId: string;
+      loginCommandKey: LoginCommandKey;
+      sessionHome: string;
+    },
+  ): Promise<LoginPtySession>;
+}
 
 /** The dependencies the worker-bound Codex live pseudo-terminal opener needs. */
 export interface WorkerBoundLoginPtyOpenerDeps {

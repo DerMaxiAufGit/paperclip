@@ -3,6 +3,7 @@ import type { Preview } from "@storybook/react-vite";
 import { MINIMAL_VIEWPORTS } from "storybook/viewport";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE,
   CONNECTABLE_APP_DEFINITIONS,
   type WorkTimelineResult,
 } from "@paperclipai/shared";
@@ -201,18 +202,17 @@ function installStorybookApiFixtures() {
       return Response.json([]);
     }
 
-    // Codex's login, which is a different flow on different routes.
+    // The per-adapter login routes, used by the Codex and Grok device logins.
+    // Claude has no in-app login: claude_local runs the claude CLI signed in on
+    // the server, so its tile reads the auth-signal route above instead.
     //
-    // Claude signs in through the setup-token routes below; every other adapter
-    // uses these generic per-adapter ones. Only the Claude half was stubbed at
-    // first, so pressing Sign in on the Codex tile fell through to the dev
+    // Pressing Sign in on the Codex tile without these fell through to the dev
     // server and came back 404 — which reads as a broken product rather than as
     // a missing fixture, and the two are not distinguishable from the panel.
     //
-    // Its panel mode is `displayed_code`, not Claude's `submitted_browser_code`:
-    // the server shows a URL *and* a code to type into it, and nothing is typed
-    // back here. So this is a genuinely different card, and the canvas holding it
-    // has to size to it too.
+    // The panel mode is `displayed_code`: the server shows a URL *and* a code to
+    // type into it, and nothing is typed back here, so the canvas holding the
+    // card has to size to both.
     const adapterLoginMatch = url.pathname.match(
       /^\/api\/companies\/[^/]+\/adapters\/([^/]+)\/login-sessions(?:\/([^/]+))?(\/cancel)?$/,
     );
@@ -229,9 +229,7 @@ function installStorybookApiFixtures() {
       };
       if (adapterLoginMatch[3]) return Response.json({ ...session, status: "cancelled" });
       // The prompt rides the owner read of the session rather than a route of
-      // its own — the shape that differs from Claude's, where it is guarded
-      // separately. Returning it only on the read with a session id keeps that
-      // distinction rather than flattening the two flows into one.
+      // its own, so it is returned only on the read with a session id.
       if (adapterLoginMatch[2]) {
         return Response.json({
           ...session,
@@ -244,92 +242,25 @@ function installStorybookApiFixtures() {
       return Response.json(session);
     }
 
-    // Claude's setup-token login, enough of it to watch the panel expand.
-    //
-    // The point is not the login — it is what the panel does to the card around
-    // it. Starting a login turns a single row into a row plus an authorization
-    // URL plus a code field, and the onboarding canvas that holds it animates
-    // its own height and clips its overflow. A canvas that measured itself once
-    // would cut that expansion off, and nothing short of driving the flow would
-    // show it.
-    if (
-      /^\/api\/companies\/[^/]+\/setup-token-login-sessions$/.test(url.pathname)
-    ) {
-      return Response.json({
-        sessionId: "setup-token-storybook",
-        environmentId: STORYBOOK_SANDBOX_ENVIRONMENT_ID,
-        status: "awaiting_browser_code",
-        expiresAt: null,
-        failure: null,
-      });
-    }
-    if (/^\/api\/companies\/[^/]+\/setup-token-login-sessions\/active$/.test(url.pathname)) {
-      return new Response(null, { status: 404 });
-    }
-    if (
-      /^\/api\/companies\/[^/]+\/setup-token-login-sessions\/[^/]+$/.test(
-        url.pathname,
-      )
-    ) {
-      return Response.json({
-        sessionId: "setup-token-storybook",
-        environmentId: STORYBOOK_SANDBOX_ENVIRONMENT_ID,
-        status: "awaiting_browser_code",
-        expiresAt: null,
-        failure: null,
-      });
-    }
-    // The authorization URL is its own route, and deliberately so: the status
-    // read above is public and carries no secret, while the URL is an owner-only
-    // read. The panel polls this one separately and stays on "Preparing the
-    // login…" until it answers — so a fixture without it looks like a hung login
-    // rather than a missing route, which is exactly how it was misread once.
-    if (
-      /^\/api\/companies\/[^/]+\/setup-token-login-sessions\/[^/]+\/prompt$/.test(
-        url.pathname,
-      )
-    ) {
-      return Response.json({
-        authorizationUrl:
-          "https://claude.ai/oauth/authorize?client_id=storybook&response_type=code&state=storybook",
-        transportAdvisory: null,
-      });
-    }
-    // Submitting the browser code. The panel hands the pasted code here and then
-    // completes; both are stubbed so the last stage of the flow — the one where
-    // the card is at its tallest — can actually be reached.
-    if (
-      /^\/api\/companies\/[^/]+\/setup-token-login-sessions\/[^/]+\/code$/.test(
-        url.pathname,
-      )
-    ) {
-      return Response.json({
-        sessionId: "setup-token-storybook",
-        environmentId: STORYBOOK_SANDBOX_ENVIRONMENT_ID,
-        status: "awaiting_completion",
-        expiresAt: null,
-        failure: null,
-        transportAdvisory: null,
-      });
-    }
-    if (
-      /^\/api\/companies\/[^/]+\/claude-oauth-token-status$/.test(url.pathname)
-    ) {
-      return onboardingFixtureState.savedClaudeLogin
-        ? Response.json({ secretId: "saved-claude-subscription", latestVersion: 1 })
-        : new Response(null, { status: 404 });
-    }
-    if (/^\/api\/companies\/[^/]+\/ai-connections\/local\/attempts$/.test(url.pathname)) {
+    // Local subscription sign-in for Codex and Grok. The server refuses
+    // Anthropic here (a Claude subscription is used only through the claude CLI
+    // signed in on the server), and so do these fixtures.
+    const localLoginMatch = url.pathname.match(
+      /^\/api\/companies\/[^/]+\/ai-connections\/local(\/attempts|\/check)?$/,
+    );
+    if (localLoginMatch) {
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
-      return Response.json({ sessionId: "local-storybook", expiresAt: new Date(Date.now() + 1_800_000).toISOString(), command: body.provider === "anthropic"
-        ? "CLAUDE_CONFIG_DIR='/paperclip/login' claude auth login"
-        : "CODEX_HOME='/paperclip/login' codex login --device-auth" });
-    }
-    if (/^\/api\/companies\/[^/]+\/ai-connections\/local\/check$/.test(url.pathname)) {
-      return Response.json({ status: onboardingFixtureState.localLoginStatus });
-    }
-    if (/^\/api\/companies\/[^/]+\/ai-connections\/local$/.test(url.pathname)) {
-      const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+      if (body.provider === "anthropic") {
+        return Response.json({ error: CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE }, { status: 422 });
+      }
+      if (localLoginMatch[1] === "/attempts") {
+        return Response.json({ sessionId: "local-storybook", expiresAt: new Date(Date.now() + 1_800_000).toISOString(), command: body.provider === "xai"
+          ? "GROK_HOME='/paperclip/login' grok login --device-auth"
+          : "CODEX_HOME='/paperclip/login' codex login --device-auth" });
+      }
+      if (localLoginMatch[1] === "/check") {
+        return Response.json({ status: onboardingFixtureState.localLoginStatus });
+      }
       if (onboardingFixtureState.localLoginStatus !== "ready") return Response.json({ error: "Finish signing in, then try Connect again." }, { status: 422 });
       if (onboardingFixtureState.connectPending) await new Promise(() => {});
       onboardingFixtureState.savedManagedSubscription = body.provider;
@@ -341,7 +272,7 @@ function installStorybookApiFixtures() {
         ? Response.json({ connectionId: "managed-storybook", grantId: "grant-storybook" })
         : Response.json({ currentUserId: "user-storybook", connections: provider ? [{
             id: "managed-storybook", grantId: "grant-storybook", companyId: "company-storybook",
-            provider, method: "subscription", name: provider === "anthropic" ? "My Claude subscription" : "My OpenAI subscription",
+            provider, method: "subscription", name: "My OpenAI subscription",
             ownership: "personal", ownerUserId: "user-storybook", status: "connected", isDefault: true,
           }] : [] });
     }
@@ -376,8 +307,7 @@ function installStorybookApiFixtures() {
       const env = body.adapterConfig?.env ?? {};
       const usesSavedCodex = onboardingFixtureState.savedCodexLogin && env.CODEX_HOME?.secretId === "saved-codex-home";
       const usesSavedKey = onboardingFixtureState.savedApiKeys && ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"].some((key) => env[key]?.type === "user_secret_ref" && env[key]?.key === `${key}.setup.storybook`);
-      const usesSavedClaude = onboardingFixtureState.savedClaudeLogin && env.CLAUDE_CODE_OAUTH_TOKEN?.type === "user_secret_ref" && env.CLAUDE_CODE_OAUTH_TOKEN?.key === "CLAUDE_CODE_OAUTH_TOKEN";
-      return Response.json((body.aiConnection?.provider === onboardingFixtureState.savedManagedSubscription) || usesSavedCodex || usesSavedKey || usesSavedClaude ? { adapterType: testEnvMatch[1], status: "pass", checks: [], testedAt: new Date(0).toISOString() } : storybookEnvironmentTest(testEnvMatch[1]));
+      return Response.json((body.aiConnection?.provider === onboardingFixtureState.savedManagedSubscription) || usesSavedCodex || usesSavedKey ? { adapterType: testEnvMatch[1], status: "pass", checks: [], testedAt: new Date(0).toISOString() } : storybookEnvironmentTest(testEnvMatch[1]));
     }
     if (/^\/api\/companies\/[^/]+\/agent-hires$/.test(url.pathname)) {
       // `approval: null` on purpose. A hire that returns one sends the wizard
@@ -482,17 +412,10 @@ function installStorybookApiFixtures() {
             supportsSkills: true,
             supportsLocalAgentJwt: true,
             requiresMaterializedRuntimeSkills: false,
+            // No `login`: claude_local has no in-app sign-in. It runs the
+            // claude CLI signed in on the server. Mirrors `KNOWN_DEFAULTS` in
+            // `use-adapter-capabilities.ts`.
             supportsModelProfiles: true,
-            // `useAdapterCapabilities` prefers this listing over its own static
-            // defaults, so an omission here is not a smaller fixture — it is a
-            // capability the adapter loses. Without `login` the onboarding
-            // connect step's provider sign-in silently never renders, which is
-            // indistinguishable from it having been removed. Mirrors
-            // `KNOWN_DEFAULTS` in `use-adapter-capabilities.ts`.
-            login: {
-              panelMode: "submitted_browser_code",
-              timeoutPolicy: "fixed",
-            },
           },
         },
         {
@@ -508,6 +431,9 @@ function installStorybookApiFixtures() {
             supportsLocalAgentJwt: true,
             requiresMaterializedRuntimeSkills: false,
             supportsModelProfiles: true,
+            // `useAdapterCapabilities` prefers this listing over its own static
+            // defaults, so omitting `login` here would silently hide the
+            // onboarding connect step's Codex sign-in.
             login: {
               panelMode: "displayed_code",
               timeoutPolicy: "caller_bounded",

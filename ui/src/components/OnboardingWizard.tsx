@@ -15,12 +15,12 @@ import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import type {
   AdapterEnvironmentTestResult,
   AgentRole,
-  ClaudeOAuthTokenStatusResponse,
   Environment,
   InstanceSettings,
 } from "@paperclipai/shared";
 import { AGENT_ROLES, AGENT_ROLE_LABELS, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
 import { AdapterLoginPanel } from "./AgentConfigForm";
+import { ClaudeCliSignInStatus } from "./ClaudeCliSignInStatus";
 import {
   CONNECT_SOURCE_NAMES,
   OnboardingCardField,
@@ -94,7 +94,6 @@ import { isVisualAdapterChoice } from "../adapters/metadata";
 import { useDisabledAdaptersSync, useAdapterRegistryLoaded } from "../adapters/use-disabled-adapters";
 import { useAdapterCapabilities } from "../adapters/use-adapter-capabilities";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
-import { buildFixedClaudeOAuthBinding } from "./environment-variables-editor/model";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { restoreOnboardingState } from "../lib/onboarding-state";
 import {
@@ -165,40 +164,23 @@ function restoreOnboardingAdapterType(savedAdapterType: unknown): AdapterType {
 /**
  * True when an adapter-test result blocks a hire. A `fail` status always
  * blocks. A `warn` or a `pass` status blocks too when a check reports
- * `ADAPTER_AUTH_MISSING_CHECK_CODE`. That check means the agent has no
- * working authentication, so it cannot run. A `warn` with no such check
- * still lets the hire proceed. The wizard widened the gate for missing
- * authentication only, not for every other warning.
+ * `ADAPTER_AUTH_MISSING_CHECK_CODE`, or claude_local's
+ * `claude_hello_probe_auth_required`. Both mean the agent has no working
+ * authentication, so it cannot run: claude_local reports a signed-out server
+ * claude CLI (or rejected remote credentials) only as that warn. A `warn` with
+ * neither check still lets the hire proceed. The wizard widened the gate for
+ * missing authentication only, not for every other warning.
  */
 function blocksAgentCreate(result: AdapterEnvironmentTestResult): boolean {
   if (result.status === "fail") return true;
-  return result.checks.some((check) => check.code === ADAPTER_AUTH_MISSING_CHECK_CODE);
-}
-
-/** True when `value` is a plain object, so callers can spread it as env config. */
-function isEnvRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return result.checks.some(
+    (check) =>
+      check.code === ADAPTER_AUTH_MISSING_CHECK_CODE ||
+      check.code === "claude_hello_probe_auth_required",
+  );
 }
 
 const ANTHROPIC_API_KEY_ENV_KEY = "ANTHROPIC_API_KEY";
-
-/**
- * True when the adapter configuration carries a non-empty ANTHROPIC_API_KEY.
- * The server rejects that key together with the fixed Claude login binding
- * (see `assertClaudeOAuthBindingInvariant` in `server/src/services/secrets.ts`).
- * This checks the built configuration first, so onboarding never sends a
- * hire the server would reject.
- */
-function adapterConfigHasAnthropicApiKey(config: Record<string, unknown>): boolean {
-  if (!isEnvRecord(config.env)) return false;
-  const binding = config.env[ANTHROPIC_API_KEY_ENV_KEY];
-  if (typeof binding === "string") return binding.trim().length > 0;
-  if (!isEnvRecord(binding)) return false;
-  if (binding.type === "plain") {
-    return typeof binding.value === "string" && binding.value.trim().length > 0;
-  }
-  return binding.type === "secret_ref" || binding.type === "user_secret_ref";
-}
 
 /**
  * Full-colour brand marks for the sources this step offers.
@@ -684,11 +666,6 @@ function OnboardingWizardInner({
    * `localStorage`, and a provider key does not belong there.
    */
   const [apiKey, setApiKey] = useState("");
-  // The owner's stored Claude subscription login, read right before the hire
-  // (see handleGiveHeartbeat). Onboarding applies it with no extra control,
-  // so nothing else reads this state yet.
-  const [claudeOAuthStatus, setClaudeOAuthStatus] =
-    useState<ClaudeOAuthTokenStatusResponse | null>(null);
 
   // Created entity IDs — pre-populate from existing company when skipping step 1
   const [createdCompanyId, setCreatedCompanyId] = useState<string | null>(
@@ -709,9 +686,16 @@ function OnboardingWizardInner({
     : savedKeys.options[0]?.id;
   const selectedApiKey = savedKeys.options.find((option) => option.id === selectedApiKeyId);
   const credentialMode = credentialModeChoice ?? (
-    (savedKeys.subscriptions.length > 0 || (adapterType === "claude_local" && savedKeys.storedLogin.data))
+    savedKeys.subscriptions.length > 0
       ? "subscription" : savedKeys.options.length || adapterType === "opencode_local" ? "api" : "subscription"
   );
+  /**
+   * A Claude subscription. The agent runs through the `claude` CLI signed in on
+   * this server, which uses its own sign-in: Paperclip never signs in to Claude
+   * and never stores a Claude sign-in. So the step has nothing to connect here.
+   * It shows the CLI's status and hires with no Claude credential.
+   */
+  const claudeCliSubscription = adapterType === "claude_local" && credentialMode === "subscription";
   const [createdCompanyPrefix, setCreatedCompanyPrefix] = useState<
     string | null
   >((saved?.createdCompanyPrefix as string) ?? null);
@@ -747,12 +731,6 @@ function OnboardingWizardInner({
   const hiringAgentRef = useRef<number | null>(null);
   const connectAttemptRef = useRef(0);
   const autoConnectStartedRef = useRef(false);
-  // True when the last `adapterEnvResult` came from a config that carried
-  // the fixed Claude login binding (see `hireAdapterConfig` in
-  // `handleGiveHeartbeat`). A cached result from a config that did not carry
-  // the binding cannot answer for a config that now does — see the reuse
-  // check in `handleGiveHeartbeat`.
-  const adapterEnvResultAppliedStoredLoginRef = useRef(false);
   /**
    * The secret a key typed on this step was stored as, remembered for the key it
    * holds. Connect can be pressed more than once — a hire that fails leaves the
@@ -762,6 +740,9 @@ function OnboardingWizardInner({
   const apiKeySecretRef = useRef<{ key: string; companyId: string; envKey: string; binding?: Awaited<ReturnType<typeof storeProviderApiKey>>["binding"]; aiConnection?: AiConnectionBinding } | null>(null);
   const managedSubscriptionRef = useRef<{ companyId: string; binding: AiConnectionBinding } | null>(null);
   const managedProvider = aiProviderForAdapter(adapterType);
+  // Local sign-in connects an OpenAI or Grok account. A Claude subscription is
+  // the server's own claude CLI sign-in, so there is no Claude account to connect.
+  const localLoginProvider = managedProvider === "anthropic" ? undefined : managedProvider;
   function managedBindingForStep(): AiConnectionBinding | undefined {
     if (credentialMode === "api") return selectedApiKey?.aiConnection ?? (
       !selectedApiKey && apiKeySecretRef.current?.companyId === createdCompanyId && apiKeySecretRef.current.envKey === apiKeyEnvKeyFor(adapterType)
@@ -942,14 +923,14 @@ function OnboardingWizardInner({
   // managed-sandbox-only redirect (see AgentConfigForm.tsx:618-640). A render
   // must not throw, so a resolver error yields no login environment rather
   // than an error boundary.
-  const { data: loginEnvironmentList = [] } = useQuery({
+  const { data: loginEnvironmentList = [], isPending: loginEnvironmentListPending } = useQuery({
     queryKey: createdCompanyId
       ? queryKeys.environments.list(createdCompanyId)
       : ["environments", "none"],
     queryFn: () => environmentsApi.list(createdCompanyId!),
     enabled: Boolean(createdCompanyId) && effectiveOnboardingOpen && step === 4,
   });
-  const { data: instanceSettingsForLogin } = useQuery({
+  const { data: instanceSettingsForLogin, isPending: instanceSettingsForLoginPending } = useQuery({
     queryKey: queryKeys.instance.settings,
     queryFn: () => instanceSettingsApi.get(),
     enabled: effectiveOnboardingOpen && step === 4,
@@ -957,7 +938,7 @@ function OnboardingWizardInner({
   // Wanted across the whole arc, not just the connect step. The progress strip
   // reads it too — see `enteredFromCloud` — and a value fetched only on step 4
   // would let the strip change length as the customer walked through it.
-  const { data: experimentalSettingsForLogin } = useQuery({
+  const { data: experimentalSettingsForLogin, isPending: experimentalSettingsForLoginPending } = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
     enabled: effectiveOnboardingOpen && step >= 3 && step <= 5,
@@ -986,6 +967,21 @@ function OnboardingWizardInner({
       null,
     [loginEnvironmentList, resolvedLoginEnvironmentId],
   );
+  /**
+   * Whether `resolvedLoginEnvironmentId` is the answer, not a guess made before
+   * its inputs arrived. Until then it reads null, the local host. On a
+   * sandbox-backed instance that names the wrong machine, so a status read for
+   * it would be about the wrong place.
+   */
+  const loginEnvironmentSettled =
+    !loginEnvironmentListPending && !instanceSettingsForLoginPending && !experimentalSettingsForLoginPending;
+  /**
+   * Whether the agent would run on this server. Only then can a Claude
+   * subscription be used: through the claude CLI signed in here. Every other
+   * target (SSH, sandbox) runs Claude only with an Anthropic API key.
+   */
+  const claudeTargetIsLocal = !resolvedLoginEnvironmentId || resolvedLoginEnvironment?.driver === "local";
+  const claudeCliUnavailableHere = claudeCliSubscription && loginEnvironmentSettled && !claudeTargetIsLocal;
   // Sandbox provider capabilities for the login pseudo-terminal gate, loaded
   // only when the adapter declares a login capability — the same query the
   // agent configuration form runs (AgentConfigForm.tsx:652-658).
@@ -1016,12 +1012,11 @@ function OnboardingWizardInner({
   const localLoginHealth = useQuery({ queryKey: queryKeys.health, queryFn: healthApi.get });
   const canUseLocalLogin = resolvedLoginEnvironment?.driver === "local" && (localLoginHealth.data?.localAiLoginSupported ?? localLoginHealth.data?.deploymentMode === "local_trusted");
   const localLogin = useLocalAiLogin(createdCompanyId, {
-    provider: managedProvider ?? "anthropic", method: "subscription",
-    name: `My ${CONNECT_SOURCE_NAMES[adapterType] ?? managedProvider} subscription`,
+    provider: localLoginProvider ?? "openai", method: "subscription",
+    name: `My ${CONNECT_SOURCE_NAMES[adapterType] ?? localLoginProvider} subscription`,
     ownership: "personal", agentIds: [], allAgents: true,
   }, effectiveOnboardingOpen && step === 4 && canUseLocalLogin && credentialMode !== "api" &&
-    Boolean(managedProvider) && !savedSubscription && !savedKeys.storedLogin.data && !managedBindingForStep(),
-  { allowHostClaude: localLoginHealth.data?.deploymentMode === "local_trusted" });
+    Boolean(localLoginProvider) && !savedSubscription && !managedBindingForStep());
   // A result from a previous selection must not hire or advance this wizard.
   // Environment query updates are not user navigation: the test resolves its
   // own environment, and those updates must not interrupt the pending attempt.
@@ -1081,9 +1076,7 @@ function OnboardingWizardInner({
       : ["agents", "none", "active-login-session", adapterType],
     queryFn: async () => {
       try {
-        return adapterCaps.login?.panelMode === "submitted_browser_code"
-          ? await agentsApi.getActiveClaudeSetupTokenLoginSession(createdCompanyId!)
-          : await agentsApi.getActiveAdapterAuthLoginSession(createdCompanyId!, adapterType);
+        return await agentsApi.getActiveAdapterAuthLoginSession(createdCompanyId!, adapterType);
       } catch (error) {
         if (error instanceof ApiError && error.status === 404) return null;
         throw error;
@@ -1093,7 +1086,7 @@ function OnboardingWizardInner({
       Boolean(createdCompanyId) && effectiveOnboardingOpen && step === 4 && canShowAdapterLogin,
   });
   useEffect(() => {
-    if (!activeLoginSessionQuery.data || credentialMode === "api" || savedSubscription || savedKeys.storedLogin.data) return;
+    if (!activeLoginSessionQuery.data || credentialMode === "api" || savedSubscription) return;
     // Re-derive the row's answer along with the sequence: a resumed session
     // implies a source was already picked, and the row stays a question
     // otherwise (see `sourcePicked` above).
@@ -1104,7 +1097,7 @@ function OnboardingWizardInner({
     // prompt through `onPromptReady`, below, which is what moves this beat
     // from `loading` to `ready`, exactly as a fresh press would.
     setConnectPhase((phase) => (phase === "idle" ? "loading" : phase));
-  }, [activeLoginSessionQuery.data, credentialMode, savedSubscription, savedKeys.storedLogin.data]);
+  }, [activeLoginSessionQuery.data, credentialMode, savedSubscription]);
   /**
    * The signal is being fetched and has not answered yet.
    *
@@ -1188,28 +1181,11 @@ function OnboardingWizardInner({
       // Connection-list invalidation can arrive before the login's completion
       // poll. Keep its controller mounted until it reports success; otherwise
       // the saved account replaces the panel and "Connecting" never finishes.
-      (connectAuthUrl || (
-        showAdapterLoginPanel &&
-        !savedSubscription &&
-        !(adapterType === "claude_local" && savedKeys.storedLogin.data)
-      )) &&
+      (connectAuthUrl || (showAdapterLoginPanel && !savedSubscription)) &&
       !savedKeys.loading &&
       createdCompanyId &&
       resolvedLoginEnvironmentId,
   );
-
-  /**
-   * Whether the source's login ends by taking a code back from the customer.
-   *
-   * This is what splits the two waits, and it is a real difference rather than
-   * a cosmetic one. The browser-code login finishes here, in the field on the
-   * card, so the button is busy and says so. The displayed-code login finishes
-   * somewhere else entirely — another tab, possibly another device — so the
-   * button is not busy, it is waiting, and a spinner would be claiming work
-   * this screen is not doing.
-   */
-  const loginSubmitsBrowserCode =
-    adapterCaps.login?.panelMode === "submitted_browser_code";
 
   /** Without browser login, show instructions for the selected execution environment. */
   const connectStepHasNoSandbox =
@@ -1224,7 +1200,7 @@ function OnboardingWizardInner({
   const connectCollapsed =
     connectPhase !== "idle" && connectPhase !== "unwindRow" && sourceSelected;
   const connectProgress = adapterEnvLoading ? "Testing connection…" : loading ? "Connecting…" : null;
-  const hasSavedSubscription = Boolean(savedSubscription || savedKeys.storedLogin.data ||
+  const hasSavedSubscription = Boolean(savedSubscription ||
     (credentialMode !== "api" && managedBindingForStep()));
   const connectHasCard = credentialMode === "api" || connectStepNeedsLogin || connectStepHasNoSandbox || Boolean(connectProgress);
   const connectCardLive =
@@ -1258,30 +1234,27 @@ function OnboardingWizardInner({
   /**
    * When "Connecting" started, and whether the login behind it has finished.
    *
-   * Two facts because they now arrive at different times. The button says
-   * "Connecting" the moment a code is pasted, but the credential only exists
-   * once the server confirms it, a poll and a completion read later. The hire
-   * waits for both: the stored login, and two seconds of "Connecting" counted
-   * from the paste — so a fast server still shows the state, and a slow one
-   * does not have the hold added on top of its own wait.
+   * The hire waits for both: the stored login, and two seconds of "Connecting"
+   * counted from when it appeared — so a fast server still shows the state, and
+   * a slow one does not have the hold added on top of its own wait.
    */
   const connectingSinceRef = useRef<number | null>(null);
   const [connectCredentialStored, setConnectCredentialStored] = useState(false);
-  /** What the button was offering before a paste, for when the paste is refused. */
-  const phaseBeforeSubmitRef = useRef<ConnectPhase>("waiting");
 
   /** A sign-in is running and has not succeeded. */
   const connectStepLoggingIn =
     connectStepNeedsLogin && connectPhase !== "idle" && connectPhase !== "connecting";
 
   // Detecting a credential is enough to start verification once the user has
-  // chosen Claude or Codex. A saved-list refresh during that work is not a new
-  // attempt, and a failed attempt waits for an explicit Connect retry.
+  // chosen Codex. A saved-list refresh during that work is not a new attempt,
+  // and a failed attempt waits for an explicit Connect retry. A Claude
+  // subscription waits for Continue: the server's claude CLI uses its own
+  // sign-in, so there is no credential here to detect.
   useEffect(() => {
     if (!effectiveOnboardingOpen || step !== 4 || connectPhase !== "ready" ||
         !connectStepReady || connectStepNeedsLogin || connectCredentialStored ||
         credentialMode !== "subscription" ||
-        (adapterType !== "claude_local" && adapterType !== "codex_local") ||
+        adapterType !== "codex_local" ||
         (!hasSavedSubscription && localLogin.status !== "ready") ||
         loading || autoConnectStartedRef.current) return;
     autoConnectStartedRef.current = true;
@@ -1313,15 +1286,14 @@ function OnboardingWizardInner({
       return () => clearTimeout(t);
     }
     if (connectPhase === "connecting") {
-      // Not before the login is stored. "Connecting" starts at the paste now,
-      // ahead of the server confirming anything, so a hire from here would go
-      // out against a source with no credential to run on.
+      // Not before the login is stored: a hire from here would go out against
+      // a source with no credential to run on.
       if (!connectCredentialStored) return;
       // No success state: the step advances. The hold is so "Connecting" is
       // legible as a state rather than a flicker on the way out — a step that
-      // left the instant a paste landed would read as the paste having gone
-      // wrong. Counted from when "Connecting" appeared, so the time the server
-      // spent confirming counts toward it instead of being added to it.
+      // left the instant the login finished would read as something having
+      // gone wrong. Counted from when "Connecting" appeared, so the time the
+      // server spent confirming counts toward it instead of being added to it.
       //
       // A beat rather than a bare timer because Back stays live through it. A
       // dropped handle hired two seconds after the customer had backed out,
@@ -1381,10 +1353,14 @@ function OnboardingWizardInner({
                 disabled: !connectAuthUrl,
               }
             : {
-                label: "Connect",
+                // A Claude subscription has nothing to connect: the press tests
+                // the server's claude CLI and hires.
+                label: claudeCliSubscription ? "Continue" : "Connect",
                 icon: "arrow",
                 disabled:
-                  !connectStepReady || (credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
+                  !connectStepReady ||
+                  (credentialMode === "api" && !apiKey.trim() && !selectedApiKey) ||
+                  claudeCliUnavailableHere,
               }
           : // Nothing is chosen on arrival, and the row is what chooses. Until
             // it has been answered the button has nothing to do.
@@ -1434,9 +1410,8 @@ function OnboardingWizardInner({
       setConnectPhase("waiting");
       return;
     }
-    // The hold owns the hire once "Connecting" is showing. That now starts at
-    // the paste, before the credential exists, so Cmd+Enter here would hire
-    // against a source with nothing to run on.
+    // The hold owns the hire once "Connecting" is showing, so Cmd+Enter here
+    // would hire a second time.
     if (connectPhase === "connecting") return;
     if (connectStepLoggingIn) return;
     void handleGiveHeartbeat();
@@ -1538,7 +1513,6 @@ function OnboardingWizardInner({
   useEffect(() => {
     if (step !== 4) return;
     setAdapterEnvResult(null);
-    adapterEnvResultAppliedStoredLoginRef.current = false;
     setAdapterEnvError(null);
   }, [step, adapterType, model, command, args, url, credentialMode, apiKey, selectedSavedKey, selectedApiKey?.id, savedSubscription?.id]);
 
@@ -1632,12 +1606,10 @@ function OnboardingWizardInner({
     setArgs("");
     setUrl("");
     setAdapterEnvResult(null);
-    adapterEnvResultAppliedStoredLoginRef.current = false;
     setAdapterEnvError(null);
     setAdapterEnvLoading(false);
     setForceUnsetAnthropicApiKey(false);
     setUnsetAnthropicLoading(false);
-    setClaudeOAuthStatus(null);
     setCreatedCompanyId(null);
     setCreatedCompanyPrefix(null);
     setCreatedAgentId(null);
@@ -1772,21 +1744,19 @@ function OnboardingWizardInner({
   }
 
   /**
-   * Store the typed key as the customer's own user secret, and report whether it
+   * Store the typed key as the customer's own credential, and report whether it
    * is in place.
    *
-   * A user secret rather than a company one, to match the subscription half of
-   * this very step: signing in stores the Claude token as a user secret and
-   * binds a `user_secret_ref`. Two credential modes on one step that scoped
-   * their secrets differently would be hard to justify and easy to get wrong
-   * later. It also keeps the key to the person who typed it instead of exposing
-   * it to everyone with company secret access, and agent runs still resolve it
-   * through the company's responsible user.
+   * A provider with managed connections gets a personal API-key connection.
+   * Any other source stores the key as the customer's own user secret, bound by
+   * a `user_secret_ref`. Either way the key stays with the person who typed it
+   * instead of being exposed to everyone with company secret access, and agent
+   * runs still resolve it through the company's responsible user.
    *
-   * A user secret needs a definition to hang off. The Claude token's is fixed
-   * and server-owned; there is no such definition for API keys, so onboarding
-   * creates a distinct definition for each new key, preserving existing keys. That needs company owner or admin rights, which
-   * whoever just created this company in onboarding has.
+   * A user secret needs a definition to hang off. Onboarding creates a distinct
+   * definition for each new key, preserving existing keys. That needs company
+   * owner or admin rights, which whoever just created this company in
+   * onboarding has.
    *
    * Returns false on failure, having set the error. Callers must treat false as
    * a stop: there is deliberately no path that hands the raw key back, because
@@ -1853,15 +1823,13 @@ function OnboardingWizardInner({
     // A key typed on this step is the credential the agent is being hired with,
     // so it has to reach the configuration the hire sends — and the same one the
     // environment test probes, or the test would pass on a config the hire does
-    // not use. Only when the mode asks for it: leaving a stale reference in the
-    // config after switching back to a subscription is what the server rejects
-    // alongside the Claude OAuth binding.
+    // not use. Only when the mode asks for it: a stale key reference left in the
+    // config after switching back to a subscription would override the
+    // subscription the customer chose.
     //
     // A reference, never the key itself. The adapter configuration is
     // persisted and revisioned, so a `{ type: "plain", value }` here would leave
-    // a live credential at rest in every copy of it. This mirrors
-    // `buildFixedClaudeOAuthBinding`, which holds a reference to the stored
-    // Claude token for the same reason.
+    // a live credential at rest in every copy of it.
     //
     // Guarded on the caller having stored the secret, not on the key being
     // present. If storing failed this stays false, and the right outcome is a
@@ -1883,7 +1851,6 @@ function OnboardingWizardInner({
 
   async function runAdapterEnvironmentTest(
     adapterConfigOverride?: Record<string, unknown>,
-    appliedStoredClaudeLoginBinding = false,
     isCurrent = () => true,
   ): Promise<AdapterEnvironmentTestResult | null> {
     if (!createdCompanyId) {
@@ -1957,7 +1924,6 @@ function OnboardingWizardInner({
       );
       if (!isCurrent()) return null;
       setAdapterEnvResult(result);
-      adapterEnvResultAppliedStoredLoginRef.current = appliedStoredClaudeLoginBinding;
       return result;
     } catch (err) {
       if (!isCurrent()) return null;
@@ -2071,20 +2037,6 @@ function OnboardingWizardInner({
         }
       }
 
-      // Onboarding applies a stored Claude subscription login automatically,
-      // with no extra control. A new user who signs in, leaves, and returns
-      // should not sign in a second time — that is the board's direction.
-      // The binding is a reference to the owner's stored value, never the
-      // value itself (see buildFixedClaudeOAuthBinding). The server rejects
-      // that binding together with a configured ANTHROPIC_API_KEY, so this
-      // checks the built configuration first and asks the status route only
-      // when there is no such conflict.
-      //
-      // Read the stored-login status before the environment test below, and
-      // fold it into one adapter configuration. The test must probe the same
-      // configuration the hire sends — a config without the binding can
-      // report missing authentication for a user the binding would have
-      // covered.
       // Store the key before anything is built from it, so both the probe and the
       // hire describe it the same way — as a reference. A failure here stops the
       // hire rather than falling through to a configuration with no credential.
@@ -2093,57 +2045,31 @@ function OnboardingWizardInner({
         apiKeyStored = await storeApiKeyUserSecret(createdCompanyId);
         if (!apiKeyStored || !isCurrent()) return;
       }
-      if (credentialMode !== "api" && canUseLocalLogin && managedProvider && !managedBindingForStep() && !savedSubscription && !savedKeys.storedLogin.data) {
+      if (credentialMode !== "api" && canUseLocalLogin && localLoginProvider && !managedBindingForStep() && !savedSubscription) {
         await localLogin.connect();
         if (!isCurrent()) return;
-        managedSubscriptionRef.current = { companyId: createdCompanyId, binding: { provider: managedProvider, method: "subscription", mode: "responsible_user" } };
+        managedSubscriptionRef.current = { companyId: createdCompanyId, binding: { provider: localLoginProvider, method: "subscription", mode: "responsible_user" } };
       }
+      // A Claude subscription reaches here with no binding and no Claude
+      // credential in the configuration: the server's claude CLI uses its own
+      // sign-in, and the environment test below reports whether it has one.
       const managedBinding = managedBindingForStep();
-      const baseAdapterConfig = buildAdapterConfig(apiKeyStored);
-      let storedClaudeLogin: ClaudeOAuthTokenStatusResponse | null = null;
-      if (
-        !managedBinding && adapterType === "claude_local" &&
-        !adapterConfigHasAnthropicApiKey(baseAdapterConfig)
-      ) {
-        try {
-          storedClaudeLogin = await agentsApi.getClaudeOAuthTokenStatus(createdCompanyId);
-        } catch (err) {
-          // A fixed 404 means the owner has no stored value. It is not a
-          // failure.
-          if (!(err instanceof ApiError) || err.status !== 404) throw err;
-          storedClaudeLogin = null;
-        }
-        if (!isCurrent()) return;
-        setClaudeOAuthStatus(storedClaudeLogin);
-      }
-      const shouldApplyStoredClaudeLogin = storedClaudeLogin !== null;
-      const hireAdapterConfig = shouldApplyStoredClaudeLogin
-        ? {
-            ...baseAdapterConfig,
-            env: {
-              ...(isEnvRecord(baseAdapterConfig.env) ? baseAdapterConfig.env : {}),
-              ...buildFixedClaudeOAuthBinding(),
-            },
-          }
-        : baseAdapterConfig;
+      const hireAdapterConfig = buildAdapterConfig(apiKeyStored);
 
       if (isLocalAdapter) {
         // A cached result is reusable only when it tested the same
         // configuration the hire below sends, and only when it does not
         // block the hire — see blocksAgentCreate. With the "Test now" card
         // gone, this button is the only way to re-probe. Reusing a stale
-        // blocking result, or a result from a config that did not carry the
-        // stored login, would lock out a customer who has since fixed the
+        // blocking result would lock out a customer who has since fixed the
         // problem or signed in.
         const cachedUsable =
-          adapterEnvResult &&
-          adapterEnvResultAppliedStoredLoginRef.current === shouldApplyStoredClaudeLogin &&
-          !blocksAgentCreate(adapterEnvResult)
+          adapterEnvResult && !blocksAgentCreate(adapterEnvResult)
             ? adapterEnvResult
             : null;
         const result =
           cachedUsable ??
-          (await runAdapterEnvironmentTest(hireAdapterConfig, shouldApplyStoredClaudeLogin, isCurrent));
+          (await runAdapterEnvironmentTest(hireAdapterConfig, isCurrent));
         if (!result || !isCurrent()) return;
         // Block the hire on a failed environment test. Also block it on a
         // pass or a warn result that reports missing authentication — the
@@ -2201,7 +2127,6 @@ function OnboardingWizardInner({
         role: agentRole,
         adapterType,
         adapterConfig: hireAdapterConfig,
-        ...(shouldApplyStoredClaudeLogin ? { applyStoredClaudeLogin: true } : {}),
         // The server owns what the first agent is told now: this marker seeds
         // the chief-of-staff persona over the agent's entry instruction file.
         // The wizard no longer composes or overwrites it.
@@ -2722,7 +2647,7 @@ function OnboardingWizardInner({
                       <div className="-ml-3 mt-1">
                         <CredentialModeLink mode={credentialMode} onChange={setCredentialMode} />
                         {savedKeys.options.length > 0 && <p className="px-3 text-sm text-muted-foreground">{savedKeys.options.length} saved API {savedKeys.options.length === 1 ? "key available" : "keys available"}.</p>}
-                        {credentialMode === "subscription" && authSignalStatus === "present" && <p className="px-3 text-sm text-muted-foreground">An existing provider connection is available.</p>}
+                        {credentialMode === "subscription" && !claudeCliSubscription && authSignalStatus === "present" && <p className="px-3 text-sm text-muted-foreground">An existing provider connection is available.</p>}
                       </div>
                     </motion.div>
                   </div>
@@ -2794,6 +2719,27 @@ function OnboardingWizardInner({
                           onSubmit={() => handleConnectStepPrimary()}
                         />}
                       </OnboardingLoginCard>
+                    ) : claudeCliSubscription ? (
+                      /* Nothing to sign in to here: a Claude subscription is the
+                         claude CLI signed in on this server. The panel reports
+                         the CLI's own status for the environment the agent
+                         would run in, and how to sign in on the server when it
+                         is not. It does not gate Continue — the environment
+                         test on Continue reports the real state. Held back
+                         until that environment is known, so the status is
+                         read once, for the right machine. */
+                      loginEnvironmentSettled ? (
+                        claudeTargetIsLocal ? (
+                          <ClaudeCliSignInStatus
+                            companyId={createdCompanyId}
+                            environmentId={resolvedLoginEnvironmentId}
+                          />
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Claude in this environment needs an Anthropic API key. A Claude subscription works only through the claude CLI signed in on this server. Switch to an API key to continue.
+                          </p>
+                        )
+                      ) : null
                     ) : connectStepNeedsLogin &&
                       createdCompanyId &&
                       resolvedLoginEnvironmentId ? (
@@ -2805,10 +2751,7 @@ function OnboardingWizardInner({
                          Unmounting it is not the cancel: the session stays
                          reachable for a later resume, so Back and a source
                          switch only hide the card, and nothing here releases
-                         the session early — see `unwindConnectStep`.
-
-                         No "Use saved login" control: the hire step already
-                         applies a stored login on its own. */
+                         the session early — see `unwindConnectStep`. */
                       <AdapterLoginPanel
                         key={`${adapterType}:${resolvedLoginEnvironmentId}`}
                         companyId={createdCompanyId}
@@ -2821,33 +2764,6 @@ function OnboardingWizardInner({
                           setConnectAuthUrl(url);
                           // The prompt arriving is what ends the waiting beat.
                           if (url) setConnectPhase((p) => (p === "loading" ? "ready" : p));
-                        }}
-                        onCodeSubmitted={() => {
-                          // The button reacts to the paste, not to the server.
-                          // Waiting for the login to be stored left about a
-                          // second of a button still reading "Waiting for code"
-                          // after the code had already gone in.
-                          phaseBeforeSubmitRef.current = connectPhase;
-                          connectingSinceRef.current = Date.now();
-                          setConnectCredentialStored(false);
-                          setConnectPhase("connecting");
-                        }}
-                        onSubmitFailed={() => {
-                          // Only while the button still says "Connecting". The
-                          // panel stays mounted through Back's exit, so a failure
-                          // that landed after Back restored the button and
-                          // reopened the card the customer was leaving — without
-                          // the address Back had cleared, so its sign-in could
-                          // not even be pressed.
-                          if (connectPhase !== "connecting") return;
-                          // Refused, failed or timed out — the card says which.
-                          // The button goes back to what it was offering rather
-                          // than spinning on a login that is not coming.
-                          connectingSinceRef.current = null;
-                          setConnectCredentialStored(false);
-                          setConnectPhase(
-                            phaseBeforeSubmitRef.current === "ready" ? "ready" : "waiting",
-                          );
                         }}
                         onConnected={() => {
                           if (managedProvider) managedSubscriptionRef.current = { companyId: createdCompanyId, binding: { provider: managedProvider, method: "subscription", mode: "responsible_user" } };
@@ -2868,28 +2784,16 @@ function OnboardingWizardInner({
                           }
                           // The hold before the step advances is the phase's own
                           // beat, above, so that backing out during it cancels
-                          // the hire. It counts from the paste when there was
-                          // one, and from here for a login that finished without
-                          // one — a resumed session, or a code handed out rather
-                          // than pasted back.
+                          // the hire. It counts from here.
                           if (connectingSinceRef.current === null) {
                             connectingSinceRef.current = Date.now();
                           }
                           setConnectCredentialStored(true);
                           setConnectPhase("connecting");
                         }}
-                        onStored={() => {
-                          queryClient.invalidateQueries({
-                            queryKey: queryKeys.agents.authSignal(
-                              createdCompanyId,
-                              adapterType,
-                              resolvedLoginEnvironmentId,
-                            ),
-                          });
-                        }}
                       />
                     ) : hasSavedSubscription || localLogin.status === "ready" ? null : connectStepHasNoSandbox ? (
-                      canUseLocalLogin && managedProvider ? (
+                      canUseLocalLogin && localLoginProvider ? (
                         <LocalProviderLoginInstructions adapterType={adapterType} login={{ ...localLogin, retry: () => { autoConnectStartedRef.current = false; setError(null); localLogin.retry(); } }} />
                       ) : <p className="text-xs text-muted-foreground">This environment does not support browser sign-in. Choose another sign-in environment or connect with an API key.</p>
                     ) : null}
@@ -3023,8 +2927,10 @@ function OnboardingWizardInner({
                           ) : (
                             <p className="text-muted-foreground">
                               If login is required, run{" "}
-                              <span className="font-mono">claude login</span>{" "}
-                              and retry.
+                              <span className="font-mono">claude</span> on this
+                              server as the user Paperclip runs as, enter{" "}
+                              <span className="font-mono">/login</span>, and
+                              retry.
                             </p>
                           )}
                         </div>
@@ -3105,13 +3011,11 @@ function OnboardingWizardInner({
                         ? "Connecting"
                         : "Launching..."
                   }
-                  // The browser-code login is finished on this screen, so the
-                  // button is genuinely busy for its duration and shows it. The
-                  // displayed-code login is not — see `loginSubmitsBrowserCode`
-                  // — so it stays a still, disabled Next instead of spinning
-                  // against work happening in another tab.
                   // Step 4 says what it is doing through `connectCta` instead:
                   // it has four faces and only two of them are the step working.
+                  // The sign-in finishes in another tab, so while it runs the
+                  // button stays still rather than spinning against work this
+                  // screen is not doing.
                   loading={step === 3 || step === 4 ? false : loading}
                   primaryDisabled={
                     step === 1

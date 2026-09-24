@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 
@@ -76,6 +76,9 @@ type FakeRuntimeTurn = {
   cancel: () => Promise<void>;
   closeStream: () => Promise<void>;
 };
+
+// The ACP engine never runs on a Claude subscription; it needs an API key.
+const ACP_API_KEY_ENV = { ANTHROPIC_API_KEY: "sk-ant-acp-fixture" };
 
 const tempRoots: string[] = [];
 const originalNodeVersion = process.version;
@@ -232,6 +235,7 @@ function buildContext(root: string, overrides: Partial<AdapterExecutionContext> 
     },
     config: {
       engine: "acp",
+      env: ACP_API_KEY_ENV,
       cwd: root,
       stateDir: path.join(root, "state"),
       promptTemplate: "Do the assigned work.",
@@ -301,26 +305,34 @@ describe("claude_local ACP lane", () => {
     expect(nodeVersionMeetsClaudeAcpMinimum()).toBe(true);
   });
 
-  it("keeps ACP selected and reports unavailable prerequisites for default and explicit engines", async () => {
+  it("defaults to the CLI engine and reports unavailable prerequisites for explicit ACP", async () => {
     const root = await makeTempRoot("paperclip-claude-acp-default-");
     const commandPath = path.join(root, "bin", "claude-agent-acp");
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     setNodeVersion("v24.11.0");
 
-    expect(resolveClaudeExecutionEngine({})).toEqual({ engine: "acp", explicit: false });
+    expect(resolveClaudeExecutionEngine({})).toEqual({ engine: "cli", explicit: false });
+    expect(resolveClaudeExecutionEngine({ engine: "auto" })).toEqual({ engine: "cli", explicit: false });
+    expect(resolveClaudeExecutionEngine({ engine: " ACP " })).toEqual({ engine: "acp", explicit: true });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { agentCommand: commandPath },
         executionTarget: null,
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { engine: "cli", agentCommand: commandPath },
         executionTarget: null,
       }),
     ).resolves.toEqual({ engine: "cli", explicit: true });
+    await expect(
+      resolveClaudeExecutionEngineForRun({
+        config: { engine: "acp", agentCommand: commandPath, env: ACP_API_KEY_ENV },
+        executionTarget: null,
+      }),
+    ).resolves.toEqual({ engine: "acp", explicit: true });
 
     setNodeVersion("v24.10.0");
     await expect(
@@ -328,59 +340,57 @@ describe("claude_local ACP lane", () => {
         config: { agentCommand: commandPath },
         executionTarget: null,
       }),
-    ).resolves.toMatchObject({
-      engine: "acp",
-      explicit: false,
-      unavailableReason: expect.stringContaining("Node"),
-    });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { engine: "acp", agentCommand: "/missing/claude-agent-acp" },
+        config: { engine: "acp", agentCommand: "/missing/claude-agent-acp", env: ACP_API_KEY_ENV },
         executionTarget: null,
       }),
     ).resolves.toMatchObject({ engine: "acp", explicit: true, unavailableReason: expect.stringContaining("Node") });
   });
 
-  it("requires explicit CLI selection for local filesystem or network scope", async () => {
+  it("keeps local filesystem or network scope on the default CLI engine and rejects it for explicit ACP", async () => {
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { filesystemScope: "workspace" },
         executionTarget: null,
       }),
-    ).resolves.toMatchObject({
-      engine: "acp",
-      explicit: false,
-      unavailableReason: expect.stringContaining("confinement"),
-    });
-    await expect(
-      resolveClaudeExecutionEngineForRun({
-        config: { engine: "acp", filesystemScope: "workspace" },
-        executionTarget: null,
-      }),
-    ).resolves.toMatchObject({ engine: "acp", unavailableReason: expect.stringContaining("ACP confinement is not supported") });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { networkScope: "deny" },
         executionTarget: null,
       }),
+    ).resolves.toEqual({ engine: "cli", explicit: false });
+    await expect(
+      resolveClaudeExecutionEngineForRun({
+        config: { engine: "acp", filesystemScope: "workspace", env: ACP_API_KEY_ENV },
+        executionTarget: null,
+      }),
+    ).resolves.toMatchObject({ engine: "acp", unavailableReason: expect.stringContaining("ACP confinement is not supported") });
+    await expect(
+      resolveClaudeExecutionEngineForRun({
+        config: { engine: "acp", networkScope: "deny", env: ACP_API_KEY_ENV },
+        executionTarget: null,
+      }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("confinement"),
     });
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { networkScope: "public" },
+        config: { engine: "acp", networkScope: "public", env: ACP_API_KEY_ENV },
         executionTarget: null,
       }),
     ).rejects.toThrow('networkScope must be "deny" or "allowlist"');
   });
 
-  it("uses ACP for bridged sandbox auto runs when the ACP command is configured as a shell command", async () => {
+  it("uses ACP for bridged sandbox runs with an API key when the ACP command is configured as a shell command", async () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { agentCommand: "claude-agent-acp" },
+        config: { engine: "acp", agentCommand: "claude-agent-acp", env: ACP_API_KEY_ENV },
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
@@ -399,14 +409,14 @@ describe("claude_local ACP lane", () => {
           },
         },
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toEqual({ engine: "acp", explicit: true });
   });
 
-  it("reports unavailable ACP for one-shot sandbox auto runs", async () => {
+  it("reports unavailable ACP for one-shot sandbox runs", async () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: {},
+        config: { engine: "acp", env: ACP_API_KEY_ENV },
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
@@ -416,16 +426,16 @@ describe("claude_local ACP lane", () => {
       }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("bidirectional remote process"),
     });
   });
 
-  it("reports unavailable ACP for non-sandbox remote auto runs", async () => {
+  it("reports unavailable ACP for non-sandbox remote runs", async () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: {},
+        config: { engine: "acp", env: ACP_API_KEY_ENV },
         executionTarget: {
           kind: "remote",
           transport: "ssh",
@@ -444,9 +454,88 @@ describe("claude_local ACP lane", () => {
       }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("sandbox remote targets only"),
     });
+  });
+
+  it("requires an API key for ACP before any other prerequisite, locally and on remote targets", async () => {
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      setNodeVersion("v24.10.0");
+      await expect(
+        resolveClaudeExecutionEngineForRun({
+          config: { engine: "acp", env: { CLAUDE_CODE_OAUTH_TOKEN: "subscription-token" } },
+          executionTarget: null,
+        }),
+      ).resolves.toEqual({
+        engine: "acp",
+        explicit: true,
+        unavailableReason:
+          "The Claude ACP engine needs an Anthropic API key. Use engine=cli to run with the claude CLI signed in on this server.",
+      });
+      await expect(
+        resolveClaudeExecutionEngineForRun({
+          config: { engine: "acp" },
+          executionTarget: { kind: "remote", transport: "sandbox", providerKey: "fake-plugin", remoteCwd: "/work" },
+        }),
+      ).resolves.toMatchObject({
+        unavailableReason:
+          "Claude on remote targets needs an Anthropic API key; subscription use is limited to the claude CLI signed in on this server.",
+      });
+      await expect(
+        resolveClaudeExecutionEngineForRun({
+          config: { engine: "acp", env: { CLAUDE_CODE_USE_BEDROCK: "1" } },
+          executionTarget: null,
+        }),
+      ).resolves.toMatchObject({ unavailableReason: expect.stringContaining("Node") });
+    } finally {
+      if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedKey;
+    }
+  });
+
+  it("refuses to launch the ACP executor without an API key, even when called directly", async () => {
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const root = await makeTempRoot("paperclip-claude-acp-nokey-");
+      const createRuntime = vi.fn((options: FakeRuntimeOptions) => new FakeRuntime(options) as never);
+      const execute = createClaudeAcpExecutor({ createRuntime });
+      const logs: string[] = [];
+      const base = buildContext(root);
+      const result = await execute({
+        ...base,
+        config: { ...base.config, env: { CLAUDE_CODE_OAUTH_TOKEN: "subscription-token" } },
+        onLog: async (_stream, chunk) => { logs.push(chunk); },
+      });
+      expect(result).toMatchObject({
+        exitCode: 1,
+        errorCode: "adapter_engine_unavailable",
+        errorMessage:
+          "The Claude ACP engine needs an Anthropic API key. Use engine=cli to run with the claude CLI signed in on this server.",
+        resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+      });
+      expect(createRuntime).not.toHaveBeenCalled();
+      expect(logs.join("")).toContain("needs an Anthropic API key");
+    } finally {
+      if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedKey;
+    }
+  });
+
+  it("never forwards a subscription token into the ACP config", () => {
+    const acpConfig = buildClaudeAcpConfig({
+      env: { ANTHROPIC_API_KEY: "sk-ant-acp", CLAUDE_CODE_OAUTH_TOKEN: "subscription-token" },
+    });
+    expect(acpConfig.env).toMatchObject({ ANTHROPIC_API_KEY: "sk-ant-acp" });
+    expect(acpConfig.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+    const bedrockConfig = buildClaudeAcpConfig({
+      env: { CLAUDE_CODE_USE_BEDROCK: "1", CLAUDE_CODE_OAUTH_TOKEN: "subscription-token" },
+    });
+    expect(bedrockConfig.model).toBe("");
+    expect(bedrockConfig.env).toEqual({ CLAUDE_CODE_USE_BEDROCK: "1" });
   });
 
   it.each([undefined, "/sandbox/configured-workspace"])("checks sandbox directories on the sandbox (configured cwd=%s)", async (configuredCwd) => {
@@ -478,11 +567,9 @@ describe("claude_local ACP lane", () => {
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     setNodeVersion("v24.11.0");
 
-    // The ACP lane now verifies auth: without a credential the lane runs a real
-    // host login probe, so its status depends on the host login state. Give the
-    // config a Bedrock credential to make the auth path deterministic. Bedrock
-    // gates off the host login probe, so the result reflects only the ACP
-    // prerequisites, and a valid credential lets the lane report a pass.
+    // The ACP lane needs an API credential. Give the config a Bedrock credential
+    // so the result reflects only the ACP prerequisites and the lane reports a
+    // pass.
     const result = await testClaudeAcpEnvironment({
       adapterType: "claude_local",
       companyId: "company-1",
@@ -537,6 +624,7 @@ describe("claude_local ACP lane", () => {
     const result = await execute(buildContext(root, {
       config: {
         engine: "acp",
+        env: ACP_API_KEY_ENV,
         cwd: root,
         stateDir: path.join(root, "state"),
         model: "claude-opus-4-7",
@@ -594,6 +682,7 @@ describe("claude_local ACP lane", () => {
       buildContext(localCwd, {
         config: {
           engine: "acp",
+          env: ACP_API_KEY_ENV,
           cwd: localCwd,
           agentCommand: "node ./fake-acp.js",
           stateDir: path.join(root, "state"),
@@ -666,6 +755,7 @@ describe("claude_local ACP lane", () => {
       buildContext(localCwd, {
         config: {
           engine: "acp",
+          env: ACP_API_KEY_ENV,
           cwd: localCwd,
           agentCommand: "node ./fake-acp.js",
           stateDir: path.join(root, "state"),
@@ -721,6 +811,7 @@ describe("claude_local ACP lane", () => {
       buildContext(localCwd, {
         config: {
           engine: "acp",
+          env: ACP_API_KEY_ENV,
           cwd: localCwd,
           agentCommand: "node ./fake-acp.js",
           stateDir: path.join(root, "state"),
@@ -769,6 +860,7 @@ describe("claude_local ACP lane", () => {
     const result = await execute(buildContext(root, {
       config: {
         engine: "acp",
+        env: ACP_API_KEY_ENV,
         cwd: root,
         stateDir: path.join(root, "state"),
         model: "claude-fable-5-1",
@@ -804,6 +896,7 @@ describe("claude_local ACP lane", () => {
       buildContext(localCwd, {
         config: {
           engine: "acp",
+          env: ACP_API_KEY_ENV,
           cwd: localCwd,
           // Throwaway ACP command so the process-session bridge does not require
           // a real claude-agent-acp binary in the local sandbox stand-in.
@@ -860,6 +953,7 @@ describe("claude_local ACP lane", () => {
       buildContext(localCwd, {
         config: {
           engine: "acp",
+          env: ACP_API_KEY_ENV,
           cwd: localCwd,
           agentCommand: "node ./fake-acp.js",
           stateDir: path.join(root, "state"),
@@ -946,6 +1040,7 @@ describe("claude_local ACP lane", () => {
       buildContext(localCwd, {
         config: {
           engine: "acp",
+          env: ACP_API_KEY_ENV,
           cwd: localCwd,
           agentCommand: "node ./fake-acp.js",
           stateDir: path.join(root, "state"),
@@ -1021,6 +1116,7 @@ describe("claude_local ACP lane", () => {
         buildContext(localCwd, {
           config: {
             engine: "acp",
+            env: ACP_API_KEY_ENV,
             cwd: localCwd,
             agentCommand: "node ./fake-acp.js",
             stateDir: path.join(root, "state"),
@@ -1090,7 +1186,7 @@ describe("claude_local ACP lane", () => {
           agentCommand: "node ./fake-acp.js",
           stateDir: path.join(root, "state"),
           promptTemplate: "Do the assigned work.",
-          env: { CLAUDE_CONFIG_DIR: operatorConfigDir },
+          env: { ...ACP_API_KEY_ENV, CLAUDE_CONFIG_DIR: operatorConfigDir },
         },
         context: {
           issueId: "issue-1",
@@ -1161,7 +1257,7 @@ describe("claude_local ACP lane", () => {
           promptTemplate: "Do the assigned work.",
           // Explicit user-managed CLAUDE_CONFIG_DIR (adapter config env, not a host
           // env leak) pointing at a host-only path.
-          env: { CLAUDE_CONFIG_DIR: operatorConfigDir },
+          env: { ...ACP_API_KEY_ENV, CLAUDE_CONFIG_DIR: operatorConfigDir },
         },
         context: {
           issueId: "issue-1",
@@ -1203,7 +1299,7 @@ describe("claude_local ACP lane", () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { agentCommand: "claude-agent-acp" },
+        config: { engine: "acp", agentCommand: "claude-agent-acp", env: ACP_API_KEY_ENV },
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
@@ -1213,7 +1309,7 @@ describe("claude_local ACP lane", () => {
       }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("bidirectional remote process"),
     });
   });
@@ -1321,17 +1417,27 @@ describe("claude_local ACP lane", () => {
 });
 
 describe("resolveClaudeAcpBillingIdentity", () => {
-  const originalApiKey = process.env.ANTHROPIC_API_KEY;
-  const originalBedrock = process.env.CLAUDE_CODE_USE_BEDROCK;
-  const originalBedrockBase = process.env.ANTHROPIC_BEDROCK_BASE_URL;
+  const HOST_KEYS = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+  ] as const;
+  const originalHostEnv = Object.fromEntries(HOST_KEYS.map((key) => [key, process.env[key]]));
+
+  beforeEach(() => {
+    for (const key of HOST_KEYS) delete process.env[key];
+  });
 
   afterEach(() => {
-    if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = originalApiKey;
-    if (originalBedrock === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
-    else process.env.CLAUDE_CODE_USE_BEDROCK = originalBedrock;
-    if (originalBedrockBase === undefined) delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
-    else process.env.ANTHROPIC_BEDROCK_BASE_URL = originalBedrockBase;
+    for (const key of HOST_KEYS) {
+      const original = originalHostEnv[key];
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
   });
 
   it("classifies an adapter-config API key as api billing", () => {
@@ -1346,24 +1452,81 @@ describe("resolveClaudeAcpBillingIdentity", () => {
     ).toEqual({ provider: "anthropic", biller: "aws_bedrock", billingType: "metered_api" });
   });
 
-  it("falls back to subscription without API-key or Bedrock auth", () => {
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.CLAUDE_CODE_USE_BEDROCK;
-    delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
+  it.each([
+    ["a gateway ANTHROPIC_AUTH_TOKEN with no base URL", { ANTHROPIC_AUTH_TOKEN: "gateway-token" }, "anthropic"],
+    [
+      "an OpenRouter gateway token",
+      { ANTHROPIC_AUTH_TOKEN: "sk-or-token", ANTHROPIC_BASE_URL: "https://openrouter.ai/api" },
+      "openrouter",
+    ],
+    [
+      "a LiteLLM gateway token",
+      { ANTHROPIC_AUTH_TOKEN: "litellm-token", ANTHROPIC_BASE_URL: "https://litellm.internal.example:4000" },
+      "unknown",
+    ],
+    ["Vertex", { CLAUDE_CODE_USE_VERTEX: "1" }, "google"],
+    ["Foundry", { CLAUDE_CODE_USE_FOUNDRY: "true" }, "azure"],
+  ])("classifies %s as metered_api, never subscription, and bills the right biller", (_label, env, biller) => {
+    expect(resolveClaudeAcpBillingIdentity({ config: { env } })).toEqual({
+      provider: "anthropic",
+      biller,
+      billingType: "metered_api",
+    });
+  });
+
+  it("does not treat ANTHROPIC_BEDROCK_BASE_URL alone as Bedrock", () => {
+    expect(
+      resolveClaudeAcpBillingIdentity({
+        config: {
+          env: {
+            ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock-runtime.us-east-1.amazonaws.com",
+            ANTHROPIC_API_KEY: "sk-ant-test",
+          },
+        },
+      }),
+    ).toEqual({ provider: "anthropic", biller: "anthropic", billingType: "api" });
+    process.env.ANTHROPIC_BEDROCK_BASE_URL = "https://bedrock-runtime.us-east-1.amazonaws.com";
+    expect(
+      resolveClaudeAcpBillingIdentity({ config: { env: { ANTHROPIC_API_KEY: "sk-ant-test" } } }),
+    ).toEqual({ provider: "anthropic", biller: "anthropic", billingType: "api" });
+  });
+
+  it("ignores a host-only Vertex or Foundry flag, which the ACP child never inherits", () => {
+    process.env.CLAUDE_CODE_USE_VERTEX = "1";
+    process.env.CLAUDE_CODE_USE_FOUNDRY = "1";
+    expect(
+      resolveClaudeAcpBillingIdentity({ config: { env: { ANTHROPIC_API_KEY: "sk-ant-test" } } }),
+    ).toEqual({ provider: "anthropic", biller: "anthropic", billingType: "api" });
+  });
+
+  it("reads a gateway ANTHROPIC_AUTH_TOKEN from the host env for a local target", () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = "gateway-token";
+    expect(resolveClaudeAcpBillingIdentity({ config: {} }).billingType).toBe("metered_api");
+  });
+
+  it("does not count a subscription OAuth token in ANTHROPIC_AUTH_TOKEN as a gateway credential", () => {
+    expect(
+      resolveClaudeAcpBillingIdentity({ config: { env: { ANTHROPIC_AUTH_TOKEN: "sk-ant-oat01-subscription" } } })
+        .billingType,
+    ).toBe("unknown");
+  });
+
+  it("labels a run without a detectable credential unknown, never subscription", () => {
     expect(resolveClaudeAcpBillingIdentity({ config: {} })).toEqual({
       provider: "anthropic",
       biller: "anthropic",
-      billingType: "subscription",
+      billingType: "unknown",
     });
   });
 
   it("ignores host env for remote execution targets", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-host-only";
+    process.env.ANTHROPIC_AUTH_TOKEN = "gateway-host-only";
     expect(
       resolveClaudeAcpBillingIdentity({
         config: {},
         executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/work" },
       } as never).billingType,
-    ).toBe("subscription");
+    ).toBe("unknown");
   });
 });

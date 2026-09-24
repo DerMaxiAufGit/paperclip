@@ -7,7 +7,7 @@ import type { AiConnectionLoginIntent, LocalAiLoginAttempt, LocalAiLoginStatus }
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { notFound, unprocessable } from "../errors.js";
 import { aiConnectionService } from "./ai-connections.js";
-import { readVerifiedLocalAiCredential } from "./local-ai-credentials.js";
+import { CLAUDE_SIGN_IN_IMPORT_UNSUPPORTED, readVerifiedLocalAiCredential } from "./local-ai-credentials.js";
 import { logActivity } from "./activity-log.js";
 
 const LOCAL_LOGIN_METHOD = "local_subscription";
@@ -22,9 +22,7 @@ function presentAttempt(id: string, expiresAt: Date, provider: string): LocalAiL
     sessionId: id, expiresAt: expiresAt.toISOString(),
     command: provider === "openai"
       ? `(export CODEX_HOME=${shellQuote(directory)} && mkdir -p "$CODEX_HOME" && codex -c 'cli_auth_credentials_store="file"' login --device-auth)`
-      : provider === "anthropic"
-        ? `(export CLAUDE_CONFIG_DIR=${shellQuote(directory)} && mkdir -p "$CLAUDE_CONFIG_DIR" && claude auth login)`
-        : `(export GROK_HOME=${shellQuote(directory)} && mkdir -p "$GROK_HOME" && grok login --device-auth)`,
+      : `(export GROK_HOME=${shellQuote(directory)} && mkdir -p "$GROK_HOME" && grok login --device-auth)`,
   };
 }
 async function prepareHome(id: string, provider: string) {
@@ -42,7 +40,9 @@ function sameTarget(a: AiConnectionLoginIntent, b: AiConnectionLoginIntent) {
 }
 
 /** Local terminal sign-ins share the durable attempt/credential lifecycle, but
- * never seed their home from the operator's rotating CLI credential. */
+ * never seed their home from the operator's rotating CLI credential. Only the
+ * OpenAI (Codex) and xAI (Grok) CLIs use this flow; Claude subscriptions are
+ * used through the claude CLI signed in on the server and are never imported. */
 export function localAiLoginService(db: Db) {
   async function reapExpired() {
     // Bounded batches use the existing expires-at index. Replaying is safe.
@@ -65,12 +65,13 @@ export function localAiLoginService(db: Db) {
   }
 
   async function start(companyId: string, userId: string, intent: AiConnectionLoginIntent, restart = false): Promise<LocalAiLoginAttempt> {
-    if (intent.provider !== "openai" && intent.provider !== "xai" && intent.provider !== "anthropic")
+    if (intent.provider === "anthropic") throw unprocessable(CLAUDE_SIGN_IN_IMPORT_UNSUPPORTED);
+    if (intent.provider !== "openai" && intent.provider !== "xai")
       throw unprocessable("This provider does not use a separate local login home.");
     await reapExpired();
     return db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`ai-local-login:${companyId}:${userId}:${intent.provider}`}, 0))`);
-      const adapterType = intent.provider === "openai" ? "codex_local" : intent.provider === "anthropic" ? "claude_local" : "grok_local";
+      const adapterType = intent.provider === "openai" ? "codex_local" : "grok_local";
       const [existing] = await tx.select().from(adapterAuthSessions).where(and(
         eq(adapterAuthSessions.companyId, companyId), eq(adapterAuthSessions.startedByUserId, userId),
         eq(adapterAuthSessions.adapterType, adapterType),
@@ -125,20 +126,18 @@ export function localAiLoginService(db: Db) {
   // Read-only credential detection: never saves a connection or refreshes another
   // login. Scope and intent are checked before touching an attempt's directory.
   async function check(companyId: string, userId: string, intent: AiConnectionLoginIntent, id?: string): Promise<LocalAiLoginStatus> {
-    let directory: string | undefined;
-    if (id || intent.provider !== "anthropic") {
-      if (!id) throw unprocessable("Start local sign-in before checking this account.");
-      const [session] = await db.select().from(adapterAuthSessions).where(and(
-        eq(adapterAuthSessions.id, id), eq(adapterAuthSessions.companyId, companyId),
-        eq(adapterAuthSessions.startedByUserId, userId),
-        eq(adapterAuthSessions.connectionMethod, LOCAL_LOGIN_METHOD),
-      ));
-      if (!session?.aiConnection || !sameTarget(session.aiConnection, intent))
-        throw notFound("Local sign-in attempt not found for this connection.");
-      if (session.status !== "waiting_for_user" || !session.expiresAt || session.expiresAt.getTime() <= Date.now())
-        return { status: "expired" };
-      directory = loginHome(id);
-    }
+    if (intent.provider === "anthropic") throw unprocessable(CLAUDE_SIGN_IN_IMPORT_UNSUPPORTED);
+    if (!id) throw unprocessable("Start local sign-in before checking this account.");
+    const [session] = await db.select().from(adapterAuthSessions).where(and(
+      eq(adapterAuthSessions.id, id), eq(adapterAuthSessions.companyId, companyId),
+      eq(adapterAuthSessions.startedByUserId, userId),
+      eq(adapterAuthSessions.connectionMethod, LOCAL_LOGIN_METHOD),
+    ));
+    if (!session?.aiConnection || !sameTarget(session.aiConnection, intent))
+      throw notFound("Local sign-in attempt not found for this connection.");
+    if (session.status !== "waiting_for_user" || !session.expiresAt || session.expiresAt.getTime() <= Date.now())
+      return { status: "expired" };
+    const directory = loginHome(id);
     try {
       await readVerifiedLocalAiCredential(intent.provider, directory);
       return { status: "ready" };
@@ -148,6 +147,7 @@ export function localAiLoginService(db: Db) {
   }
 
   async function complete(companyId: string, userId: string, id: string, intent: AiConnectionLoginIntent) {
+    if (intent.provider === "anthropic") throw unprocessable(CLAUDE_SIGN_IN_IMPORT_UNSUPPORTED);
     const result = await db.transaction(async (tx) => {
       const [session] = await tx.select().from(adapterAuthSessions).where(and(
         eq(adapterAuthSessions.id, id), eq(adapterAuthSessions.companyId, companyId),

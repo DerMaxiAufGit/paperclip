@@ -248,8 +248,9 @@ export interface PluginEnvironmentDriverDeclaration {
    */
   supportsLoginPty?: boolean;
   /**
-   * Deprecated alias for `supportsLoginPty`. It exists only so an external
-   * plugin manifest that declares the old name still loads. The manifest
+   * Deprecated manifest alias for `supportsLoginPty`, kept for manifest
+   * compatibility: an external plugin manifest that declares the old name still
+   * loads. It names no separate login flow. The manifest
    * validator canonicalizes it onto `supportsLoginPty` and drops it. Do not read
    * this field; read `supportsLoginPty`.
    *

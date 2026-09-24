@@ -1,9 +1,9 @@
-// Test worker fixture for the host-owned setup-token login pseudo-terminal route
+// Test worker fixture for the host-owned login pseudo-terminal route
 // gate. The fixture drives the manager route state machine through
 // the four typed methods (open, input, stop, close) and the output and exit
 // notifications.
 //
-// The manager allowlists `command` to the fixed `CLAUDE_SETUP_TOKEN_COMMAND`. The
+// The manager carries only the closed login command key, never a command. The
 // test encodes a JSON directive in the forwarded `providerLeaseId`, so one fixture
 // serves every route-gate case:
 //   - `mode`: "normal" | "malformed-open" | "no-open-reply" | "duplicate-open-reply" |

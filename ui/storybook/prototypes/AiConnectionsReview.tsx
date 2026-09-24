@@ -1,6 +1,7 @@
 import { AiReviewBoundary } from "./AiReviewFrame";
 import { AiConnectorPages } from "./AiConnectorPages";
 import { useRef, useState } from "react";
+import { AI_CONNECTION_CAPABILITIES } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
 import { ModelSourceTiles } from "@/components/onboarding/ModelSourceTiles";
 import {
@@ -60,7 +61,8 @@ function AgentConnectionReview({
   error,
 }: AiConnectionsReviewProps) {
   const requirement = initialRequirement;
-  const method = requirement.method ?? (requirement.provider === "openrouter" ? "api_key" : "subscription");
+  // Claude and OpenRouter connect with an API key only; see the fixture note.
+  const method = requirement.method ?? (AI_CONNECTION_CAPABILITIES[requirement.provider].methods.subscription ? "subscription" : "api_key");
   const [connections, setConnections] = useState(initialConnections);
   const [binding, setBinding] = useState<AiConnectionBinding>(
     initialBinding ?? {
@@ -155,8 +157,7 @@ function AgentConnectionReview({
           Storybook-only controls · These simulate provider responses and do not appear in the app.
         </span>
         {stage === "auth" &&
-          auth.phase === "waiting" &&
-          requirement.provider !== "anthropic" && (
+          auth.phase === "waiting" && (
             <Button
               size="sm"
               variant="outline"

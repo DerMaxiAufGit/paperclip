@@ -4,7 +4,6 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { ONBOARDING_AGENT_STEP } from "../lib/onboarding-route";
 
@@ -38,7 +37,9 @@ const mockAgentsApi = vi.hoisted(() => ({
   instructionsBundle: vi.fn(),
   saveInstructionsFile: vi.fn(),
   testEnvironment: vi.fn(),
-  getClaudeOAuthTokenStatus: vi.fn(),
+  // The Claude status panel on the connect step reads the server's claude CLI
+  // sign-in through this.
+  getAdapterAuthSignal: vi.fn(),
 }));
 const mockCompaniesApi = vi.hoisted(() => ({ create: vi.fn() }));
 // The hire path resolves the Test environment before it probes: it reads the
@@ -193,12 +194,7 @@ describe("OnboardingWizard — which step it lands on", () => {
       checks: [],
       testedAt: new Date("2026-03-02T00:00:00Z").toISOString(),
     });
-    // Onboarding applies a stored Claude login automatically; this suite is
-    // not testing that path, so default to "no stored value" (the route's
-    // fixed 404) so the hire path behaves as it did before that feature.
-    mockAgentsApi.getClaudeOAuthTokenStatus.mockRejectedValue(
-      new ApiError("Not found", 404, null),
-    );
+    mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "present" });
     mockEnvironmentsApi.list.mockResolvedValue([]);
     mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
@@ -561,15 +557,16 @@ describe("OnboardingWizard — which step it lands on", () => {
     /**
      * The step's own CTA. By exact text, because "Back" sits beside it.
      *
-     * Two labels rather than one: the connect step calls its forward button
+     * Three labels rather than one: the connect step calls its forward button
      * "Connect", since there the press starts a sign-in rather than simply
-     * advancing. The rest of the arc still says "Next". These tests are about
-     * where a press lands, so either will do.
+     * advancing, or "Continue" for a Claude subscription, which has nothing to
+     * connect. The rest of the arc still says "Next". These tests are about
+     * where a press lands, so any will do.
      */
     function stepCta(): HTMLButtonElement {
       const cta = [...document.body.querySelectorAll("button")].find((b) => {
         const text = b.textContent?.trim();
-        return text === "Next" || text === "Connect";
+        return text === "Next" || text === "Connect" || text === "Continue";
       });
       expect(cta, "the step should render its forward button").toBeTruthy();
       return cta as HTMLButtonElement;

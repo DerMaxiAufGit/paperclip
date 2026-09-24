@@ -21,34 +21,18 @@ export interface LoginLeaseMetadata {
 
 /**
  * The options for one login lease acquire. The helper sets the fixed arguments
- * and passes each option through to the acquire arguments.
+ * and passes the lease metadata through to the acquire arguments.
  */
 export interface BuildLoginLeaseAcquireArgsOptions {
   /** The lease metadata that identifies the login sandbox. */
   metadata: LoginLeaseMetadata;
-  /**
-   * The agent that owns the login. The codex flow passes null. The setup-token
-   * flow passes the target agent.
-   */
-  targetAgentId?: string | null;
-  /**
-   * Re-check the environment company binding inside the lease insert
-   * transaction. The setup-token flow sets this to true.
-   */
-  assertCompanyBinding?: boolean;
-  /**
-   * The latest time the acquired lease may stay active. The setup-token flow
-   * passes the session deadline. The codex flow passes nothing.
-   */
-  requestedExpiresAt?: Date | null;
 }
 
 /**
- * Build the fixed sandbox lease arguments for a login service. Both login
- * services acquire a lease with a null issue, a null heartbeat run, and a null
- * execution workspace, and both apply the active custom-image template. This
- * helper sets those fixed arguments in one place and passes the caller options
- * through without a change to the lease behavior.
+ * Build the fixed sandbox lease arguments for the device login service. The
+ * login acquires a lease with no agent, a null issue, a null heartbeat run, and
+ * a null execution workspace, and applies the active custom-image template.
+ * This helper sets those fixed arguments in one place.
  */
 export function buildLoginLeaseAcquireArgs(
   options: BuildLoginLeaseAcquireArgsOptions,
@@ -57,7 +41,8 @@ export function buildLoginLeaseAcquireArgs(
     companyId: options.metadata.companyId,
     environment: options.metadata.environment,
     adapterType: options.metadata.adapterType ?? null,
-    agentId: options.targetAgentId ?? null,
+    // A company-and-environment scoped login carries no target agent.
+    agentId: null,
     // A null issue, a null heartbeat run, and a null execution workspace disable
     // lease reuse, so the login session always runs in a fresh sandbox.
     issueId: null,
@@ -66,7 +51,5 @@ export function buildLoginLeaseAcquireArgs(
     // Apply the active custom-image template, so the sandbox binds to the
     // trusted image and runtime identity.
     applyCustomImageTemplate: true,
-    assertCompanyBinding: options.assertCompanyBinding,
-    requestedExpiresAt: options.requestedExpiresAt ?? null,
   };
 }

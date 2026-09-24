@@ -148,6 +148,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "url": std::env::var("PAPERCLIP_NATIVE_MCP_URL").ok(),
                             "hasToken": std::env::var("PAPERCLIP_NATIVE_MCP_TOKEN").is_ok(),
                             "hasUnrelatedSecret": std::env::var("UNRELATED_EVAL_SECRET").is_ok(),
+                            "hasAnthropicApiKey": std::env::var("ANTHROPIC_API_KEY").is_ok(),
+                            "hasClaudeOauthToken": std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok(),
                         }
                     }),
                 )?;

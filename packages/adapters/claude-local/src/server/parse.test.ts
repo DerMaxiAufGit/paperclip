@@ -34,8 +34,8 @@ describe("detectClaudeLoginRequired", () => {
     ).toBe(false);
   });
 
-  it("classifies an invalid or expired OAuth bearer token as login required", () => {
-    // Grounded on the real Claude CLI output for CLAUDE_CODE_OAUTH_TOKEN=invalid:
+  it("classifies an invalid or expired bearer credential as login required", () => {
+    // Grounded on the real Claude CLI output for a rejected bearer credential:
     // the result event carries a 401 authentication failure and an "Invalid
     // bearer token" message. This is an auth failure, not a probe that could not
     // run, so the detector must classify it as login required.

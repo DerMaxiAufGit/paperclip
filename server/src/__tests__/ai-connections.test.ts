@@ -15,7 +15,7 @@ import * as executionTarget from "@paperclipai/adapter-utils/execution-target";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth } from "../services/ai-connection-runtime.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { secretService } from "../services/secrets.js";
-import { aiConnectionBindingSchema, connectionPurposeTransportSchema, isAiConnectionCompatible } from "@paperclipai/shared";
+import { CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE, aiConnectionBindingSchema, connectionPurposeTransportSchema, isAiConnectionCompatible } from "@paperclipai/shared";
 import express from "express";
 import request from "supertest";
 import { aiConnectionRoutes, canInstallSharedAiConnectionForNewAgent, responsibleUserForAiRequest } from "../routes/ai-connections.js";
@@ -31,6 +31,11 @@ let service: ReturnType<typeof aiConnectionService>;
 const binding = { provider: "anthropic", method: "api_key", mode: "responsible_user" } as const;
 const input = { companyId, agentId, adapterType: "claude_local", binding };
 const create = (userId: string, name: string, ownership: "personal" | "shared" = "personal") => service.save(companyId, userId, { provider: "anthropic", method: "api_key", ownership, name, apiKey: "fixture", agentIds: [], allAgents: true }, `fixture-${name}`);
+// Provider-default behavior is shared by every provider; OpenAI has both methods.
+const openAiInput = { companyId, agentId, adapterType: "codex_local", binding: { provider: "openai", method: "api_key", mode: "responsible_user" } } as const;
+const createOpenAiApiKey = (userId: string, name: string) => service.save(companyId, userId, { provider: "openai", method: "api_key", ownership: "personal", name, apiKey: "fixture", agentIds: [], allAgents: true }, `fixture-${name}`);
+const openAiSubscriptionCredential = (marker: string) => JSON.stringify({ tokens: { access_token: `access-${marker}`, refresh_token: `refresh-${marker}`, id_token: `id-${marker}`, account_id: "fixture-account" } });
+const createOpenAiSubscription = (userId: string, name: string) => service.save(companyId, userId, { provider: "openai", method: "subscription", ownership: "personal", name, loginSessionId: "fixture", allAgents: true, agentIds: [] }, openAiSubscriptionCredential(name));
 
 beforeAll(async () => {
   home = await mkdtemp(path.join(os.tmpdir(), "paperclip-ai-tests-"));
@@ -47,13 +52,12 @@ afterAll(async () => { await database?.cleanup(); vi.unstubAllEnvs(); if (home) 
 
 describe("managed AI connections", () => {
   it.each([
-    ["anthropic", "claude_local", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-    ["openai", "codex_local", "CODEX_HOME", "OPENAI_API_KEY"],
-  ] as const)("runs the same %s agent with each responsible user's subscription or API key", async (provider, adapterType, subscriptionEnv, apiEnv) => {
+    ["openai", "codex_local", "OPENAI_API_KEY"],
+  ] as const)("runs the same %s agent with each responsible user's subscription or API key", async (provider, adapterType, apiEnv) => {
     const subscriptionUser = `${provider}-subscription-user`;
     const apiUser = `${provider}-api-user`;
     await db.insert(companyMemberships).values([subscriptionUser, apiUser].map(principalId => ({ companyId, principalId, principalType: "user", status: "active", membershipRole: "member" })));
-    const token = provider === "openai" ? JSON.stringify({ tokens: { access_token: "fixture-subscription", refresh_token: "fixture-refresh", id_token: "fixture-id", account_id: "fixture-account" } }) : "fixture-subscription";
+    const token = JSON.stringify({ tokens: { access_token: "fixture-subscription", refresh_token: "fixture-refresh", id_token: "fixture-id", account_id: "fixture-account" } });
     const subscription = await service.save(companyId, subscriptionUser, { provider, method: "subscription", ownership: "personal", name: "Subscription", loginSessionId: "fixture", allAgents: true, agentIds: [] }, token);
     const api = await service.save(companyId, apiUser, { provider, method: "api_key", ownership: "personal", name: "API", apiKey: "fixture", allAgents: true, agentIds: [] }, "fixture-api");
     // This is the exact same saved bot config, including a legacy setup method.
@@ -67,13 +71,9 @@ describe("managed AI connections", () => {
       const apiEnvValues = apiRun.config.env as Record<string, string>;
       expect(subEnv[apiEnv]).toBe("");
       expect(apiEnvValues[apiEnv]).toBe("fixture-api");
-      if (provider === "anthropic") {
-        expect(subEnv[subscriptionEnv]).toBe(token);
-        expect(apiEnvValues[subscriptionEnv]).toBe("");
-      } else {
-        expect(await readFile(path.join(subEnv.CODEX_HOME, "auth.json"), "utf8")).toBe(token);
-        expect(JSON.parse(await readFile(path.join(apiEnvValues.CODEX_HOME, "auth.json"), "utf8"))).toEqual({ OPENAI_API_KEY: "fixture-api" });
-      }
+      expect(await readFile(path.join(subEnv.CODEX_HOME, "auth.json"), "utf8")).toBe(token);
+      expect(JSON.parse(await readFile(path.join(apiEnvValues.CODEX_HOME, "auth.json"), "utf8"))).toEqual({ OPENAI_API_KEY: "fixture-api" });
+      expect(subEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe("");
       expect(subEnv.HOME).not.toBe(apiEnvValues.HOME);
       expect(subRun.identity).not.toBe(apiRun.identity);
       expect(subRun.config.model).toBe(bot.config.model);
@@ -83,28 +83,55 @@ describe("managed AI connections", () => {
     } finally { await Promise.all([subRun.cleanup(), apiRun.cleanup()]); }
   });
 
+  it("never stores a Claude subscription and fails closed on a stored one", async () => {
+    const userId = "claude-subscription-user";
+    await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
+    await expect(service.save(companyId, userId, { provider: "anthropic", method: "subscription", ownership: "personal", name: "Claude subscription", loginSessionId: "fixture", allAgents: true, agentIds: [] }, "fixture-claude-subscription"))
+      .rejects.toMatchObject({ status: 422, message: CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE });
+    expect((await service.list(companyId, userId)).some(account => account.name === "Claude subscription")).toBe(false);
+    const api = await create(userId, "Claude API");
+    // A legacy binding that still says "subscription" runs with the user's
+    // API-key default and blanks any inherited subscription token.
+    const legacyBinding = { ...binding, method: "subscription" } as const;
+    const run = await prepareManagedAiRuntime(db, { ...input, binding: legacyBinding, responsibleUserId: userId, config: { model: "same-model", env: { CLAUDE_CODE_OAUTH_TOKEN: "ambient" } } });
+    try {
+      const env = run.config.env as Record<string, string>;
+      expect(run.attribution).toMatchObject({ grantId: api.grantId, method: "api_key" });
+      expect(env.ANTHROPIC_API_KEY).toBe("fixture-Claude API");
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("");
+    } finally { await run.cleanup(); }
+    // A Claude subscription row stored by an older build is listed for removal
+    // but never selected, made default, or injected.
+    await db.update(toolConnections).set({ config: sql`jsonb_set(${toolConnections.config}, '{ai,method}', '"subscription"')` }).where(eq(toolConnections.id, api.connectionId));
+    const stored = (await service.list(companyId, userId)).find(account => account.grantId === api.grantId)!;
+    expect(stored).toMatchObject({ method: "subscription", status: "needs_attention", unavailableReason: CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE });
+    await expect(service.select({ ...input, userId })).rejects.toThrow("incompatible");
+    await expect(prepareManagedAiRuntime(db, { ...input, responsibleUserId: userId, config: {} })).rejects.toThrow("incompatible");
+    await expect(service.setDefault(companyId, userId, api.grantId)).rejects.toThrow(CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE);
+  });
+
   it("has one provider default across methods, retains unavailable defaults and honors explicit account methods", async () => {
     const userId = "provider-default-user";
     await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
-    const api = await create(userId, "Provider API");
-    const subscription = await service.save(companyId, userId, { provider: "anthropic", method: "subscription", ownership: "personal", name: "Provider subscription", loginSessionId: "fixture", allAgents: true, agentIds: [] }, "fixture-provider-subscription");
-    expect((await service.select({ ...input, userId })).grant.id).toBe(api.grantId);
+    const api = await createOpenAiApiKey(userId, "Provider API");
+    const subscription = await createOpenAiSubscription(userId, "Provider subscription");
+    expect((await service.select({ ...openAiInput, userId })).grant.id).toBe(api.grantId);
     expect((await service.list(companyId, userId)).filter(account => account.isDefault).map(account => account.grantId)).toEqual([api.grantId]);
     await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, api.grantId));
-    await expect(service.select({ ...input, userId })).rejects.toThrow("Reconnect");
-    await create(userId, "Another API");
-    await expect(service.select({ ...input, userId })).rejects.toThrow("Reconnect");
+    await expect(service.select({ ...openAiInput, userId })).rejects.toThrow("Reconnect");
+    await createOpenAiApiKey(userId, "Another API");
+    await expect(service.select({ ...openAiInput, userId })).rejects.toThrow("Reconnect");
     await service.setDefault(companyId, userId, subscription.grantId);
-    expect((await service.select({ ...input, userId })).attribution).toMatchObject({ method: "subscription", grantId: subscription.grantId });
+    expect((await service.select({ ...openAiInput, userId })).attribution).toMatchObject({ method: "subscription", grantId: subscription.grantId });
     expect((await service.list(companyId, userId)).filter(account => account.isDefault)).toHaveLength(1);
-    await expect(service.select({ ...input, userId, binding: { ...binding, mode: "delegated", ...subscription } })).rejects.toThrow("incompatible");
+    await expect(service.select({ ...openAiInput, userId, binding: { ...openAiInput.binding, mode: "delegated", ...subscription } })).rejects.toThrow("incompatible");
   });
 
   it("backfills provider defaults repeatably without deleting old preferences or replacing an unavailable choice", async () => {
     const userId = "provider-default-migration-user";
     await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
-    const api = await create(userId, "Migration API");
-    const subscription = await service.save(companyId, userId, { provider: "anthropic", method: "subscription", ownership: "personal", name: "Migration subscription", loginSessionId: "fixture", allAgents: true, agentIds: [] }, "fixture-migration-subscription");
+    const api = await createOpenAiApiKey(userId, "Migration API");
+    const subscription = await createOpenAiSubscription(userId, "Migration subscription");
     await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, api.grantId));
     await db.update(aiConnectionDefaults).set({ updatedAt: new Date("2030-01-01") }).where(eq(aiConnectionDefaults.grantId, api.grantId));
     await db.delete(aiProviderDefaults).where(and(eq(aiProviderDefaults.companyId, companyId), eq(aiProviderDefaults.userId, userId)));
@@ -112,28 +139,28 @@ describe("managed AI connections", () => {
     const migration = await readFile(new URL("../../../packages/db/src/migrations/0277_uneven_lady_deathstrike.sql", import.meta.url), "utf8");
     for (let pass = 0; pass < 2; pass++) for (const statement of migration.split("--> statement-breakpoint").filter(value => value.trim())) await db.execute(sql.raw(statement));
     expect(await db.select().from(aiConnectionDefaults).where(eq(aiConnectionDefaults.userId, userId))).toEqual(legacyRows);
-    await expect(service.select({ ...input, userId })).rejects.toThrow("Reconnect");
+    await expect(service.select({ ...openAiInput, userId })).rejects.toThrow("Reconnect");
     await service.setDefault(companyId, userId, subscription.grantId);
     for (const statement of migration.split("--> statement-breakpoint").filter(value => value.trim())) await db.execute(sql.raw(statement));
-    expect((await service.select({ ...input, userId })).grant.id).toBe(subscription.grantId);
+    expect((await service.select({ ...openAiInput, userId })).grant.id).toBe(subscription.grantId);
   });
   it("observes old-server default changes during rolling upgrades without treating new accounts as default changes", async () => {
     const userId = "rolling-upgrade-user";
     await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
-    const api = await create(userId, "Rolling API");
-    const subscription = await service.save(companyId, userId, { provider: "anthropic", method: "subscription", ownership: "personal", name: "Rolling subscription", loginSessionId: "fixture", allAgents: true, agentIds: [] }, "fixture-rolling-subscription");
-    expect((await service.select({ ...input, userId })).grant.id).toBe(api.grantId);
+    const api = await createOpenAiApiKey(userId, "Rolling API");
+    const subscription = await createOpenAiSubscription(userId, "Rolling subscription");
+    expect((await service.select({ ...openAiInput, userId })).grant.id).toBe(api.grantId);
     // An older server updates only the legacy per-method row on Make default.
     await db.update(aiConnectionDefaults).set({ grantId: subscription.grantId, updatedAt: new Date() })
       .where(and(eq(aiConnectionDefaults.userId, userId), eq(aiConnectionDefaults.method, "subscription")));
-    expect((await service.select({ ...input, userId })).attribution).toMatchObject({ grantId: subscription.grantId, method: "subscription" });
+    expect((await service.select({ ...openAiInput, userId })).attribution).toMatchObject({ grantId: subscription.grantId, method: "subscription" });
     expect((await service.list(companyId, userId)).filter(account => account.isDefault).map(account => account.grantId)).toEqual([subscription.grantId]);
     await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, subscription.grantId));
-    await create(userId, "Rolling second API");
-    await expect(service.select({ ...input, userId })).rejects.toThrow("Reconnect");
+    await createOpenAiApiKey(userId, "Rolling second API");
+    await expect(service.select({ ...openAiInput, userId })).rejects.toThrow("Reconnect");
     await db.update(aiConnectionDefaults).set({ grantId: api.grantId, updatedAt: new Date() })
       .where(and(eq(aiConnectionDefaults.userId, userId), eq(aiConnectionDefaults.method, "api_key")));
-    expect((await service.select({ ...input, userId })).grant.id).toBe(api.grantId);
+    expect((await service.select({ ...openAiInput, userId })).grant.id).toBe(api.grantId);
   });
   it("checks the selected environment for project auth overrides without exposing their contents", async () => {
     const execute = vi.spyOn(executionTarget, "runAdapterExecutionTargetProcess");
@@ -225,15 +252,18 @@ describe("managed AI connections", () => {
     expect(await service.credential(selected)).toBe("fixture-Shared credential proof");
   });
   it("saves successful login completion once and rejects abandoned attempts", async () => {
+    const userId = "login-completion-user";
+    await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
     const [environment] = await db.insert(environments).values({ name: "AI login test", driver: "sandbox" }).returning();
-    const intent = { provider: "anthropic", method: "subscription", ownership: "personal", name: "Claude subscription", agentIds: [], allAgents: true } as const;
+    const intent = { provider: "openai", method: "subscription", ownership: "personal", name: "OpenAI subscription", agentIds: [], allAgents: true } as const;
     const sessionId = randomUUID();
-    await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id, adapterType: "claude_local", startedByUserId: "alice", publicSessionId: sessionId, status: "submitting", aiConnection: { ...intent, agentIds: [] }, expiresAt: new Date(Date.now() + 60000) });
-    const first = await service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-subscription", sessionId);
-    expect(await service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-subscription", sessionId)).toEqual(first);
+    await db.insert(adapterAuthSessions).values({ id: sessionId, companyId, environmentId: environment.id, adapterType: "codex_local", startedByUserId: userId, publicSessionId: sessionId, status: "promoting", aiConnection: { ...intent, agentIds: [] }, expiresAt: new Date(Date.now() + 60000) });
+    const first = await service.save(companyId, userId, { ...intent, agentIds: [] }, openAiSubscriptionCredential("login"), sessionId);
+    expect(await service.save(companyId, userId, { ...intent, agentIds: [] }, openAiSubscriptionCredential("login"), sessionId)).toEqual(first);
+    await db.update(adapterAuthSessions).set({ status: "authenticated" }).where(eq(adapterAuthSessions.id, sessionId));
     const cancelled = randomUUID();
-    await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id, adapterType: "claude_local", startedByUserId: "alice", publicSessionId: cancelled, status: "cancelled", expiresAt: new Date(Date.now() + 60000) });
-    await expect(service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-never-save", cancelled)).rejects.toThrow("no longer active");
+    await db.insert(adapterAuthSessions).values({ id: cancelled, companyId, environmentId: environment.id, adapterType: "codex_local", startedByUserId: userId, publicSessionId: cancelled, status: "cancelled", expiresAt: new Date(Date.now() + 60000) });
+    await expect(service.save(companyId, userId, { ...intent, agentIds: [] }, "fixture-never-save", cancelled)).rejects.toThrow("no longer active");
   });
   it("preserves connection identity and defaults through reconnect; revocation wins over older attempts", async () => {
     const current = await service.select({ ...input, userId: "bob" });
@@ -282,13 +312,11 @@ describe("managed AI connections", () => {
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     expect(agent.runtimeConfig.aiConnection).toBeUndefined();
   });
-  it("runs two Claude subscription executions for the same grant at the same time", async () => {
-    // Claude writes no auth file back to the grant, so two runs share no
+  it("runs two Claude API-key executions for the same grant at the same time", async () => {
+    // An API key writes no auth file back to the grant, so two runs share no
     // mutable state and must not wait for each other.
-    const subscription = { ...input, binding: { ...binding, method: "subscription" as const }, responsibleUserId: "alice", config: { model: "same-model" } };
-    const account = (await service.list(companyId, "alice")).find(account => account.provider === "anthropic" && account.method === "subscription")!;
-    await service.setDefault(companyId, "alice", account.grantId);
-    const [first, second] = await Promise.all([prepareManagedAiRuntime(db, subscription), prepareManagedAiRuntime(db, subscription)]);
+    const apiKeyRun = { ...input, responsibleUserId: "alice", config: { model: "same-model" } };
+    const [first, second] = await Promise.all([prepareManagedAiRuntime(db, apiKeyRun), prepareManagedAiRuntime(db, apiKeyRun)]);
     try {
       expect(second.identity).toBe(first.identity);
     } finally {
@@ -472,8 +500,8 @@ describe("managed AI connections", () => {
     await expect(service.select({ ...input, agentId: otherAgent, userId: "bob", binding: { ...binding, method: selected.attribution.method, mode: "delegated", connectionId: selected.connection.id, grantId: selected.grant.id } })).rejects.toThrow("not shared");
     const [environment] = await db.select().from(environments).limit(1);
     const sessionId = randomUUID();
-    const intent = { provider: "anthropic", method: "subscription", ownership: "personal", name: "Expired", agentIds: [], allAgents: true } as const;
-    await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id, adapterType: "claude_local", startedByUserId: "alice", publicSessionId: sessionId, status: "submitting", aiConnection: { ...intent, agentIds: [] }, expiresAt: new Date(Date.now() - 1000) });
+    const intent = { provider: "xai", method: "subscription", ownership: "personal", name: "Expired", agentIds: [], allAgents: true } as const;
+    await db.insert(adapterAuthSessions).values({ id: sessionId, companyId, environmentId: environment.id, adapterType: "grok_local", startedByUserId: "alice", publicSessionId: sessionId, status: "promoting", aiConnection: { ...intent, agentIds: [] }, expiresAt: new Date(Date.now() - 1000) });
     await expect(service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-never-save", sessionId)).rejects.toThrow("no longer active");
     expect((await service.list(companyId, "alice")).some(account => account.name === "Expired")).toBe(false);
   });
@@ -502,7 +530,7 @@ describe("managed AI connections", () => {
       expect(network).not.toHaveBeenCalled();
     } finally { network.mockRestore(); }
   });
-  it("imports only for the local operator and preserves identity and permissions on reconnect", async () => {
+  it("never imports a Claude sign-in and preserves identity and permissions on an isolated reconnect", async () => {
     const reader = vi.spyOn(localCredentials, "readVerifiedLocalAiCredential").mockResolvedValue("fixture-local-token");
     const app = express();
     app.use(express.json());
@@ -513,32 +541,22 @@ describe("managed AI connections", () => {
     app.use("/api", aiConnectionRoutes(db));
     app.use((error: { status?: number; message: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => { res.status(error.status ?? 500).json({ error: error.message }); });
     const url = `/api/companies/${companyId}/ai-connections/local`;
-    const payload = { provider: "anthropic", method: "subscription", name: "Local account test", ownership: "personal", agentIds: [agentId], allAgents: false };
+    const attempts = `${url}/attempts`;
+    const claude = { provider: "anthropic", method: "subscription", name: "Local account test", ownership: "personal", agentIds: [agentId], allAgents: false };
     try {
-      expect((await request(app).post(url).send(payload)).status).toBe(403);
+      // Neither the local operator nor a member can import a Claude sign-in.
+      for (const local of ["no", "yes"]) {
+        for (const endpoint of [url, `${url}/check`, attempts]) {
+          const result = await request(app).post(endpoint).set("x-local", local).send(claude);
+          expect(result.status).toBe(422);
+          expect(result.body.error).toBe(CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE);
+        }
+      }
       expect(reader).not.toHaveBeenCalled();
-      expect((await request(app).post(`${url}/check`).send(payload)).status).toBe(403);
-      expect(reader).not.toHaveBeenCalled();
-      const checked = await request(app).post(`${url}/check`).set("x-local", "yes").send(payload);
-      expect(checked.status).toBe(200);
-      expect(checked.body).toEqual({ status: "ready" });
-      expect((await service.list(companyId, "alice")).some(c => c.name === payload.name)).toBe(false);
-      const connected = await request(app).post(url).set("x-local", "yes").send(payload);
-      expect(connected.status).toBe(201);
-      expect(JSON.stringify(connected.body)).not.toContain("fixture-local-token");
-      const before = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connected.body.connectionId));
-      expect(before.map(i => [i.targetType, i.targetId])).toEqual([["agent", agentId]]);
-      const reconnected = await request(app).post(url).set("x-local", "yes").send({ ...payload, connectionId: connected.body.connectionId, allAgents: true });
-      expect(reconnected.status).toBe(201);
-      expect(reconnected.body).toEqual(connected.body);
-      const after = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connected.body.connectionId));
-      expect(after).toEqual(before);
-      reader.mockRejectedValueOnce(Object.assign(new Error("Sign in locally and retry"), { status: 422 }));
-      const failed = await request(app).post(url).set("x-local", "yes").send({ ...payload, name: "Unsuccessful local login" });
-      expect(failed.status).toBe(422);
-      expect((await service.list(companyId, "alice")).some(c => c.name === "Unsuccessful local login")).toBe(false);
-      const codex = { ...payload, provider: "openai", name: "Isolated terminal login" };
-      const attempts = `${url}/attempts`;
+      expect((await service.list(companyId, "alice")).some(c => c.name === claude.name)).toBe(false);
+      expect((await request(app).post(`/api/companies/${otherCompanyId}/ai-connections/local`).send(claude)).status).toBe(403);
+
+      const codex = { ...claude, provider: "openai", name: "Isolated terminal login" };
       expect((await request(app).post(attempts).send(codex)).status).toBe(403); // This member cannot authorize agentId.
       expect((await request(app).post(url).set("x-local", "yes").send(codex)).status).toBe(422);
       const prepared = await request(app).post(attempts).set("x-local", "yes").send(codex);
@@ -546,11 +564,34 @@ describe("managed AI connections", () => {
       expect(prepared.body.command).toMatch(/^\(export CODEX_HOME=.* && mkdir -p .* && codex -c .* login --device-auth\)$/);
       expect((await request(app).post(attempts).set("x-local", "yes").send(codex)).body).toEqual(prepared.body);
       expect((await request(app).delete(`${attempts}/${prepared.body.sessionId}`).set("x-test-user", "bob").send()).status).toBe(404);
-      expect((await request(app).delete(`${attempts}/${prepared.body.sessionId}`).set("x-local", "yes").send()).status).toBe(200);
-      expect((await request(app).post(url).set("x-local", "yes").send({ ...codex, localSessionId: prepared.body.sessionId })).status).toBe(422);
+      const connected = await request(app).post(url).set("x-local", "yes").send({ ...codex, localSessionId: prepared.body.sessionId });
+      expect(connected.status).toBe(201);
+      expect(JSON.stringify(connected.body)).not.toContain("fixture-local-token");
+      const before = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connected.body.connectionId));
+      expect(before.map(i => [i.targetType, i.targetId])).toEqual([["agent", agentId]]);
+
+      // A reconnect signs in again in its own isolated home and keeps identity and installs.
+      const reconnect = { ...codex, connectionId: connected.body.connectionId, allAgents: true };
+      const again = await request(app).post(attempts).set("x-local", "yes").send(reconnect);
+      expect(again.status).toBe(201);
+      const reconnected = await request(app).post(url).set("x-local", "yes").send({ ...reconnect, localSessionId: again.body.sessionId });
+      expect(reconnected.status).toBe(201);
+      expect(reconnected.body).toEqual(connected.body);
+      const after = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connected.body.connectionId));
+      expect(after).toEqual(before);
+
+      const unsuccessful = { ...codex, name: "Unsuccessful local login" };
+      const failedAttempt = await request(app).post(attempts).set("x-local", "yes").send(unsuccessful);
+      expect(failedAttempt.status).toBe(201);
+      reader.mockRejectedValueOnce(Object.assign(new Error("Sign in locally and retry"), { status: 422 }));
+      const failed = await request(app).post(url).set("x-local", "yes").send({ ...unsuccessful, localSessionId: failedAttempt.body.sessionId });
+      expect(failed.status).toBe(422);
+      expect((await service.list(companyId, "alice")).some(c => c.name === "Unsuccessful local login")).toBe(false);
+      expect((await request(app).delete(`${attempts}/${failedAttempt.body.sessionId}`).set("x-local", "yes").send()).status).toBe(200);
+      expect((await request(app).post(url).set("x-local", "yes").send({ ...unsuccessful, localSessionId: failedAttempt.body.sessionId })).status).toBe(422);
     } finally { reader.mockRestore(); }
   });
-  it.each(["anthropic", "openai"] as const)("blocks server-host %s login on a public deployment without a trusted host", async provider => {
+  it.each(["openai", "xai"] as const)("blocks server-host %s login on a public deployment without a trusted host", async provider => {
     const reader = vi.spyOn(localCredentials, "readVerifiedLocalAiCredential");
     const app = express();
     app.use(express.json());
@@ -571,7 +612,7 @@ describe("managed AI connections", () => {
       expect(reader).not.toHaveBeenCalled();
     } finally { reader.mockRestore(); }
   });
-  it.each(["anthropic", "openai"] as const)("lets authenticated users connect only their own isolated %s login", async provider => {
+  it.each(["openai", "xai"] as const)("lets authenticated users connect only their own isolated %s login", async provider => {
     const owner = `self-hosted-${provider}`;
     await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
     const reader = vi.spyOn(localCredentials, "readVerifiedLocalAiCredential").mockResolvedValue("isolated-fixture-token");
@@ -590,7 +631,7 @@ describe("managed AI connections", () => {
       const started = await request(app).post(`${base}/attempts`).send(intent);
       expect(started.status).toBe(201);
       expect(started.headers["cache-control"]).toBe("no-store");
-      expect(started.body.command).toContain(provider === "anthropic" ? "CLAUDE_CONFIG_DIR=" : "login --device-auth");
+      expect(started.body.command).toContain("login --device-auth");
       expect((await request(app).post(`${base}/attempts`).send(intent)).body).toEqual(started.body);
       const input = { ...intent, localSessionId: started.body.sessionId };
       for (const endpoint of [base, `${base}/check`]) {

@@ -461,7 +461,7 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
   // credential is entered.
   // -------------------------------------------------------------------------
 
-  it.each([false, true])("offers both Anthropic methods without the obsolete REST option (task repair: %s)", async (taskRepair) => {
+  it.each([false, true])("offers only the Anthropic API key without the obsolete REST option (task repair: %s)", async (taskRepair) => {
     const createAiAccount = vi.spyOn(aiConnectionsApi, "create").mockResolvedValue({
       connectionId: "anthropic-ai-account", grantId: "anthropic-ai-grant",
     });
@@ -485,9 +485,11 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     expect(container.textContent).not.toContain("How do you want to connect?");
     expect(radioContaining("Use an API key")).toBeUndefined();
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    await act(async () => buttonContaining("Use API key instead")!.click());
-    await act(async () => buttonContaining("Claude")!.click());
-    await flushReact();
+    // A Claude subscription is the claude CLI signed in on the server; it is
+    // never connected here, so the step asks only for an API key.
+    expect(buttonContaining("Use subscription instead")).toBeUndefined();
+    expect(buttonContaining("Use API key instead")).toBeUndefined();
+    expect(container.textContent).toContain("Provide your Claude API key to connect");
     const key = container.querySelector<HTMLInputElement>('input[type="password"]');
     expect(key).toBeTruthy();
     await act(async () => setInputValue(key!, "fixture-anthropic-ai-key"));

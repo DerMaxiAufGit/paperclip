@@ -11,13 +11,6 @@ import type {
   AdapterAuthSignalResponse,
   AdapterAuthSessionResponse,
   AdapterAuthSessionOwnerResponse,
-  ClaudeSetupTokenSessionResponse,
-  ClaudeSetupTokenSessionOwnerResponse,
-  ClaudeSetupTokenSessionPrompt,
-  ClaudeSetupTokenCompletionResponse,
-  ClaudeSetupTokenOverwrite,
-  ClaudeOAuthTokenStatusResponse,
-  SubmitBrowserCodeRequest,
   AgentKeyCreated,
   AgentRuntimeState,
   AgentTaskSession,
@@ -50,15 +43,6 @@ export interface DetectedAdapterModel {
   provider: string;
   source: string;
   candidates?: string[];
-}
-
-export interface ClaudeLoginResult {
-  exitCode: number | null;
-  signal: string | null;
-  timedOut: boolean;
-  loginUrl: string | null;
-  stdout: string;
-  stderr: string;
 }
 
 export interface OrgNode {
@@ -270,8 +254,6 @@ export const agentsApi = {
     }
     throw new Error(result.message ?? "Retry was skipped.");
   },
-  loginWithClaude: (id: string, companyId?: string) =>
-    api.post<ClaudeLoginResult>(agentPath(id, companyId, "/claude-login"), {}),
   startAdapterAuthLogin: (
     companyId: string,
     type: string,
@@ -300,59 +282,6 @@ export const agentsApi = {
   cancelAdapterAuthLogin: (companyId: string, type: string, sessionId: string) =>
     api.post<AdapterAuthSessionOwnerResponse>(
       `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/login-sessions/${encodeURIComponent(sessionId)}/cancel`,
-      {},
-    ),
-  // The Claude submitted-browser-code login uses the company-and-environment
-  // setup-token routes. The route fixes the `claude_local` adapter. The start
-  // response carries the panel mode; the authorization URL rides only through the
-  // guarded prompt read. The completion response carries a non-secret
-  // `storedSessionId` claim and no token.
-  // Reads the stored Claude OAuth token status for the authenticated owner. A
-  // 200 carries only the secret id and the latest version; a 404 means the owner
-  // has no stored value (indistinguishable from a foreign value). The client
-  // applies the stored token first and captures the version for a later
-  // version-checked overwrite.
-  getClaudeOAuthTokenStatus: (companyId: string) =>
-    api.get<ClaudeOAuthTokenStatusResponse>(
-      `/companies/${encodeURIComponent(companyId)}/claude-oauth-token-status`,
-    ),
-  startClaudeSetupTokenLogin: (
-    companyId: string,
-    data: { environmentId: string; overwrite?: ClaudeSetupTokenOverwrite; aiConnection?: import("@paperclipai/shared").AiConnectionLoginIntent },
-  ) =>
-    api.post<ClaudeSetupTokenSessionOwnerResponse>(
-      `/companies/${encodeURIComponent(companyId)}/setup-token-login-sessions`,
-      { adapterType: "claude_local", ...data },
-    ),
-  getClaudeSetupTokenLoginStatus: (companyId: string, sessionId: string) =>
-    api.get<ClaudeSetupTokenSessionResponse>(
-      `/companies/${encodeURIComponent(companyId)}/setup-token-login-sessions/${encodeURIComponent(sessionId)}`,
-    ),
-  // Reads the caller's active Claude setup-token login session, with no
-  // session id, so the browser rediscovers its own session after a reload with
-  // no local state. A 404 means no active session for the caller.
-  getActiveClaudeSetupTokenLoginSession: (companyId: string) =>
-    api.get<ClaudeSetupTokenSessionOwnerResponse>(
-      `/companies/${encodeURIComponent(companyId)}/setup-token-login-sessions/active`,
-      { cache: "no-store" },
-    ),
-  getClaudeSetupTokenLoginPrompt: (companyId: string, sessionId: string) =>
-    api.get<ClaudeSetupTokenSessionPrompt>(
-      `/companies/${encodeURIComponent(companyId)}/setup-token-login-sessions/${encodeURIComponent(sessionId)}/prompt`,
-    ),
-  submitClaudeSetupTokenBrowserCode: (companyId: string, sessionId: string, browserCode: string) =>
-    api.post<ClaudeSetupTokenSessionResponse>(
-      `/companies/${encodeURIComponent(companyId)}/setup-token-login-sessions/${encodeURIComponent(sessionId)}/code`,
-      { browserCode } satisfies SubmitBrowserCodeRequest,
-    ),
-  completeClaudeSetupTokenLogin: (companyId: string, sessionId: string) =>
-    api.post<ClaudeSetupTokenCompletionResponse>(
-      `/companies/${encodeURIComponent(companyId)}/setup-token-login-sessions/${encodeURIComponent(sessionId)}/completion`,
-      {},
-    ),
-  cancelClaudeSetupTokenLogin: (companyId: string, sessionId: string) =>
-    api.post<void>(
-      `/companies/${encodeURIComponent(companyId)}/setup-token-login-sessions/${encodeURIComponent(sessionId)}/cancel`,
       {},
     ),
   availableSkills: () =>

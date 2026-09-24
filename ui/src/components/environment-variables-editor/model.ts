@@ -1,4 +1,5 @@
 import type { CompanySecret, EnvBinding, SecretVersionSelector, UserSecretDefinition } from "@paperclipai/shared";
+import { CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE, isClaudeSubscriptionTokenEnvKey } from "@paperclipai/shared";
 
 export type RowSource = "text" | "secret" | "user_secret";
 
@@ -134,33 +135,6 @@ export function valueFromRows(rows: EnvRow[]): Record<string, EnvBinding> | unde
   return Object.keys(record).length > 0 ? record : undefined;
 }
 
-// The fixed environment variable name for the Claude subscription OAuth token.
-// A subscription login stores the token as a user secret under this key. The
-// adapter reads the variable at run start.
-export const CLAUDE_OAUTH_TOKEN_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
-
-/**
- * Build the fixed `CLAUDE_CODE_OAUTH_TOKEN` binding. The binding is a
- * `user_secret_ref`, so the adapter config holds a reference to the user secret,
- * never the token value. This reuses the editor `user_secret_ref` builder in
- * {@link valueFromRows}, so the fixed binding keeps the same shape as an
- * operator-authored user-secret row.
- */
-export function buildFixedClaudeOAuthBinding(): Record<string, EnvBinding> {
-  return (
-    valueFromRows([
-      {
-        ...emptyRow("user_secret"),
-        name: CLAUDE_OAUTH_TOKEN_ENV_KEY,
-        userSecretKey: CLAUDE_OAUTH_TOKEN_ENV_KEY,
-        required: true,
-        version: "latest",
-      },
-    ]) ?? {}
-  );
-}
-
-
 export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export type NameIssueLevel = "error" | "warn";
@@ -185,6 +159,10 @@ export function validateName(
   }
   if (duplicateNames.has(trimmed)) {
     return { level: "error", message: "Duplicate name" };
+  }
+  // The server rejects the Claude subscription token key; say so while typing.
+  if (isClaudeSubscriptionTokenEnvKey(trimmed)) {
+    return { level: "error", message: CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE };
   }
   for (const prefix of reservedPrefixes) {
     if (prefix && trimmed.startsWith(prefix)) {

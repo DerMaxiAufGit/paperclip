@@ -5,12 +5,16 @@ import {
   ENVIRONMENT_LEASE_STATUSES,
   ENVIRONMENT_STATUSES,
 } from "../constants.js";
-import { envConfigSchema } from "./secret.js";
+import { envConfigWithoutClaudeSubscriptionTokenSchema } from "./secret.js";
 
 export const environmentDriverSchema = z.enum(ENVIRONMENT_DRIVERS);
 export const environmentStatusSchema = z.enum(ENVIRONMENT_STATUSES);
 export const environmentLeaseStatusSchema = z.enum(ENVIRONMENT_LEASE_STATUSES);
 export const environmentLeaseCleanupStatusSchema = z.enum(ENVIRONMENT_LEASE_CLEANUP_STATUSES);
+
+// The environment env-var map. It rejects the Claude subscription token key, so
+// an environment never carries a Claude subscription credential.
+const environmentEnvVarsSchema = envConfigWithoutClaudeSubscriptionTokenSchema;
 
 const environmentFields = {
   name: z.string().min(1),
@@ -18,7 +22,7 @@ const environmentFields = {
   driver: environmentDriverSchema,
   status: environmentStatusSchema.optional().default("active"),
   config: z.record(z.string(), z.unknown()).optional().default({}),
-  envVars: envConfigSchema.optional().default({}),
+  envVars: environmentEnvVarsSchema.optional().default({}),
   metadata: z.record(z.string(), z.unknown()).optional().nullable(),
 };
 
@@ -31,7 +35,7 @@ export const updateEnvironmentSchema = z.object({
   driver: environmentDriverSchema.optional(),
   status: environmentStatusSchema.optional(),
   config: z.record(z.string(), z.unknown()).optional(),
-  envVars: envConfigSchema.optional(),
+  envVars: environmentEnvVarsSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional().nullable(),
 }).strict();
 export type UpdateEnvironment = z.infer<typeof updateEnvironmentSchema>;
@@ -41,7 +45,7 @@ export const probeEnvironmentConfigSchema = z.object({
   description: z.string().optional().nullable(),
   driver: environmentDriverSchema,
   config: z.record(z.string(), z.unknown()).optional().default({}),
-  envVars: envConfigSchema.optional().default({}),
+  envVars: environmentEnvVarsSchema.optional().default({}),
   metadata: z.record(z.string(), z.unknown()).optional().nullable(),
 }).strict();
 export type ProbeEnvironmentConfig = z.infer<typeof probeEnvironmentConfigSchema>;

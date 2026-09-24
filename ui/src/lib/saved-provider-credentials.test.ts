@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { CompanySecret } from "@paperclipai/shared";
+import type { AiManagedConnectionSummary, CompanySecret } from "@paperclipai/shared";
 import type { MyUserSecretEntry } from "../api/secrets";
 import {
   savedProviderKeys,
   savedCodexSubscriptions,
+  savedManagedProviderAccounts,
 } from "./saved-provider-credentials";
 const secret = (overrides = {}) =>
   ({
@@ -90,6 +91,46 @@ it("lists only active company Codex account connections", () => {
       id: "company:s1",
       label: "ChatGPT account · team",
       binding: { type: "secret_ref", secretId: "s1", version: "latest" },
+    },
+  ]);
+});
+
+it("never reuses a saved Claude subscription connection, only Claude API keys", () => {
+  const connection = (overrides: Partial<AiManagedConnectionSummary>): AiManagedConnectionSummary => ({
+    id: "claude-sub",
+    grantId: "grant-sub",
+    companyId: "c1",
+    provider: "anthropic",
+    method: "subscription",
+    name: "My Claude subscription",
+    ownership: "personal",
+    ownerUserId: "u1",
+    isDefault: true,
+    status: "connected",
+    ...overrides,
+  });
+  expect(
+    savedManagedProviderAccounts("c1", "anthropic", "u1", [
+      connection({}),
+      connection({ id: "claude-shared", grantId: "grant-shared", ownership: "shared", isDefault: false }),
+      connection({ id: "claude-key", grantId: "grant-key", method: "api_key", name: "My Claude API" }),
+    ]),
+  ).toEqual([
+    {
+      id: "ai:grant-key",
+      label: "My Claude API (Your default)",
+      aiConnection: { provider: "anthropic", method: "api_key", mode: "responsible_user" },
+    },
+  ]);
+  expect(
+    savedManagedProviderAccounts("c1", "openai", "u1", [
+      connection({ provider: "openai", name: "My ChatGPT subscription" }),
+    ]),
+  ).toEqual([
+    {
+      id: "ai:grant-sub",
+      label: "My ChatGPT subscription (Your default)",
+      aiConnection: { provider: "openai", method: "subscription", mode: "responsible_user" },
     },
   ]);
 });

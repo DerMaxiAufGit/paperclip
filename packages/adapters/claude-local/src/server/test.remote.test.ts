@@ -48,7 +48,6 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
 });
 
 import { testEnvironment } from "./test.js";
-import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
 import { resetClaudeCliCapabilitiesCacheForTests } from "./cli-capabilities.js";
 
 const sandboxTarget: AdapterExecutionTarget = {
@@ -85,6 +84,10 @@ const sshTarget: AdapterExecutionTarget = {
   },
 };
 
+// Remote targets need an Anthropic API key; the Claude subscription is limited
+// to the claude CLI signed in on the Paperclip host.
+const REMOTE_API_KEY_ENV = { ANTHROPIC_API_KEY: "sk-ant-remote-fixture" };
+
 const initLine =
   '{"type":"system","subtype":"init","cwd":"/home/daytona/paperclip-workspace","session_id":"abc","tools":["Bash","Read"]}';
 
@@ -98,45 +101,29 @@ afterEach(() => {
   resetClaudeCliCapabilitiesCacheForTests();
 });
 
-describe("claude sandbox auth-missing check", () => {
-  it("emits the canonical adapter_auth_missing check when a sandbox hello probe reports missing auth", async () => {
-    // The sandbox has no ready login, so the hello probe returns a
-    // login-required result. The Test must emit the neutral canonical check
-    // code. The user interface reads this code to decide login eligibility; it
-    // does not parse the message text or the top-level status.
+describe("claude remote auth-required check", () => {
+  it.each([
+    ["sandbox", sandboxTarget],
+    ["SSH", sshTarget],
+  ])("reports a rejected credential on a %s target without offering an in-environment login", async (_label, target) => {
+    // A remote target authenticates with an API key. When the hello probe
+    // reports that login is required, the key was rejected. Claude offers no
+    // in-environment login, so the Test never emits the adapter_auth_missing
+    // login gate and points the operator at ANTHROPIC_API_KEY instead.
     probeResult.value = { exitCode: 1, stdout: loginRequiredStdout, stderr: "" };
 
     const result = await testEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
-      executionTarget: sandboxTarget,
-      environmentName: "Daytona",
+      config: { engine: "cli", command: "claude", env: REMOTE_API_KEY_ENV },
+      executionTarget: target,
+      environmentName: "Remote",
     });
 
-    // A missing-auth probe is a warning, not a failure, so the environment stays
-    // testable and the user interface can offer login.
     expect(result.status).toBe("warn");
-    expect(result.checks.some((check) => check.code === ADAPTER_AUTH_MISSING_CHECK_CODE)).toBe(true);
-    // The descriptive probe check stays, so existing diagnostics keep working.
-    expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(true);
-  });
-
-  it("does not emit adapter_auth_missing when a non-sandbox remote probe reports missing auth", async () => {
-    // Only a sandbox target can start login. A non-sandbox remote target keeps
-    // the descriptive probe check but does not carry the neutral login code.
-    probeResult.value = { exitCode: 1, stdout: loginRequiredStdout, stderr: "" };
-
-    const result = await testEnvironment({
-      companyId: "company-1",
-      adapterType: "claude_local",
-      config: { engine: "cli", command: "claude" },
-      executionTarget: sshTarget,
-      environmentName: "Remote host",
-    });
-
-    expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(true);
-    expect(result.checks.some((check) => check.code === ADAPTER_AUTH_MISSING_CHECK_CODE)).toBe(false);
+    const authRequired = result.checks.find((check) => check.code === "claude_hello_probe_auth_required");
+    expect(authRequired?.hint).toContain("ANTHROPIC_API_KEY");
+    expect(result.checks.some((check) => check.code === "adapter_auth_missing")).toBe(false);
   });
 });
 
@@ -155,6 +142,7 @@ describe("claude CLI model compatibility check", () => {
         engine: "cli",
         command: "claude",
         model: "claude-fable-5-1",
+        env: REMOTE_API_KEY_ENV,
       },
       executionTarget: sandboxTarget,
       environmentName: "Daytona",
@@ -174,5 +162,61 @@ describe("claude CLI model compatibility check", () => {
       string[],
     ];
     expect(versionCall[3]).toEqual(["--version"]);
+  });
+});
+
+describe("claude remote API key requirement", () => {
+  const REMOTE_MESSAGE =
+    "Claude on remote targets needs an Anthropic API key; subscription use is limited to the claude CLI signed in on this server.";
+
+  it.each([
+    ["SSH", sshTarget],
+    ["sandbox", sandboxTarget],
+  ])("fails the %s Test before any probe when no API key is configured", async (_label, target) => {
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: { engine: "cli", command: "claude" },
+      executionTarget: target,
+      environmentName: "Remote",
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.checks).toEqual([
+      expect.objectContaining({ code: "adapter_engine_unavailable", level: "error", message: REMOTE_MESSAGE }),
+    ]);
+    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
+    expect(ensureAdapterExecutionTargetDirectory).not.toHaveBeenCalled();
+  });
+
+  it("fails an unset engine on a remote target the same way", async () => {
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: { command: "claude" },
+      executionTarget: sshTarget,
+      environmentName: "Remote",
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.checks[0]).toMatchObject({ code: "adapter_engine_unavailable", message: REMOTE_MESSAGE });
+  });
+
+  it("accepts Bedrock provider auth on a remote target", async () => {
+    probeResult.value = {
+      exitCode: 0,
+      stdout: [initLine, '{"type":"result","subtype":"success","is_error":false,"result":"hello","session_id":"abc"}'].join("\n"),
+      stderr: "",
+    };
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: { engine: "cli", command: "claude", env: { CLAUDE_CODE_USE_BEDROCK: "1" } },
+      executionTarget: sshTarget,
+      environmentName: "Remote",
+    });
+
+    expect(result.checks.some((check) => check.code === "adapter_engine_unavailable")).toBe(false);
+    expect(result.checks.some((check) => check.code === "claude_bedrock_auth")).toBe(true);
   });
 });

@@ -7,11 +7,6 @@ import type { AdapterEnvironmentCheck } from "@paperclipai/adapter-utils";
  */
 export const ADAPTER_TEST_HOST_TARGET_LABEL = "Paperclip host";
 
-// The login hint may show a login URL. The URL must be a normalized https URL
-// with an allowlisted Claude or Anthropic host and no query or fragment. A host
-// matches when it equals a suffix or ends with a dot and the suffix.
-const ALLOWED_LOGIN_URL_HOST_SUFFIXES = ["anthropic.com", "claude.ai"] as const;
-
 // A JavaScript error class name is a bounded identifier. The bound stops a very
 // large or crafted class name from filling the log.
 const MAX_ERROR_CLASS_NAME_CHARS = 64;
@@ -72,9 +67,8 @@ function sanitizeErrorClassName(name: string | null | undefined): string | null 
 /**
  * Send a sandbox probe or config materialization diagnostic to the server log.
  *
- * Three Test-lane call sites use this helper:
+ * Two Test-lane call sites use this helper:
  *   - the Claude CLI Test lane (`test.ts`),
- *   - the Claude ACP Test lane (`acp.ts`),
  *   - the managed-config materialization step (`claude-config.ts`).
  *
  * Contract: no untrusted text reaches the log. The helper logs only the fixed
@@ -109,48 +103,16 @@ export function logSandboxProbeDiagnostic(
 }
 
 /**
- * Normalize an untrusted login URL for a Test-result hint.
- *
- * The extractor reads the URL from raw sandbox stdout or stderr, so the value is
- * untrusted. The function accepts the URL only when every rule holds:
- *   - the protocol is `https`,
- *   - the host equals or ends with an allowlisted Claude or Anthropic host,
- *   - the URL has no user, password, or port,
- *   - the URL has no query and no fragment.
- *
- * The function returns the normalized URL string, or `null` when any rule
- * fails. The caller shows a fixed `claude login` hint when the function returns
- * `null`.
+ * Build the fixed hint for a Test-result check that reports Claude is not
+ * signed in. Paperclip never offers or relays a Claude sign-in. On the
+ * Paperclip host the `claude` CLI signs in through its own flow, run by the
+ * user Paperclip runs as. A remote target authenticates with an Anthropic API
+ * key only.
  */
-export function normalizeClaudeLoginUrl(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "https:") return null;
-  if (url.username || url.password || url.port) return null;
-  if (url.search || url.hash) return null;
-  const host = url.hostname.toLowerCase();
-  const allowed = ALLOWED_LOGIN_URL_HOST_SUFFIXES.some(
-    (suffix) => host === suffix || host.endsWith(`.${suffix}`),
-  );
-  if (!allowed) return null;
-  return url.toString();
-}
-
-/**
- * Build the fixed auth-required hint for a Test-result check. When the login URL
- * normalizes to a safe value, the hint names it. Otherwise the hint tells the
- * operator to run `claude login`.
- */
-export function buildClaudeLoginRequiredHint(loginUrl: string | null | undefined): string {
-  const safeUrl = normalizeClaudeLoginUrl(loginUrl);
-  return safeUrl
-    ? `Run \`claude login\` and complete sign-in at ${safeUrl}, then retry.`
-    : "Run `claude login` in this environment, then retry the probe.";
+export function buildClaudeLoginRequiredHint(input: { targetIsRemote: boolean }): string {
+  return input.targetIsRemote
+    ? "Remote targets use an Anthropic API key. Set a valid ANTHROPIC_API_KEY for this agent, then retry the Test."
+    : "On the Paperclip host, run `claude` as the user Paperclip runs as and enter `/login` to sign in, then retry the Test.";
 }
 
 /**

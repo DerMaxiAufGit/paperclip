@@ -59,7 +59,6 @@ const meta: Meta = {
         if (url.pathname.endsWith("/ai-connections/local/check")) return Response.json({ status: "sign_in_required" });
         if (url.pathname.endsWith("/ai-connections") && (!init?.method || init.method === "GET")) return Response.json({ currentUserId: pending.addresseeUserId, connections: [] });
         if (url.pathname.includes("/secrets")) return Response.json([]);
-        if (url.pathname.includes("claude-oauth")) return Response.json(null);
       }
       if (url.pathname.endsWith("/tools/gallery")) return Response.json({
         apps: CONNECTABLE_APP_DEFINITIONS.filter((app) => ["notion", "github", "posthog", "zapier"].includes(app.slug)),
@@ -312,7 +311,14 @@ const missingAi = (provider: "anthropic" | "openai"): Story => ({
     await userEvent.click(await canvas.findByRole("button", { name: "Fix connection" }));
     await expect(await canvas.findByLabelText("Connection name")).toBeEnabled();
     await expect(within(document.body).queryByRole("dialog")).not.toBeInTheDocument();
-    await expect(await canvas.findByRole("radio", { name: `${provider === "anthropic" ? "Claude" : "OpenAI"} Subscription` })).toBeVisible();
+    if (provider === "anthropic") {
+      // Claude connects with an API key only; a Claude subscription is used
+      // through the claude CLI signed in on the server, never as a connection.
+      await expect(await canvas.findByText("Provide your Claude API key to connect")).toBeVisible();
+      await expect(canvas.queryByRole("button", { name: "Use subscription instead" })).not.toBeInTheDocument();
+    } else {
+      await expect(await canvas.findByRole("radio", { name: "OpenAI Subscription" })).toBeVisible();
+    }
   },
 });
 export const NewClaudeConnection = missingAi("anthropic");
@@ -321,9 +327,9 @@ export const NewCodexConnectionNarrow: Story = { ...NewCodexConnection, globals:
 export const NewClaudeApiConnection: Story = { ...NewClaudeConnection, play: async context => {
   await NewClaudeConnection.play!(context);
   const canvas = within(context.canvasElement);
-  await userEvent.click(canvas.getByRole("button", { name: "Use API key instead" }));
-  await userEvent.click(await canvas.findByRole("radio", { name: "Claude API" }));
-  await waitFor(() => expect(canvas.getByPlaceholderText("Enter API key here")).toBeVisible());
+  await userEvent.type(canvas.getByPlaceholderText("Enter API key here"), "storybook-placeholder");
+  await userEvent.click(canvas.getByRole("button", { name: "Connect" }));
+  await expect(await canvas.findByText("Claude connected")).toBeVisible();
 }};
 export const NewCodexConnectionComplete: Story = { ...NewCodexConnection, play: async context => {
   await NewCodexConnection.play!(context);

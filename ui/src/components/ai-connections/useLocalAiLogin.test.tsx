@@ -19,9 +19,9 @@ beforeEach(() => {
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
 afterEach(() => { flushSync(() => root.unmount()); host.remove(); });
-function Harness({ name = "Account", provider = "openai", enabled = true }: { name?: string; provider?: "anthropic" | "openai"; enabled?: boolean }) {
-  const login = useLocalAiLogin("company", { provider, method: "subscription", name, ownership: "personal", agentIds: [], allAgents: true }, enabled, { allowHostClaude: true });
-  return <><LocalProviderLoginInstructions adapterType={provider === "anthropic" ? "claude_local" : "codex_local"} login={login} /><button onClick={() => void login.connect()}>Connect</button></>;
+function Harness({ name = "Account", provider = "openai", enabled = true }: { name?: string; provider?: "openai" | "xai"; enabled?: boolean }) {
+  const login = useLocalAiLogin("company", { provider, method: "subscription", name, ownership: "personal", agentIds: [], allAgents: true }, enabled);
+  return <><LocalProviderLoginInstructions adapterType={provider === "xai" ? "grok_local" : "codex_local"} login={login} /><button onClick={() => void login.connect()}>Connect</button></>;
 }
 it("checks once under StrictMode, preserves renaming and navigation, and cancels only on explicit retry", async () => {
   flushSync(() => root.render(<StrictMode><Harness name="First name" /></StrictMode>));
@@ -42,14 +42,15 @@ it("checks once under StrictMode, preserves renaming and navigation, and cancels
   expect(api.cancelLocalLogin).toHaveBeenCalledTimes(1);
   expect(api.cancelLocalLogin.mock.invocationCallOrder[0]).toBeLessThan(api.startLocalLogin.mock.invocationCallOrder[1]);
 });
-it.each(["anthropic", "openai"] as const)("detects an already-signed-in %s account before showing instructions, and does not save it until Connect", async provider => {
+it.each(["openai", "xai"] as const)("detects an already-signed-in %s account in its isolated attempt, and does not save it until Connect", async provider => {
   api.checkLocalLogin.mockResolvedValue({ status: "ready" });
   flushSync(() => root.render(<Harness provider={provider} />));
   expect(host.textContent).toContain("Checking local");
   await vi.waitFor(() => expect(host.textContent).toContain("is signed in"));
   expect(host.textContent).not.toContain("Run this in a terminal");
   expect(api.connectLocal).not.toHaveBeenCalled();
-  if (provider === "anthropic") expect(api.startLocalLogin).not.toHaveBeenCalled();
+  expect(api.startLocalLogin).toHaveBeenCalledTimes(1);
+  expect(api.checkLocalLogin).toHaveBeenCalledWith("company", expect.objectContaining({ provider, localSessionId: "attempt-1" }));
 });
 it("detects terminal completion on focus without needing a Connect attempt", async () => {
   flushSync(() => root.render(<Harness />));

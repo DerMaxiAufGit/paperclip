@@ -7,7 +7,7 @@ import { BUILTIN_ADAPTER_TYPES } from "./builtin-adapter-types.js";
 const { probeInstallation } = vi.hoisted(() => ({ probeInstallation: vi.fn() }));
 vi.mock("@paperclipai/paperclip-runner/live", () => ({ probeAcpxClaudeInstallation: probeInstallation }));
 
-// The registry registers a login capability for the two built-in interactive
+// The registry registers a login capability for the two built-in device-login
 // adapters. The test checks the scalar values and the presence of the required
 // callbacks. It also runs the shared validator, so the built-in capabilities
 // obey the same fail-closed contract as an external adapter.
@@ -19,7 +19,6 @@ describe("built-in adapter login capabilities", () => {
     if (!capability) return;
     expect(capability.panelMode).toBe("displayed_code");
     expect(capability.timeoutPolicy).toBe("caller_bounded");
-    expect(capability.completionClaim).toBeUndefined();
     expect(typeof capability.getCommand).toBe("function");
     expect(typeof capability.parsePrompt).toBe("function");
     expect(() => assertValidAdapterLoginCapability(capability, "codex_local")).not.toThrow();
@@ -31,23 +30,15 @@ describe("built-in adapter login capabilities", () => {
     if (!capability) return;
     expect(capability.panelMode).toBe("displayed_code");
     expect(capability.timeoutPolicy).toBe("caller_bounded");
-    expect(capability.completionClaim).toBeUndefined();
     expect(typeof capability.getCommand).toBe("function");
     expect(typeof capability.parsePrompt).toBe("function");
     expect(() => assertValidAdapterLoginCapability(capability, "grok_local")).not.toThrow();
   });
 
-  it("registers the Claude setup-token capability", () => {
-    const capability = requireServerAdapter("claude_local").loginCapability;
-    expect(capability).toBeDefined();
-    if (!capability) return;
-    expect(capability.panelMode).toBe("submitted_browser_code");
-    expect(capability.timeoutPolicy).toBe("fixed");
-    expect(capability.completionClaim).toBe("storedSessionId");
-    expect(typeof capability.getCommand).toBe("function");
-    expect(typeof capability.parsePrompt).toBe("function");
-    expect(typeof capability.captureCredential).toBe("function");
-    expect(() => assertValidAdapterLoginCapability(capability, "claude_local")).not.toThrow();
+  it("registers no in-app login capability for claude_local", () => {
+    // Claude subscriptions run through the `claude` CLI signed in on the server,
+    // so Paperclip offers no in-app Claude login.
+    expect(requireServerAdapter("claude_local").loginCapability).toBeUndefined();
   });
 });
 

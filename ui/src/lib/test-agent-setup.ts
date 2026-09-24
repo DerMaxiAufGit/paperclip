@@ -35,6 +35,32 @@ export async function testAgentSetup(input: {
     !["claude_local", "codex_local"].includes(input.providerAdapter)
   )
     return runtime;
+  // A Paperclip Runner's Claude lane (ACPX / Agent SDK) never runs on a Claude
+  // subscription. Without an API key the claude_local CLI probe below would
+  // pass on the server's own claude sign-in, which the runner cannot use.
+  if (input.adapterType === "paperclip_runner" && input.providerAdapter === "claude_local") {
+    const env = (input.adapterConfig.env ?? {}) as Record<string, unknown>;
+    const hasKey =
+      Boolean(input.testCredentials?.ANTHROPIC_API_KEY) ||
+      input.aiConnection?.provider === "anthropic" ||
+      Boolean(env.ANTHROPIC_API_KEY);
+    if (!hasKey) {
+      return {
+        adapterType: input.adapterType,
+        testedAt: runtime.testedAt,
+        status: "fail",
+        checks: [
+          ...runtime.checks,
+          {
+            code: ADAPTER_AUTH_MISSING_CHECK_CODE,
+            level: "error",
+            message:
+              "Claude on a Paperclip Runner (ACPX) needs an Anthropic API key. A Claude subscription works only with the local claude CLI engine.",
+          },
+        ],
+      };
+    }
+  }
   const provider = await agentsApi.testEnvironment(
     input.companyId,
     input.providerAdapter,

@@ -40,6 +40,8 @@ async function executeFailure(
       cwd: repoRoot,
       stateDir: path.join(root, "state"),
       env: {
+        // The ACP engine needs an Anthropic API key; it never runs on a subscription.
+        ANTHROPIC_API_KEY: "sk-ant-quota-fixture",
         PAPERCLIP_ACPX_TYPED_FAILURE_CANARY: title,
         PAPERCLIP_ACPX_TYPED_FAILURE_CATEGORY: category,
       },
