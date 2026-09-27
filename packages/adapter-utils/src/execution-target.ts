@@ -1466,6 +1466,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       workspaceLocalDir: input.workspaceLocalDir,
       workspaceRemoteDir: input.workspaceRemoteDir,
       syncWorkspace: input.syncWorkspace,
+      workspaceExclude: input.workspaceExclude,
       assets: input.assets,
       additionalSources: input.additionalSources,
       onProgress: input.onProgress,

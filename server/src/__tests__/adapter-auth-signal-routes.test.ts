@@ -122,6 +122,14 @@ vi.mock("../services/instance-settings.js", () => ({
   instanceSettingsService: () => mockInstanceSettingsService,
 }));
 
+const mockResolveClaudeSubscriptionEligibility = vi.hoisted(() =>
+  vi.fn(async (): Promise<Record<string, unknown>> => ({ allowed: true })),
+);
+vi.mock("../services/claude-subscription-policy.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/claude-subscription-policy.js")>()),
+  resolveClaudeSubscriptionEligibility: mockResolveClaudeSubscriptionEligibility,
+}));
+
 vi.mock("@paperclipai/adapter-claude-local/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@paperclipai/adapter-claude-local/server")>();
   return {
@@ -343,6 +351,21 @@ describe("adapter auth-signal route", () => {
     expect(mockReadClaudeAuthStatus).toHaveBeenCalledOnce();
     // The route reads no stored credential and resolves no secret for the host.
     expect(mockSecretService.resolveEnvBindings).not.toHaveBeenCalled();
+  });
+
+  it("reports subscription_not_allowed for claude_local on an instance with other users, without probing", async () => {
+    mockResolveClaudeSubscriptionEligibility.mockResolvedValueOnce({
+      allowed: false,
+      reason: "subscription_not_allowed",
+      message: "owner only",
+    });
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "absent", reason: "subscription_not_allowed" });
+    expect(mockProbeClaudeCliAuth).not.toHaveBeenCalled();
   });
 
   it("returns absent for claude_local when the local claude CLI reports it is not signed in", async () => {

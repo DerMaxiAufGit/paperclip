@@ -113,6 +113,12 @@ export async function prepareRemoteManagedRuntime(input: {
   workspaceLocalDir: string;
   workspaceRemoteDir?: string;
   syncWorkspace?: boolean;
+  /**
+   * Workspace-relative paths that are neither uploaded nor synced back (for
+   * example the Claude sign-in files of a config dir inside the workspace). A
+   * local file under an excluded path is never touched by the restore.
+   */
+  workspaceExclude?: string[];
   assets?: RemoteManagedRuntimeAsset[];
   /** Referenced (additional) projects to stage as plain, read-only trees. */
   additionalSources?: SandboxAdditionalSource[];
@@ -133,19 +139,26 @@ export async function prepareRemoteManagedRuntime(input: {
     : baseWorkspaceRemoteDir;
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
 
+  const workspaceExclude = [...new Set(input.workspaceExclude ?? [])].filter((entry) => entry.length > 0);
   const preparedWorkspace = syncWorkspace
     ? await prepareWorkspaceForSshExecution({
         spec: input.spec,
         localDir: input.workspaceLocalDir,
         remoteDir: workspaceRemoteDir,
+        exclude: workspaceExclude,
         onProgress: input.onProgress,
       })
     : null;
+  // tar matches an exclude pattern at any directory depth, so the baseline (and
+  // the restore, which reuses its excludes) also skips each excluded path at any
+  // depth (`*/<path>`). Otherwise the restore would read a nested file tar left
+  // out as deleted remotely and remove it locally.
+  const baselineWorkspaceExclude = workspaceExclude.flatMap((entry) => [entry, `*/${entry}`]);
   const baselineSnapshot = preparedWorkspace
     ? await captureDirectorySnapshot(input.workspaceLocalDir, {
         exclude: preparedWorkspace.gitBacked
-          ? [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"]
-          : [".paperclip-runtime"],
+          ? [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime", ...baselineWorkspaceExclude]
+          : [".paperclip-runtime", ...baselineWorkspaceExclude],
       })
     : null;
 

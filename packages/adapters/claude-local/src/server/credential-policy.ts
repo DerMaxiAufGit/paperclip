@@ -1,5 +1,18 @@
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { parseObject } from "@paperclipai/adapter-utils/server-utils";
+import {
+  CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE,
+  CLAUDE_SUBSCRIPTION_OWNER_ONLY_MESSAGE,
+  CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS as SHARED_CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS,
+  isClaudeSubscriptionTokenEnvKey,
+  isClaudeSubscriptionTokenValue,
+} from "@paperclipai/shared";
+
+export {
+  CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE,
+  CLAUDE_SUBSCRIPTION_OWNER_ONLY_MESSAGE,
+  isClaudeSubscriptionTokenValue,
+};
 
 /**
  * Claude subscription use is limited to the official `claude` CLI engine
@@ -19,9 +32,10 @@ export const CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE =
 /**
  * Environment keys that carry a Claude subscription credential. Paperclip never
  * forwards them to any engine or execution target, the local CLI lane included:
- * the local `claude` binary uses its own sign-in.
+ * the local `claude` binary uses its own sign-in. A subscription token value
+ * (`sk-ant-oat…`) is dropped under any other key too.
  */
-export const CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS: readonly string[] = ["CLAUDE_CODE_OAUTH_TOKEN"];
+export const CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS: readonly string[] = SHARED_CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS;
 
 export type ClaudeCredentialPolicyEngine = "cli" | "acp";
 
@@ -30,10 +44,13 @@ function providerFlagSet(value: string): boolean {
 }
 
 /**
- * Prefix of a Claude subscription OAuth token (`claude setup-token`). Such a
- * token never counts as an API credential, whatever env key carries it.
+ * A non-empty credential value that is not a Claude subscription OAuth token
+ * (`sk-ant-oat…`, from `claude setup-token`). A subscription token never counts
+ * as an API credential, whatever env key carries it.
  */
-const CLAUDE_SUBSCRIPTION_TOKEN_PREFIX = "sk-ant-oat";
+function isApiCredentialValue(value: string): boolean {
+  return value.length > 0 && !isClaudeSubscriptionTokenValue(value);
+}
 
 /**
  * Settings that select a cloud provider but that the ACP child does not inherit
@@ -72,9 +89,8 @@ export function claudeRunHasApiCredential(input: {
     const inherited = hostEnv[key];
     return typeof inherited === "string" ? inherited.trim() : "";
   };
-  if (read("ANTHROPIC_API_KEY")) return true;
-  const authToken = read("ANTHROPIC_AUTH_TOKEN");
-  if (authToken && !authToken.startsWith(CLAUDE_SUBSCRIPTION_TOKEN_PREFIX)) return true;
+  if (isApiCredentialValue(read("ANTHROPIC_API_KEY"))) return true;
+  if (isApiCredentialValue(read("ANTHROPIC_AUTH_TOKEN"))) return true;
   if (providerFlagSet(read("CLAUDE_CODE_USE_BEDROCK"))) return true;
   for (const flag of CONFIG_ENV_ONLY_PROVIDER_FLAGS) {
     if (providerFlagSet(readConfigured(flag) ?? "")) return true;
@@ -168,7 +184,8 @@ function claudeGatewayBiller(baseUrl: string): string {
  * - `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX` or `_FOUNDRY`: `metered_api`, billed by
  *   that cloud provider. `ANTHROPIC_BEDROCK_BASE_URL` alone does not count,
  *   because Claude Code ignores it without `CLAUDE_CODE_USE_BEDROCK`.
- * - `ANTHROPIC_API_KEY`: `api`, billed by Anthropic.
+ * - `ANTHROPIC_API_KEY` (not a subscription `sk-ant-oat` token): `api`, billed
+ *   by Anthropic.
  * - A gateway `ANTHROPIC_AUTH_TOKEN` (not a subscription `sk-ant-oat` token):
  *   `metered_api`, biller from the `ANTHROPIC_BASE_URL` host.
  * - None of these: `subscription` only for the local CLI engine, which runs the
@@ -210,20 +227,84 @@ export function resolveClaudeBillingIdentity(input: {
   if (providerFlag("CLAUDE_CODE_USE_BEDROCK")) return identity("metered_api", CLAUDE_BEDROCK_BILLER);
   if (providerFlag("CLAUDE_CODE_USE_VERTEX")) return identity("metered_api", CLAUDE_VERTEX_BILLER);
   if (providerFlag("CLAUDE_CODE_USE_FOUNDRY")) return identity("metered_api", CLAUDE_FOUNDRY_BILLER);
-  if (read("ANTHROPIC_API_KEY")) return identity("api");
-  const authToken = read("ANTHROPIC_AUTH_TOKEN");
-  if (authToken && !authToken.startsWith(CLAUDE_SUBSCRIPTION_TOKEN_PREFIX)) {
+  if (isApiCredentialValue(read("ANTHROPIC_API_KEY"))) return identity("api");
+  if (isApiCredentialValue(read("ANTHROPIC_AUTH_TOKEN"))) {
     return identity("metered_api", claudeGatewayBiller(read("ANTHROPIC_BASE_URL")));
   }
   return input.engine === "cli" && !input.targetIsRemote ? identity("subscription") : identity("unknown");
 }
 
-/** Drop subscription credentials from an env map before any lane (local CLI, ACP, or remote) uses it. */
+/**
+ * Drop subscription credentials from an env map before any lane (local CLI,
+ * ACP, or remote) uses it: every entry whose key names a subscription token, and
+ * every entry whose string value is one (`sk-ant-oat…`), whatever its key.
+ */
 export function withoutClaudeSubscriptionTokens<T>(env: Record<string, T>): Record<string, T> {
   const result: Record<string, T> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS.includes(key.toUpperCase())) continue;
+    if (isClaudeSubscriptionTokenEnvKey(key)) continue;
+    if (isClaudeSubscriptionTokenValue(value)) continue;
     result[key] = value;
   }
   return result;
+}
+
+/**
+ * True when a claude_local run is on the Claude subscription lane: it runs on
+ * this server (local target) with no API credential, so the `claude` CLI uses
+ * the sign-in of the user Paperclip runs as. An explicit `engine=acp` run is not
+ * on the lane (the ACP credential gate refuses it without an API key). This is
+ * the lane the owner-only and trigger-source gates guard.
+ */
+export function isClaudeSubscriptionLaneRun(input: {
+  config: Record<string, unknown>;
+  /** The run's execution target, or `targetIsRemote` when only that is known. */
+  target?: AdapterExecutionTarget | null;
+  targetIsRemote?: boolean;
+  hostEnv?: NodeJS.ProcessEnv;
+}): boolean {
+  if (input.targetIsRemote === true || input.target?.kind === "remote") return false;
+  const rawEngine = typeof input.config.engine === "string" ? input.config.engine.trim().toLowerCase() : "";
+  const engine: ClaudeCredentialPolicyEngine = rawEngine === "acp" ? "acp" : "cli";
+  if (engine === "acp") return false;
+  const identity = resolveClaudeBillingIdentity({
+    engine,
+    targetIsRemote: false,
+    env: parseObject(input.config.env),
+    hostEnv: input.config.managedAiConnection ? {} : input.hostEnv,
+  });
+  return identity.billingType === "subscription";
+}
+
+/**
+ * True when a stored (not yet resolved) claude_local adapter config names an
+ * API credential: a set `ANTHROPIC_API_KEY` or gateway `ANTHROPIC_AUTH_TOKEN`
+ * binding (a literal that is not a subscription token, or a secret reference),
+ * or a Bedrock, Vertex or Foundry flag. Used where secrets are not resolved,
+ * for example to pick safe defaults when a chat endpoint is created. It does
+ * not read the host env.
+ */
+export function claudeConfigDeclaresApiCredential(config: Record<string, unknown>): boolean {
+  if (config.managedAiConnection) return true;
+  const env = parseObject(config.env);
+  const bindingIsCredential = (binding: unknown): boolean => {
+    if (typeof binding === "string") return isApiCredentialValue(binding.trim());
+    const record = parseObject(binding);
+    if (record.type === "plain") {
+      return typeof record.value === "string" && isApiCredentialValue(record.value.trim());
+    }
+    return record.type === "secret_ref" || record.type === "user_secret_ref";
+  };
+  const flagSet = (binding: unknown): boolean => {
+    const record = parseObject(binding);
+    const value = typeof binding === "string" ? binding : record.type === "plain" ? record.value : null;
+    return typeof value === "string" && providerFlagSet(value.trim());
+  };
+  return (
+    bindingIsCredential(env.ANTHROPIC_API_KEY) ||
+    bindingIsCredential(env.ANTHROPIC_AUTH_TOKEN) ||
+    flagSet(env.CLAUDE_CODE_USE_BEDROCK) ||
+    flagSet(env.CLAUDE_CODE_USE_VERTEX) ||
+    flagSet(env.CLAUDE_CODE_USE_FOUNDRY)
+  );
 }

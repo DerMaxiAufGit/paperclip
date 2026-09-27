@@ -121,6 +121,8 @@ describe("opencode remote environment diagnostics", () => {
         } : {}),
         env: {
           XDG_CONFIG_HOME: configHome,
+          // An Anthropic model needs an API key (no Claude subscription outside claude).
+          ANTHROPIC_API_KEY: "sk-ant-api03-fixture",
           ...(managed ? { OPENAI_API_KEY: "", OPENROUTER_API_KEY: "fixture", HOME: "/var/folders/qa-managed", XDG_DATA_HOME: "/var/folders/qa-managed/data" } : {}),
         },
       },
@@ -145,6 +147,7 @@ describe("opencode remote environment diagnostics", () => {
       | [string, AdapterExecutionTarget, string, string[], { cwd: string; env: Record<string, string> }]
       | undefined;
     expect(probeCall?.[4].cwd).toBe("/remote/workspace/.paperclip-runtime/runs/test/workspace");
+    expect(probeCall?.[4].env.OPENCODE_AUTH_CONTENT).toBe("{}");
     if (managed) {
       expect(probeCall?.[4].env.HOME).toContain("/remote/workspace/.paperclip-runtime/runs/test/workspace/.paperclip-runtime/opencode/managed-auth/");
       expect(probeCall?.[4].env.XDG_DATA_HOME).toBe(`${probeCall?.[4].env.HOME}/data`);

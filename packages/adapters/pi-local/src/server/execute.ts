@@ -53,9 +53,13 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import {
+  buildClaudeSubscriptionHarnessRefusal,
+  resolveClaudeSubscriptionHarnessViolation,
+} from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
 import { ensurePiModelConfiguredAndAvailable } from "./models.js";
-import { preparePiRuntimeConfig } from "./runtime-config.js";
+import { isPiAnthropicRun, PI_ANTHROPIC_API_KEY_ENV_KEYS, preparePiRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -329,10 +333,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
+  // Only the official claude binary may use a Claude subscription. Pi falls
+  // back to a stored Claude login when it has no key, so an Anthropic run needs
+  // an Anthropic API key in the env Pi gets: the host env plus the run env for a
+  // local run, the run env alone for a remote one. Extra args come after
+  // `--provider` and `--model`, so a provider or model there counts too.
+  const configuredExtraArgs = (() => {
+    const fromExtraArgs = asStringArray(config.extraArgs);
+    if (fromExtraArgs.length > 0) return fromExtraArgs;
+    return asStringArray(config.args);
+  })();
+  const anthropicRoute = isPiAnthropicRun({ model, extraArgs: configuredExtraArgs });
+  const subscriptionViolation = resolveClaudeSubscriptionHarnessViolation({
+    anthropicRoute,
+    env: executionTargetIsRemote ? env : { ...process.env, ...env },
+    apiKeyEnvKeys: PI_ANTHROPIC_API_KEY_ENV_KEYS,
+  });
+  if (subscriptionViolation) {
+    await onLog("stderr", `[paperclip] ${subscriptionViolation}\n`);
+    return buildClaudeSubscriptionHarnessRefusal(subscriptionViolation, { provider, model });
+  }
   // Materialize custom Pi providers (PAPERCLIP_PI_PROVIDERS) into a managed
   // PI_CODING_AGENT_DIR before runtimeEnv is computed, so both local validation
   // and the spawned Pi process resolve models against the managed models.json.
-  const preparedRuntimeConfig = await preparePiRuntimeConfig({ env });
+  // An Anthropic run also gets a managed dir without Pi's stored logins.
+  const preparedRuntimeConfig = await preparePiRuntimeConfig({
+    env,
+    hideStoredLogins: anthropicRoute,
+    targetIsRemote: executionTargetIsRemote,
+  });
   const localAgentConfigDir = preparedRuntimeConfig.agentConfigDir ?? "";
   if (localAgentConfigDir) {
     env.PI_CODING_AGENT_DIR = localAgentConfigDir;

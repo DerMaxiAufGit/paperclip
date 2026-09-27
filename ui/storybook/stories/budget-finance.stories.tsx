@@ -15,7 +15,6 @@ import { AccountingModelCard } from "@/components/AccountingModelCard";
 import { BillerSpendCard } from "@/components/BillerSpendCard";
 import { BudgetIncidentCard } from "@/components/BudgetIncidentCard";
 import { BudgetSidebarMarker, type BudgetSidebarMarkerLevel } from "@/components/BudgetSidebarMarker";
-import { ClaudeSubscriptionPanel } from "@/components/ClaudeSubscriptionPanel";
 import { CodexSubscriptionPanel } from "@/components/CodexSubscriptionPanel";
 import { FinanceBillerCard } from "@/components/FinanceBillerCard";
 import { FinanceKindCard } from "@/components/FinanceKindCard";
@@ -259,13 +258,6 @@ const providerWindowRows: Record<string, CostWindowSpendRow[]> = {
     { provider: "openrouter", biller: "openrouter", window: "7d", windowHours: 168, costCents: 31_560, inputTokens: 1_190_000, cachedInputTokens: 164_000, outputTokens: 338_000 },
   ],
 };
-
-const claudeQuotaWindows: QuotaWindow[] = [
-  { label: "Current session", usedPercent: 46, resetsAt: at(-180).toISOString(), valueLabel: null, detail: "Healthy session headroom for review tasks." },
-  { label: "Current week all models", usedPercent: 74, resetsAt: at(-5_300).toISOString(), valueLabel: null, detail: "Warning threshold after the release documentation run." },
-  { label: "Current week Opus only", usedPercent: 92, resetsAt: at(-5_300).toISOString(), valueLabel: null, detail: "Critical model-specific budget: route default work to Sonnet." },
-  { label: "Extra usage", usedPercent: null, resetsAt: null, valueLabel: "$18.40 overage", detail: "Overage billing is enabled for board-approved release checks." },
-];
 
 const codexQuotaWindows: QuotaWindow[] = [
   { label: "5h limit", usedPercent: 38, resetsAt: at(-92).toISOString(), valueLabel: null, detail: "Healthy short-window capacity." },
@@ -618,7 +610,7 @@ function BudgetFinanceMatrix() {
 
         <Section eyebrow="Providers" title="ProviderQuotaCard usage bars and subscription quota windows">
           <div className="grid gap-5 xl:grid-cols-3">
-            <CaseFrame title="Healthy provider" detail="Anthropic subscription usage still has room in short and weekly windows." tone="healthy">
+            <CaseFrame title="Healthy provider" detail="Anthropic spend and rolling windows; Claude has no subscription quota section." tone="healthy">
               <ProviderQuotaCard
                 provider="anthropic"
                 rows={providerRowsByProvider.anthropic}
@@ -627,8 +619,6 @@ function BudgetFinanceMatrix() {
                 weekSpendCents={3_870}
                 windowRows={providerWindowRows.anthropic}
                 showDeficitNotch={false}
-                quotaWindows={claudeQuotaWindows}
-                quotaSource="claude-cli"
               />
             </CaseFrame>
             <CaseFrame title="Warning provider" detail="Codex weekly usage is high and subscription overage has started." tone="warning">
@@ -731,17 +721,9 @@ function BudgetFinanceMatrix() {
           </div>
         </Section>
 
-        <Section eyebrow="Subscriptions" title="ClaudeSubscriptionPanel and CodexSubscriptionPanel status windows">
+        <Section eyebrow="Subscriptions" title="CodexSubscriptionPanel status windows">
           <div className="grid gap-5 xl:grid-cols-2">
-            <ClaudeSubscriptionPanel windows={claudeQuotaWindows} source="claude-cli" />
             <CodexSubscriptionPanel windows={codexQuotaWindows} source="codex-rpc" />
-          </div>
-          <div className="mt-5 grid gap-5 xl:grid-cols-2">
-            <ClaudeSubscriptionPanel
-              windows={[]}
-              source="claude-cli"
-              error="Claude CLI quota polling timed out after 10s. Last successful sample was 18 minutes ago."
-            />
             <CodexSubscriptionPanel
               windows={[]}
               source="codex-wham"

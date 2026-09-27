@@ -253,10 +253,14 @@ export interface AdapterEnvironmentTestResult {
 // `claude auth status` on this server, for claude_local.
 export type AdapterAuthSignal = "present" | "absent" | "unknown";
 
-// Why an "unknown" signal is unknown, when the route knows. "cli_missing" means
+// Why a signal is not "present", when the route knows. "cli_missing" means
 // the claude_local CLI binary is not installed (not on PATH) for the user
 // Paperclip runs as, so there is no sign-in to check yet.
-export type AdapterAuthSignalReason = "cli_missing";
+// "subscription_not_allowed" means this instance may not use the claude CLI
+// sign-in at all: Claude subscription runs are limited to the server owner's
+// own use, and this instance has other users. The agent needs an Anthropic API
+// key instead.
+export type AdapterAuthSignalReason = "cli_missing" | "subscription_not_allowed";
 
 export interface AdapterAuthSignalResponse {
   status: AdapterAuthSignal;

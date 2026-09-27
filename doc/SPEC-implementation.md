@@ -1196,16 +1196,22 @@ as execution. Codex CLI defaults permit workspace writes and network access for
 Paperclip coordination without disabling its sandbox; explicit operator
 restrictions and execution-target network denials remain effective.
 
-`claude_local` is the exception to the ACP default: an omitted engine or legacy
-`auto` value selects the Claude CLI engine, and ACP requires explicit
-`engine: "acp"`. The CLI engine runs the official `claude` binary headless
+`claude_local` is the exception to the ACP default. With an omitted engine or
+legacy `auto` value, the credential decides: a run on the Paperclip server with
+an Anthropic API credential uses ACP, and every other run (a local run without
+an API credential, and every remote run) uses the Claude CLI engine.
+`filesystemScope` or `networkScope` keeps an omitted engine on CLI; an explicit
+`engine` always wins. The CLI engine runs the official `claude` binary headless
 (`claude --print --output-format stream-json --verbose`) as the operating system
-user that runs Paperclip, so a local run uses that user's own Claude sign-in.
-The Claude ACP engine and every remote execution target (SSH, sandbox, runner)
-require an API credential (`ANTHROPIC_API_KEY`, or Bedrock/Vertex provider
-configuration). Without one, the run and the environment test fail before
-launch with an actionable error; the adapter never switches engines. See the
-Claude subscription boundary under "Managed AI authentication".
+user that runs Paperclip, so a local run without an API credential uses that
+user's own Claude sign-in. The Claude ACP engine and every remote execution
+target (SSH, sandbox, runner) require an API credential: `ANTHROPIC_API_KEY`, a
+gateway `ANTHROPIC_AUTH_TOKEN` that is not a `sk-ant-oat` subscription token, or
+Bedrock/Vertex/Foundry provider configuration (the Paperclip Runner's Claude
+lane accepts only `ANTHROPIC_API_KEY`). Without one, the run and the environment
+test fail before launch with an actionable error; the adapter never switches
+engines. See the Claude subscription boundary under "Managed AI
+authentication".
 
 ## 11.2 Process Adapter
 
@@ -1639,11 +1645,19 @@ Claude subscription boundary: Paperclip never reads, stores, forwards, or
 injects Claude subscription credentials. The Anthropic provider supports only
 the API-key method; there is no Claude subscription connect flow, host sign-in
 import, isolated Claude login home, or `claude setup-token` capture.
-`CLAUDE_CODE_OAUTH_TOKEN` is rejected as an env key everywhere Paperclip stores
-env (agent, project, routine, environment, issue override, and secret binding
-proposals), is skipped with an import warning when a company package declares
-it as an env input, and is removed from every child process, including ACP,
-SSH, and sandbox launches. Both `claude_local` engines share one billing
+Claude subscription tokens are the env keys `CLAUDE_CODE_OAUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_TOKEN`, and
+the sign-in handoff keys `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`,
+`CCR_OAUTH_TOKEN_FILE`, `CLAUDE_CODE_HOST_CREDS_FILE`, and
+`CLAUDE_CODE_SESSION_ACCESS_TOKEN` (any letter case), and any value that
+starts with `sk-ant-oat`, `sk-ant-ort`, or `sk-ant-sid`, under any key. They are rejected everywhere
+Paperclip stores env (agent, project, routine, environment, issue override, and
+secret binding proposals), a company or user secret rejects such a
+value, a token key is skipped with an import warning when a company package
+declares it as an env input, and they are removed from every child process,
+including ACP, SSH, sandbox, and runner launches and workspace runtime
+services. A `sk-ant-oat` value never
+counts as an API credential. Both `claude_local` engines share one billing
 classifier: a direct Anthropic API key is labelled `api` (biller `anthropic`);
 Bedrock, Vertex, or Foundry (`CLAUDE_CODE_USE_*`) is labelled `metered_api` with
 biller `aws_bedrock`, `google`, or `azure`; a gateway `ANTHROPIC_AUTH_TOKEN` is
@@ -1661,11 +1675,47 @@ still reports a sign-in (it may have expired). A run that used the ACP engine,
 an API credential, or a remote environment instead gets guidance to update the
 Anthropic API credential, because it never used the server sign-in. Paperclip has no route,
 UI button, or CLI command that starts a Claude sign-in, because it cannot pass
-a sign-in code back to the CLI. Claude subscription quota on the Costs page comes
-only from running `claude auth status` and the CLI's `/usage` panel. A database
-migration deletes previously stored Claude subscription connections, grants,
-env bindings, and secrets. This follows Anthropic's Claude Code legal and
-compliance terms for third-party developers.
+a sign-in code back to the CLI. The Costs page shows no Claude plan usage or
+quota windows; the only command Paperclip runs to ask the `claude` binary about
+its sign-in is `claude auth status`, for the sign-in panel. Migrations 0282 and
+0283 delete previously stored Claude subscription connections, grants, env
+bindings, and secrets, and remove token entries from stored env maps, issue
+overrides, and `hire_agent` approvals. They delete only database rows; a value
+held in an external secret provider stays there until the operator deletes it.
+
+The Claude subscription lane (a `claude_local` run on the Paperclip server with
+no API credential and no explicit `engine: "acp"`) is for the server owner's own
+use only:
+
+- Owner only. The lane is allowed when the deployment mode is `local_trusted`,
+  or when it is `authenticated` and the instance has at most one active human
+  user (an auth user other than the synthetic `local-board` principal with an
+  instance role or an active company membership; agents do not count).
+  Otherwise the run fails before any workspace or process work with
+  `configuration_incomplete` (reason `subscription_not_allowed`), the
+  environment Test reports `claude_subscription_not_allowed` without probing,
+  and the auth-signal route reports `absent` with reason
+  `subscription_not_allowed` instead of running `claude auth status`.
+- Trigger source. Even for the owner, the run fails before launch (reason
+  `claude_subscription_external_trigger`) when its wake came from a chat guest
+  not linked to a Paperclip user, from an inbound email, from a plugin
+  (`agents.invoke`, plugin agent sessions, plugin issue wakeups, and so plugin
+  webhooks, and comments, interaction responses and approval decisions a plugin
+  relays for a user), or from a task that a routine's public webhook trigger
+  created. A wake that no Paperclip user requested (such as the recovery
+  dispatch of a stranded task) is refused on a task that a plugin, an email, a
+  chat guest or a routine webhook created. Assignments and comments by a
+  Paperclip user, timers, scheduled routines, agent delegation, and linked chat
+  users stay allowed. A new chat endpoint for such an agent starts with
+  unlinked people turned off.
+- Other harnesses. Only the official `claude` binary may use a Claude
+  subscription. Hermes, OpenCode, and Pi refuse an Anthropic-provider run
+  without an Anthropic API key in the harness env (non-retryable
+  `adapter_engine_unavailable`) and hide their own stored logins for an allowed
+  run. Anthropic models reached through another provider are not affected.
+
+There is no concurrency cap on subscription runs. This follows Anthropic's
+Claude Code legal and compliance terms for third-party developers.
 ### Experimental task-bound email
 
 AgentMail channel connections extend the experimental conversation/task pipeline

@@ -3,7 +3,6 @@ import type { CostByProviderModel, CostWindowSpendRow, QuotaWindow } from "@pape
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { QuotaBar } from "./QuotaBar";
-import { ClaudeSubscriptionPanel } from "./ClaudeSubscriptionPanel";
 import { CodexSubscriptionPanel } from "./CodexSubscriptionPanel";
 import {
   billingTypeDisplayName,
@@ -123,9 +122,10 @@ export function ProviderQuotaCard({
     () => Math.max(...windowRows.map((r) => r.costCents), 0),
     [windowRows],
   );
-  const isClaudeQuotaPanel = provider === "anthropic";
   const isCodexQuotaPanel = provider === "openai" && quotaSource?.startsWith("codex-");
-  const supportsSubscriptionQuota = provider === "anthropic" || provider === "openai";
+  // Claude has no subscription quota section: Paperclip does not read Claude
+  // plan usage (that would mean reading the Claude sign-in or driving the CLI).
+  const supportsSubscriptionQuota = provider === "openai";
   const showSubscriptionQuotaSection =
     supportsSubscriptionQuota && (quotaLoading || quotaWindows.length > 0 || quotaError != null);
 
@@ -313,7 +313,7 @@ export function ProviderQuotaCard({
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
                   Subscription quota
                 </p>
-                {quotaSource && !isClaudeQuotaPanel && !isCodexQuotaPanel ? (
+                {quotaSource && !isCodexQuotaPanel ? (
                   <span className="text-(length:--text-nano) uppercase tracking-(--tracking-eyebrow) text-muted-foreground">
                     {quotaSourceDisplayName(quotaSource)}
                   </span>
@@ -321,8 +321,6 @@ export function ProviderQuotaCard({
               </div>
               {quotaLoading ? (
                 <QuotaPanelSkeleton />
-              ) : isClaudeQuotaPanel ? (
-                <ClaudeSubscriptionPanel windows={quotaWindows} source={quotaSource} error={quotaError} />
               ) : isCodexQuotaPanel ? (
                 <CodexSubscriptionPanel windows={quotaWindows} source={quotaSource} error={quotaError} />
               ) : (

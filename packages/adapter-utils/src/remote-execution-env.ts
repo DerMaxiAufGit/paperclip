@@ -1,15 +1,31 @@
+import {
+  CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS,
+  isClaudeSubscriptionTokenEnvKey,
+  isClaudeSubscriptionTokenValue,
+} from "@paperclipai/shared";
+
 /**
- * Environment keys that carry a Claude subscription credential. Paperclip never
- * passes them to a process it spawns, locally, over SSH, in a sandbox, or into
- * an ACP child, whether the value comes from the host process env or from the
- * caller env. The `claude` binary on the Paperclip host uses its own sign-in;
- * every other lane authenticates with an API key.
+ * Environment keys that carry a Claude subscription credential
+ * (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_TOKEN`).
+ * Paperclip never passes them to a process it spawns, locally, over SSH, in a
+ * sandbox, or into an ACP child, whether the value comes from the host process
+ * env or from the caller env. The `claude` binary on the Paperclip host uses its
+ * own sign-in; every other lane authenticates with an API key.
  */
-export const NEVER_FORWARDED_CHILD_ENV_KEYS: readonly string[] = ["CLAUDE_CODE_OAUTH_TOKEN"];
+export const NEVER_FORWARDED_CHILD_ENV_KEYS: readonly string[] = CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS;
 
 /** True when `key` (any letter case) must never reach a spawned process. */
 export function isNeverForwardedChildEnvKey(key: string): boolean {
-  return NEVER_FORWARDED_CHILD_ENV_KEYS.includes(key.trim().toUpperCase());
+  return isClaudeSubscriptionTokenEnvKey(key);
+}
+
+/**
+ * True when an env entry must never reach a spawned process: its key names a
+ * Claude subscription credential, or its value is a subscription token
+ * (`sk-ant-oat…`) under any key, for example `ANTHROPIC_API_KEY=sk-ant-oat…`.
+ */
+export function isNeverForwardedChildEnvEntry(key: string, value: unknown): boolean {
+  return isNeverForwardedChildEnvKey(key) || isClaudeSubscriptionTokenValue(value);
 }
 
 const REMOTE_EXECUTION_ENV_IDENTITY_KEYS = new Set([
@@ -48,7 +64,7 @@ export function sanitizeRemoteExecutionEnv(
 ): Record<string, string> {
   const sanitized: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (isNeverForwardedChildEnvKey(key)) continue;
+    if (isNeverForwardedChildEnvEntry(key, value)) continue;
     const normalizedKey = key.toUpperCase();
     if (!REMOTE_EXECUTION_ENV_IDENTITY_KEYS.has(normalizedKey)) {
       sanitized[key] = value;

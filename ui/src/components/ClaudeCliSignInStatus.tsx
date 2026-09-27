@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, CircleAlert, Loader2 } from "lucide-react";
 
+import { CLAUDE_SUBSCRIPTION_OWNER_ONLY_MESSAGE, isClaudeSubscriptionTokenValue } from "@paperclipai/shared";
 import { agentsApi } from "@/api/agents";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
@@ -21,7 +22,13 @@ export const CLAUDE_CLI_SIGN_IN_STEPS = [
   "Enter /login and finish the sign-in in your browser.",
 ] as const;
 
-export type ClaudeCliSignInState = "checking" | "signed_in" | "signed_out" | "cli_missing" | "unknown";
+export type ClaudeCliSignInState =
+  | "checking"
+  | "signed_in"
+  | "signed_out"
+  | "cli_missing"
+  | "not_allowed"
+  | "unknown";
 
 export function useClaudeCliSignIn(
   companyId: string | null | undefined,
@@ -40,7 +47,9 @@ export function useClaudeCliSignIn(
     ? "checking"
     : query.isError
       ? "unknown"
-      : query.data?.status === "present"
+      : query.data?.reason === "subscription_not_allowed"
+        ? "not_allowed"
+        : query.data?.status === "present"
         ? "signed_in"
         : query.data?.status === "absent"
           ? "signed_out"
@@ -60,6 +69,8 @@ function statusMessage(state: ClaudeCliSignInState): string {
       return "The claude CLI on this server is not signed in.";
     case "cli_missing":
       return "The claude CLI is not installed for the user Paperclip runs as on this server.";
+    case "not_allowed":
+      return CLAUDE_SUBSCRIPTION_OWNER_ONLY_MESSAGE;
     default:
       return "Could not confirm the claude CLI sign-in on this server.";
   }
@@ -87,7 +98,14 @@ export function ClaudeCliSignInStatus({
 }) {
   const { state, recheck, rechecking } = useClaudeCliSignIn(companyId, environmentId);
   const needsInstall = state === "cli_missing";
-  const needsSignIn = afterAuthFailure ? !needsInstall : state === "signed_out" || state === "unknown";
+  // On an instance with other users the server sign-in cannot be used at all,
+  // so signing in does not help: the agent needs an Anthropic API key.
+  const notAllowed = state === "not_allowed";
+  const needsSignIn = notAllowed
+    ? false
+    : afterAuthFailure
+      ? !needsInstall
+      : state === "signed_out" || state === "unknown";
   return (
     <div className={cn("border border-border px-4 py-4", className)} data-testid="claude-cli-sign-in-status">
       <p className="text-sm font-medium text-foreground">{CLAUDE_CLI_SIGN_IN_TITLE}</p>
@@ -195,9 +213,11 @@ export function claudeRunUsesApiCredential(input: {
   }
   const env =
     config.env && typeof config.env === "object" ? (config.env as Record<string, EnvBindingLike>) : {};
-  if (envBindingIsSet(env.ANTHROPIC_API_KEY)) return true;
-  const authToken = env.ANTHROPIC_AUTH_TOKEN;
-  if (envBindingIsSet(authToken) && !(plainEnvValue(authToken) ?? "").startsWith("sk-ant-oat")) return true;
+  // A subscription token (`sk-ant-oat…`) under either key is not an API credential.
+  const apiCredentialSet = (binding: EnvBindingLike) =>
+    envBindingIsSet(binding) && !isClaudeSubscriptionTokenValue(plainEnvValue(binding));
+  if (apiCredentialSet(env.ANTHROPIC_API_KEY)) return true;
+  if (apiCredentialSet(env.ANTHROPIC_AUTH_TOKEN)) return true;
   return (
     envFlagSet(env.CLAUDE_CODE_USE_BEDROCK) ||
     envFlagSet(env.CLAUDE_CODE_USE_VERTEX) ||

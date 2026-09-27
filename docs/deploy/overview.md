@@ -59,5 +59,24 @@ pnpm paperclipai configure --section server
 In every mode, a Claude subscription is used only by the `claude` CLI on the
 Paperclip server, signed in as the operating system user that runs Paperclip.
 Paperclip never stores or forwards the sign-in. Remote targets and the Claude
-ACP engine need an Anthropic API key. See
+ACP engine need an Anthropic API credential. See
 [Running Claude on a server](/adapters/claude-local#running-claude-on-a-server).
+
+The deployment mode decides whether that sign-in can be used at all, because
+it is for the server owner's own use only:
+
+| Mode | Claude subscription runs |
+|------|--------------------------|
+| `local_trusted` | Allowed |
+| `authenticated`, at most one active human user | Allowed |
+| `authenticated`, two or more active human users | Refused before launch; agents need an Anthropic API key |
+
+A human user is a user account with an instance role or an active company
+membership. Agents do not count. In every mode, a subscription run also fails
+before launch when a chat guest (a person not linked to a Paperclip user), an
+inbound email, a plugin (including a plugin webhook), or a routine's public
+webhook trigger started it, or when a system wake continues a task that one of
+these created. Only the official `claude` binary may use a Claude subscription:
+Hermes, OpenCode, and Pi need an Anthropic API key for Anthropic models. See
+[Who may use the subscription](/adapters/claude-local#who-may-use-the-subscription)
+and [Other adapters on the same server](/adapters/claude-local#other-adapters-on-the-same-server).

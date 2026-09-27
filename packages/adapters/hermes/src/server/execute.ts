@@ -19,6 +19,7 @@
  */
 
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import type {
@@ -41,6 +42,10 @@ import {
   stringifyPaperclipWakePayload,
   isPaperclipRecoveryWakePayload,
 } from "@paperclipai/adapter-utils/server-utils";
+import {
+  buildClaudeSubscriptionHarnessRefusal,
+  resolveClaudeSubscriptionHarnessViolation,
+} from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 
 import {
   HERMES_CLI,
@@ -52,9 +57,18 @@ import {
 
 import {
   detectModel,
+  isHermesAnthropicRunRoute,
   resolveProvider,
 } from "./detect-model.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
+
+/**
+ * Why an Anthropic run is refused although `hermes setup` stored a key: Paperclip
+ * counts only an ANTHROPIC_API_KEY in the agent or server env, never one in
+ * ~/.hermes/.env or config.yaml (the same files hold Claude sign-in tokens).
+ */
+export const HERMES_ANTHROPIC_KEY_LOCATION_HINT =
+  "Paperclip counts only an ANTHROPIC_API_KEY in this agent's env (or the server env). A key kept in ~/.hermes/.env or ~/.hermes/config.yaml does not count: move it into the agent env as a secret.";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -512,6 +526,32 @@ export async function execute(
   const wakePayloadJson = stringifyPaperclipWakePayload(ctxContext.paperclipWake);
   if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
 
+  // ── Claude subscription guard ──────────────────────────────────────────
+  // Only the official claude binary may use a Claude subscription. Hermes's
+  // Anthropic provider falls back to a Claude sign-in (its own OAuth login or
+  // the Claude Code credentials file) when it has no API key, so an Anthropic
+  // run needs ANTHROPIC_API_KEY in the env Hermes gets. Hermes ignores
+  // ANTHROPIC_AUTH_TOKEN and the Claude Code Bedrock/Vertex flags, so only the
+  // key counts. The spawn layer drops ANTHROPIC_TOKEN / CLAUDE_CODE_OAUTH_TOKEN
+  // and any sk-ant-oat value, which Hermes would otherwise prefer over the key.
+  // extraArgs come after `-m` and `--provider`, so they count too. Paperclip does
+  // not read ~/.hermes/.env (Hermes keeps Claude sign-in tokens there), so a key
+  // kept only in that file does not count.
+  const anthropicRoute = isHermesAnthropicRunRoute({
+    resolvedProvider,
+    detectedProvider: detectedConfig?.provider,
+    extraArgs,
+  });
+  const subscriptionViolation = resolveClaudeSubscriptionHarnessViolation({ anthropicRoute, env });
+  if (subscriptionViolation) {
+    await ctx.onLog("stderr", `[hermes] ${subscriptionViolation}\n`);
+    await ctx.onLog(
+      "stderr",
+      `[hermes] ${HERMES_ANTHROPIC_KEY_LOCATION_HINT}\n`,
+    );
+    return buildClaudeSubscriptionHarnessRefusal(subscriptionViolation, { provider: resolvedProvider, model });
+  }
+
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
     cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
@@ -557,14 +597,36 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
-    cwd,
-    env,
-    timeoutSec,
-    graceSec,
-    onLog: wrappedOnLog,
-    onSpawn: ctx.onSpawn,
-  });
+  // Hide the Claude Code sign-in from an Anthropic run: Hermes reads (and
+  // refreshes) `$CLAUDE_CONFIG_DIR/.credentials.json`, so point it at an empty
+  // private directory for this run. Its Anthropic provider then uses the key.
+  let hiddenClaudeConfigDir: string | null = null;
+  if (anthropicRoute) {
+    hiddenClaudeConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-no-claude-login-"));
+    env.CLAUDE_CONFIG_DIR = hiddenClaudeConfigDir;
+    await ctx.onLog(
+      "stdout",
+      "[hermes] Anthropic provider: using ANTHROPIC_API_KEY. The claude CLI sign-in is hidden from Hermes. " +
+        "Remove any ANTHROPIC_TOKEN from ~/.hermes/.env and any Anthropic OAuth login from `hermes auth`, " +
+        "because Hermes prefers those over the key.\n",
+    );
+  }
+
+  let result: Awaited<ReturnType<typeof runChildProcess>>;
+  try {
+    result = await runChildProcess(ctx.runId, hermesCmd, args, {
+      cwd,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog: wrappedOnLog,
+      onSpawn: ctx.onSpawn,
+    });
+  } finally {
+    if (hiddenClaudeConfigDir) {
+      await fs.rm(hiddenClaudeConfigDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");

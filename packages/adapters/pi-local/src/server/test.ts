@@ -19,7 +19,9 @@ import {
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
 } from "@paperclipai/adapter-utils/execution-target";
+import { resolveClaudeSubscriptionHarnessViolation } from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 import { discoverPiModelsCached } from "./models.js";
+import { isPiAnthropicRun, PI_ANTHROPIC_API_KEY_ENV_KEYS, preparePiRuntimeConfig } from "./runtime-config.js";
 import { parsePiJsonl } from "./parse.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
@@ -237,7 +239,41 @@ export async function testEnvironment(
     }
   }
 
-  if (canRunProbe && configuredModel) {
+  // Only the official claude binary may use a Claude subscription: an
+  // Anthropic model needs an Anthropic API key, the same gate `execute` applies
+  // (host plus agent env locally, the agent env alone on a remote target).
+  const configuredExtraArgs = (() => {
+    const fromExtraArgs = asStringArray(config.extraArgs);
+    if (fromExtraArgs.length > 0) return fromExtraArgs;
+    return asStringArray(config.args);
+  })();
+  const anthropicRoute = isPiAnthropicRun({ model: configuredModel, extraArgs: configuredExtraArgs });
+  const subscriptionViolation = resolveClaudeSubscriptionHarnessViolation({
+    anthropicRoute,
+    env: targetIsRemote ? env : runtimeEnv,
+    apiKeyEnvKeys: PI_ANTHROPIC_API_KEY_ENV_KEYS,
+  });
+  let probeBlocked = false;
+  if (subscriptionViolation) {
+    probeBlocked = true;
+    checks.push({
+      code: "pi_anthropic_api_key_required",
+      level: "error",
+      message: subscriptionViolation,
+      hint: "Add ANTHROPIC_API_KEY to this agent's environment as a secret, pick a non-Anthropic model, or use the Claude (claude_local) adapter. A key stored in Pi's auth.json does not count, because an Anthropic run hides Pi's stored logins.",
+    });
+  } else if (anthropicRoute && targetIsRemote) {
+    // A remote run gets an empty managed agent dir; the Test cannot ship one,
+    // so it does not probe with a login that may be stored on the target.
+    probeBlocked = true;
+    checks.push({
+      code: "pi_hello_probe_skipped_anthropic_remote",
+      level: "info",
+      message: "Skipped the hello probe for an Anthropic model on a remote target, so Pi cannot use a login stored there. Runs use a managed agent dir without stored logins.",
+    });
+  }
+
+  if (canRunProbe && configuredModel && !probeBlocked) {
     // Parse model for probe
     const provider = configuredModel.includes("/") 
       ? configuredModel.slice(0, configuredModel.indexOf("/")) 
@@ -259,6 +295,14 @@ export async function testEnvironment(
     args.push("--tools", "read");
     if (extraArgs.length > 0) args.push(...extraArgs);
 
+    // An Anthropic probe runs with a managed agent dir without Pi's stored
+    // logins, so it uses the API key like the run does.
+    const probeRuntimeConfig = anthropicRoute
+      ? await preparePiRuntimeConfig({ env, hideStoredLogins: true, targetIsRemote: false })
+      : null;
+    const probeEnv = probeRuntimeConfig?.agentConfigDir
+      ? { ...runtimeEnv, PI_CODING_AGENT_DIR: probeRuntimeConfig.agentConfigDir }
+      : runtimeEnv;
     try {
       const probe = await runAdapterExecutionTargetProcess(
         runId,
@@ -267,7 +311,7 @@ export async function testEnvironment(
         args,
         {
           cwd,
-          env: runtimeEnv,
+          env: probeEnv,
           timeoutSec: 60,
           graceSec: 5,
           onLog: async () => {},
@@ -326,6 +370,8 @@ export async function testEnvironment(
         detail: err instanceof Error ? err.message : String(err),
         hint: "Run `pi --mode json` manually in this working directory to debug.",
       });
+    } finally {
+      await probeRuntimeConfig?.cleanup().catch(() => undefined);
     }
   }
 

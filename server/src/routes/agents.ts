@@ -151,7 +151,8 @@ import {
   isTruthyRuntimeEnvValue,
   resolveWorktreeRunExecutionActivationState,
 } from "../services/instance-settings.js";
-import { probeClaudeCliAuth } from "@paperclipai/adapter-claude-local/server";
+import { isClaudeSubscriptionLaneRun, probeClaudeCliAuth } from "@paperclipai/adapter-claude-local/server";
+import { resolveClaudeSubscriptionEligibility } from "../services/claude-subscription-policy.js";
 import {
   DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
   DEFAULT_CODEX_LOCAL_MODEL,
@@ -3278,6 +3279,37 @@ export function agentRoutes(
             effectiveAdapterConfig.apiKey = req.body.testCredentials.API_SERVER_KEY;
           }
         }
+        // A claude_local Test on the Claude subscription lane runs the claude CLI
+        // signed in on this server (with a real model request). That lane is for
+        // the server owner's own use only, so refuse it before probing when the
+        // instance has other users.
+        if (
+          type === "claude_local" &&
+          !aiBinding &&
+          isClaudeSubscriptionLaneRun({ config: effectiveAdapterConfig, target: executionTarget })
+        ) {
+          const eligibility = await resolveClaudeSubscriptionEligibility(db);
+          if (!eligibility.allowed) {
+            releaseStatus = "failed";
+            const checks: AdapterEnvironmentCheck[] = [
+              ...(sandboxIdentityCheck ? [sandboxIdentityCheck] : []),
+              ...environmentEnvChecks,
+              {
+                code: "claude_subscription_not_allowed",
+                level: "error",
+                message: eligibility.message,
+                hint: "Add ANTHROPIC_API_KEY to this agent's environment as a secret.",
+              },
+            ];
+            res.json({
+              adapterType: type,
+              status: "fail",
+              checks,
+              testedAt: new Date().toISOString(),
+            } satisfies AdapterEnvironmentTestResult);
+            return;
+          }
+        }
         const managed = aiBinding ? await prepareManagedAiRuntime(db, { companyId, agentId: req.body.agentId ?? "", responsibleUserId: responsibleUserForAiRequest(req), adapterType: type, binding: aiBinding, config: effectiveAdapterConfig, allowUninstalledPersonal: !req.body.agentId, allowUninstalledShared: !req.body.agentId && await canInstallSharedAiConnectionForNewAgent(db, req, companyId, aiBinding) }) : null;
         let result;
         try {
@@ -3346,6 +3378,12 @@ export function agentRoutes(
         return { status: "unknown" };
       }
     }
+
+    // This server's claude CLI sign-in is for the server owner's own use only.
+    // On an instance with other users it cannot be used at all, so say so
+    // instead of reporting the sign-in state.
+    const eligibility = await resolveClaudeSubscriptionEligibility(db);
+    if (!eligibility.allowed) return { status: "absent", reason: eligibility.reason };
 
     const probe = await probeClaudeCliAuth();
     if (probe.binaryMissing) return { status: "unknown", reason: "cli_missing" };

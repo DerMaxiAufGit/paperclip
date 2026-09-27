@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
@@ -95,6 +96,8 @@ import { prepareClaudePromptBundle } from "./prompt-cache.js";
 import { buildClaudeExecutionPermissionArgs, claudeSandboxPermissionEnv } from "./permissions.js";
 import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import {
+  CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
+  claudeConfigCredentialWorkspaceExcludes,
   createClaudeAcpExecutor,
   resolveClaudeExecutionEngineForRun,
 } from "./acp.js";
@@ -559,13 +562,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       `[paperclip] Confining Claude with ${scopes} scope.\n`,
     );
   }
+  // A remote target runs only with an Anthropic API key, so no Claude sign-in
+  // ever leaves this server. A managed-home (sandbox) target always gets the
+  // sanitized config seed: an explicit CLAUDE_CONFIG_DIR is a host path that
+  // either cannot reach the sandbox or, inside the workspace, would carry its
+  // Claude sign-in along, so it is ignored there (as in the ACP lane).
   const useManagedRemoteClaudeConfig =
-    executionTargetIsRemote &&
-    adapterExecutionTargetUsesManagedHome(executionTarget) &&
-    (!hasExplicitClaudeConfigDir || Boolean(config.managedAiConnection));
+    executionTargetIsRemote && adapterExecutionTargetUsesManagedHome(executionTarget);
+  if (useManagedRemoteClaudeConfig && hasExplicitClaudeConfigDir && !config.managedAiConnection) {
+    await onLog(
+      "stderr",
+      `[paperclip] operator-provided CLAUDE_CONFIG_DIR=${String(configEnv.CLAUDE_CONFIG_DIR).trim()} is ignored on the remote target; seeding the managed Claude config instead (Claude sign-in files are never staged).\n`,
+    );
+  }
   const claudeConfigSeedDir = useManagedRemoteClaudeConfig
     ? config.managedAiConnection ? sharedClaudeConfigDir : await prepareClaudeConfigSeed(process.env, onLog, agent.companyId)
     : null;
+  // The sign-in files of every Claude config dir inside the workspace (the
+  // agent's CLAUDE_CONFIG_DIR, the server's, and ~/.claude when the workspace
+  // holds the home directory) are neither uploaded nor synced back.
+  const remoteWorkspaceExclude = executionTargetIsRemote
+    ? claudeConfigCredentialWorkspaceExcludes({
+        workspaceLocalDir: cwd,
+        configDirs: [
+          typeof configEnv.CLAUDE_CONFIG_DIR === "string" ? configEnv.CLAUDE_CONFIG_DIR : null,
+          process.env.CLAUDE_CONFIG_DIR,
+          path.join(os.homedir(), ".claude"),
+        ],
+      })
+    : [];
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
@@ -578,6 +603,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           adapterKey: "claude",
           timeoutSec,
           workspaceLocalDir: cwd,
+          ...(remoteWorkspaceExclude.length > 0 ? { workspaceExclude: remoteWorkspaceExclude } : {}),
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
           onProgress: (line) => onLog("stdout", line),
@@ -598,6 +624,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 key: "config-seed",
                 localDir: claudeConfigSeedDir,
                 followSymlinks: true,
+                // The managed seed holds no sign-in; a managed AI connection's
+                // config dir is staged without its sign-in files.
+                exclude: [...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES],
               }]
               : []),
           ],

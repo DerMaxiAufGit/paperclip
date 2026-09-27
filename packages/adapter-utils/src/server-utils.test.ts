@@ -613,6 +613,45 @@ describe("runChildProcess", () => {
     }
   });
 
+  it("drops every Claude subscription token key and token value from the child env", async () => {
+    const previous = process.env.PAPERCLIP_TEST_HOST_OAT;
+    process.env.PAPERCLIP_TEST_HOST_OAT = "sk-ant-oat01-host";
+    try {
+      const result = await runChildProcess(
+        randomUUID(),
+        process.execPath,
+        [
+          "-e",
+          "process.stdout.write(JSON.stringify({ apiKey: process.env.ANTHROPIC_API_KEY ?? null, oauth: process.env.ANTHROPIC_OAUTH_TOKEN ?? null, token: process.env.ANTHROPIC_TOKEN ?? null, host: process.env.PAPERCLIP_TEST_HOST_OAT ?? null, gateway: process.env.ANTHROPIC_AUTH_TOKEN ?? null }))",
+        ],
+        {
+          cwd: process.cwd(),
+          env: {
+            ANTHROPIC_API_KEY: "sk-ant-oat01-caller",
+            ANTHROPIC_OAUTH_TOKEN: "caller-oauth",
+            ANTHROPIC_TOKEN: "caller-token",
+            ANTHROPIC_AUTH_TOKEN: "gateway-token",
+          },
+          timeoutSec: 10,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        apiKey: null,
+        oauth: null,
+        token: null,
+        host: null,
+        gateway: "gateway-token",
+      });
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_TEST_HOST_OAT;
+      else process.env.PAPERCLIP_TEST_HOST_OAT = previous;
+    }
+  });
+
   it("waits for onSpawn before sending stdin to the child", async () => {
     const spawnDelayMs = 150;
     const startedAt = Date.now();

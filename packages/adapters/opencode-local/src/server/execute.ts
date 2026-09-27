@@ -59,7 +59,17 @@ import {
   requireOpenCodeModelId,
 } from "./models.js";
 import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
-import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
+import {
+  hideOpenCodeStoredLogins,
+  isOpenCodeAnthropicRun,
+  OPENCODE_ANTHROPIC_API_KEY_ENV_KEYS,
+  prepareOpenCodeRuntimeConfig,
+  prepareManagedOpenCodeRemoteHomes,
+} from "./runtime-config.js";
+import {
+  buildClaudeSubscriptionHarnessRefusal,
+  resolveClaudeSubscriptionHarnessViolation,
+} from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { resolveOpenCodeSkillsHome } from "./skills.js";
 
@@ -328,6 +338,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
+  // Only the official claude binary may use a Claude subscription. OpenCode can
+  // hold a Claude Pro/Max login, so an Anthropic model needs ANTHROPIC_API_KEY
+  // in the env OpenCode gets (host plus run env locally, the run env alone on a
+  // remote target), and the run hides OpenCode's stored logins. Extra args come
+  // after `--model`, so a model there counts too.
+  const configuredExtraArgs = (() => {
+    const fromExtraArgs = asStringArray(config.extraArgs);
+    if (fromExtraArgs.length > 0) return fromExtraArgs;
+    return asStringArray(config.args);
+  })();
+  const anthropicRoute = isOpenCodeAnthropicRun({ model, extraArgs: configuredExtraArgs });
+  const subscriptionViolation = resolveClaudeSubscriptionHarnessViolation({
+    anthropicRoute,
+    env: executionTargetIsRemote ? env : { ...process.env, ...env },
+    apiKeyEnvKeys: OPENCODE_ANTHROPIC_API_KEY_ENV_KEYS,
+  });
+  if (subscriptionViolation) {
+    await onLog("stderr", `[paperclip] ${subscriptionViolation}\n`);
+    return buildClaudeSubscriptionHarnessRefusal(subscriptionViolation, {
+      provider: parseModelProvider(model),
+      model,
+    });
+  }
+  if (anthropicRoute) {
+    hideOpenCodeStoredLogins(env);
+    await onLog(
+      "stdout",
+      "[paperclip] Anthropic model: OpenCode uses ANTHROPIC_API_KEY; its stored logins are hidden for this run.\n",
+    );
+  }
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
@@ -474,6 +514,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         graceSec,
       });
     }
+    // The remote refresh above re-applies the agent env; an agent-set
+    // OPENCODE_AUTH_CONTENT must not bring stored logins back.
+    if (anthropicRoute) hideOpenCodeStoredLogins(preparedRuntimeConfig.env);
     const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
     if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
       paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({

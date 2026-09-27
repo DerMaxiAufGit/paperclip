@@ -22,9 +22,6 @@ export {
   getQuotaWindows,
   probeClaudeCliAuth,
   readClaudeAuthStatus,
-  fetchClaudeCliQuota,
-  captureClaudeCliUsageText,
-  parseClaudeCliUsageText,
   claudeConfigDir,
 } from "./quota.js";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
@@ -97,6 +94,9 @@ export const sessionCodec: AdapterSessionCodec = {
   },
 };
 export {
+  CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE,
+  claudeConfigDeclaresApiCredential,
   claudeRunHasApiCredential,
+  isClaudeSubscriptionLaneRun,
   resolveClaudeDefaultEngine,
 } from "./credential-policy.js";

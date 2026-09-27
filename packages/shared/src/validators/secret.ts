@@ -46,21 +46,100 @@ export const envConfigSchema = z.record(z.string(), envBindingSchema);
 // Paperclip never reads, stores, or forwards a Claude subscription credential.
 // A Claude subscription runs through the `claude` CLI that is signed in on the
 // server; API-key access uses `ANTHROPIC_API_KEY`. So no env map (agent,
-// project, routine, environment) may carry the subscription token key, in any
-// letter case.
+// project, routine, environment) and no secret may carry a subscription token:
+// not under one of the env keys that name it (in any letter case), and not as a
+// value (`sk-ant-oat…`, `sk-ant-ort…`, `sk-ant-sid…`) under any key.
 export const CLAUDE_CODE_OAUTH_TOKEN_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
-export const CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE =
-  "CLAUDE_CODE_OAUTH_TOKEN is not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.";
 
-/** Returns true when `key` names the Claude subscription token env var (case-insensitive). */
+/**
+ * Env keys that carry a Claude subscription credential, or point the `claude`
+ * binary at one, compared in upper case: the OAuth access token
+ * (`claude setup-token`), the refresh-token sign-in
+ * (`CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, used with `CLAUDE_CODE_OAUTH_SCOPES`),
+ * the token file and file-descriptor handoffs, the host credentials file, and a
+ * remote session access token.
+ */
+export const CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS: readonly string[] = [
+  CLAUDE_CODE_OAUTH_TOKEN_ENV_KEY,
+  "ANTHROPIC_OAUTH_TOKEN",
+  "ANTHROPIC_TOKEN",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "CCR_OAUTH_TOKEN_FILE",
+  "CLAUDE_CODE_HOST_CREDS_FILE",
+  "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+];
+
+/** Prefix of a Claude subscription OAuth access token (`claude setup-token`, Claude.ai sign-in). */
+export const CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PREFIX = "sk-ant-oat";
+
+/**
+ * Prefixes of every Claude.ai credential value: the OAuth access token
+ * (`sk-ant-oat`), the OAuth refresh token (`sk-ant-ort`), and the Claude.ai
+ * session key (`sk-ant-sid`). Compared in lower case after trimming.
+ */
+export const CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PREFIXES: readonly string[] = [
+  CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PREFIX,
+  "sk-ant-ort",
+  "sk-ant-sid",
+];
+
+export const CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE =
+  "Claude subscription tokens (CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_REFRESH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_TOKEN, or any sk-ant-oat, sk-ant-ort or sk-ant-sid value) are not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.";
+
+/** Kept for existing imports; the message covers every subscription token key and value. */
+export const CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE = CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE;
+
+/**
+ * A claude_local run on the Claude subscription lane (the `claude` CLI signed
+ * in on this server, with no API credential) is limited to the server owner's
+ * own use. These messages explain why such a run was refused.
+ */
+export const CLAUDE_SUBSCRIPTION_OWNER_ONLY_MESSAGE =
+  "Claude subscription runs are limited to the server owner's own use. This instance has other users, so give this agent an Anthropic API key. Paperclip sees an API key, Bedrock, Vertex or Foundry only in the agent or server env, not in the claude CLI's settings.json or an apiKeyHelper, so set it there.";
+
+export const CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE =
+  "This run was started from outside Paperclip (chat guest, email, webhook or plugin). Claude subscription runs are for the server owner only; give this agent an Anthropic API key.";
+
+/** Returns true when `key` names a Claude subscription token env var (case-insensitive). */
 export function isClaudeSubscriptionTokenEnvKey(key: string): boolean {
-  return key.trim().toUpperCase() === CLAUDE_CODE_OAUTH_TOKEN_ENV_KEY;
+  return CLAUDE_SUBSCRIPTION_TOKEN_ENV_KEYS.includes(key.trim().toUpperCase());
 }
 
 /**
- * Adds one zod issue per env key that names the Claude subscription token. The
- * issue path is `[...pathPrefix, key]`. A non-object `env` adds no issue; the
- * env shape check reports that case.
+ * Returns true when `value` is a Claude subscription credential (`sk-ant-oat…`,
+ * `sk-ant-ort…` or `sk-ant-sid…`), whatever env key or secret carries it.
+ * Non-string values are never tokens.
+ */
+export function isClaudeSubscriptionTokenValue(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
+/**
+ * The literal value an env binding stores, for a legacy string binding or a
+ * `plain` binding. Secret references have no literal value here.
+ */
+function plainEnvBindingValue(binding: unknown): string | null {
+  if (typeof binding === "string") return binding;
+  if (typeof binding === "object" && binding !== null && !Array.isArray(binding)) {
+    const record = binding as Record<string, unknown>;
+    if (record.type === "plain" && typeof record.value === "string") return record.value;
+  }
+  return null;
+}
+
+/** True when an env entry (key and binding) carries a Claude subscription token. */
+export function isClaudeSubscriptionTokenEnvEntry(key: string, binding: unknown): boolean {
+  return isClaudeSubscriptionTokenEnvKey(key) || isClaudeSubscriptionTokenValue(plainEnvBindingValue(binding));
+}
+
+/**
+ * Adds one zod issue per env entry that carries a Claude subscription token: a
+ * key that names one, or a literal value that is one. The issue path is
+ * `[...pathPrefix, key]`. A non-object `env` adds no issue; the env shape check
+ * reports that case.
  */
 export function rejectClaudeSubscriptionTokenEnvKeys(
   env: unknown,
@@ -68,20 +147,35 @@ export function rejectClaudeSubscriptionTokenEnvKeys(
   pathPrefix: ReadonlyArray<string | number> = [],
 ): void {
   if (typeof env !== "object" || env === null || Array.isArray(env)) return;
-  for (const key of Object.keys(env)) {
-    if (!isClaudeSubscriptionTokenEnvKey(key)) continue;
+  for (const [key, binding] of Object.entries(env)) {
+    if (!isClaudeSubscriptionTokenEnvEntry(key, binding)) continue;
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE,
+      message: CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
       path: [...pathPrefix, key],
     });
   }
 }
 
+/** Adds an issue at `path` when a secret value is a Claude subscription token. */
+function rejectClaudeSubscriptionTokenSecretValue(
+  value: string | null | undefined,
+  ctx: z.RefinementCtx,
+  path: ReadonlyArray<string | number> = ["value"],
+): void {
+  if (!isClaudeSubscriptionTokenValue(value)) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+    path: [...path],
+  });
+}
+
 /**
  * The env map schema for every request that writes an env map (agent
  * adapterConfig.env, project env, routine env, environment envVars). It rejects
- * the Claude subscription token key in any letter case with a clean 400.
+ * a Claude subscription token key in any letter case, and a subscription token
+ * value under any key, with a clean 400.
  */
 export const envConfigWithoutClaudeSubscriptionTokenSchema = envConfigSchema.superRefine((env, ctx) => {
   rejectClaudeSubscriptionTokenEnvKeys(env, ctx);
@@ -99,6 +193,7 @@ export const createSecretSchema = z.object({
   providerMetadata: z.record(z.string(), z.unknown()).optional().nullable(),
   providerVersionRef: z.string().optional().nullable(),
 }).superRefine((value, ctx) => {
+  rejectClaudeSubscriptionTokenSecretValue(value.value, ctx);
   if ((value.managedMode ?? "paperclip_managed") === "external_reference") {
     if (!value.externalRef?.trim()) {
       ctx.addIssue({
@@ -136,6 +231,7 @@ function requireSecretRotationInput(
   },
   ctx: z.RefinementCtx,
 ) {
+  rejectClaudeSubscriptionTokenSecretValue(value.value, ctx);
   if (
     !value.value?.trim() &&
     !value.externalRef?.trim() &&
@@ -221,6 +317,7 @@ export const createUserSecretValueSchema = z.object({
   providerVersionRef: z.string().optional().nullable(),
   providerConfigId: z.string().guid().optional().nullable(),
 }).superRefine((value, ctx) => {
+  rejectClaudeSubscriptionTokenSecretValue(value.value, ctx);
   if (!value.definitionKey && !value.definitionId) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -245,6 +342,8 @@ export const updateUserSecretValueSchema = z.object({
   externalRef: z.string().min(1).optional().nullable(),
   providerVersionRef: z.string().min(1).optional().nullable(),
   providerConfigId: z.string().guid().optional().nullable(),
+}).superRefine((value, ctx) => {
+  rejectClaudeSubscriptionTokenSecretValue(value.value, ctx);
 });
 
 export type UpdateUserSecretValue = z.infer<typeof updateUserSecretValueSchema>;

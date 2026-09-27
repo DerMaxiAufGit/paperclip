@@ -239,6 +239,72 @@ describe("claude remote execution", () => {
     }));
   });
 
+  it("never uploads or syncs back the Claude sign-in files of a config dir inside the workspace", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-remote-signin-"));
+    cleanupDirs.push(rootDir);
+    // The workspace is the service user's home directory, which holds ~/.claude,
+    // and the agent also points CLAUDE_CONFIG_DIR at a directory inside it.
+    const workspaceDir = path.join(rootDir, "home");
+    await mkdir(path.join(workspaceDir, ".claude"), { recursive: true });
+    await writeFile(path.join(workspaceDir, ".claude", ".credentials.json"), "host-sign-in", "utf8");
+    vi.stubEnv("HOME", workspaceDir);
+    vi.stubEnv("CLAUDE_CONFIG_DIR", "");
+
+    await execute({
+      runId: "run-ssh-signin",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "cli",
+        command: "claude",
+        env: { ...REMOTE_API_KEY_ENV, CLAUDE_CONFIG_DIR: path.join(workspaceDir, "agent-claude") },
+      },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
+    const prepareInput = (prepareWorkspaceForSshExecution.mock.calls as unknown as unknown[][])[0]?.[0] as
+      | { localDir: string; exclude?: string[] }
+      | undefined;
+    expect(prepareInput?.localDir).toBe(workspaceDir);
+    expect(prepareInput?.exclude).toEqual(
+      expect.arrayContaining([
+        "agent-claude/.credentials.json",
+        "agent-claude/credentials.json",
+        ".claude/.credentials.json",
+        ".claude/credentials.json",
+      ]),
+    );
+    // The restore compares against a baseline that skips the same paths, so the
+    // local sign-in file is never treated as deleted remotely.
+    const restoreInput = (restoreWorkspaceFromSshExecution.mock.calls as unknown as unknown[][])[0]?.[0] as
+      | { baselineSnapshot?: { exclude: string[]; entries: Map<string, unknown> } }
+      | undefined;
+    expect(restoreInput?.baselineSnapshot?.exclude).toEqual(
+      expect.arrayContaining([".claude/.credentials.json", "*/.claude/.credentials.json"]),
+    );
+    expect(restoreInput?.baselineSnapshot?.entries.has(".claude/.credentials.json")).toBe(false);
+  });
+
   describe("CLI-lane billing label on a remote target", () => {
     async function runRemote(env: Record<string, string>) {
       const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-remote-billing-"));

@@ -3,10 +3,13 @@ import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/executio
 import {
   CLAUDE_ACP_API_KEY_REQUIRED_MESSAGE,
   CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE,
+  claudeConfigDeclaresApiCredential,
   claudeRunHasApiCredential,
+  isClaudeSubscriptionLaneRun,
   resolveClaudeBillingIdentity,
   resolveClaudeCredentialPolicyViolation,
   resolveClaudeDefaultEngine,
+  withoutClaudeSubscriptionTokens,
 } from "./credential-policy.js";
 
 const REMOTE_SANDBOX: AdapterExecutionTarget = {
@@ -237,5 +240,113 @@ describe("resolveClaudeBillingIdentity", () => {
     expect(billing({ engine: "cli", env: { ANTHROPIC_API_KEY: "" }, hostEnv: { ANTHROPIC_API_KEY: "sk-ant-host" } }).billingType).toBe(
       "subscription",
     );
+  });
+});
+
+describe("subscription token values are never API credentials", () => {
+  it("does not count a subscription token in ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN", () => {
+    for (const env of [
+      { ANTHROPIC_API_KEY: "sk-ant-oat01-subscription" },
+      { ANTHROPIC_API_KEY: "  sk-ant-oat01-subscription" },
+      { ANTHROPIC_AUTH_TOKEN: "sk-ant-oat01-subscription" },
+    ]) {
+      expect(claudeRunHasApiCredential({ config: { env }, targetIsRemote: false, hostEnv: EMPTY_HOST })).toBe(false);
+      expect(violation({ engine: "acp", env })).toBe(CLAUDE_ACP_API_KEY_REQUIRED_MESSAGE);
+      expect(violation({ engine: "cli", env, target: REMOTE_SANDBOX })).toBe(CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE);
+      expect(
+        resolveClaudeBillingIdentity({ engine: "cli", targetIsRemote: false, env, hostEnv: EMPTY_HOST }).billingType,
+      ).toBe("subscription");
+    }
+    // A subscription token in the host env is not a credential either.
+    expect(
+      claudeRunHasApiCredential({
+        config: {},
+        targetIsRemote: false,
+        hostEnv: { ANTHROPIC_API_KEY: "sk-ant-oat01-host" },
+      }),
+    ).toBe(false);
+    expect(
+      resolveClaudeBillingIdentity({
+        engine: "cli",
+        targetIsRemote: false,
+        env: {},
+        hostEnv: { ANTHROPIC_API_KEY: "sk-ant-oat01-host" },
+      }).billingType,
+    ).toBe("subscription");
+    expect(
+      resolveClaudeBillingIdentity({
+        engine: "cli",
+        targetIsRemote: false,
+        env: { ANTHROPIC_API_KEY: "sk-ant-api03-key" },
+        hostEnv: EMPTY_HOST,
+      }).billingType,
+    ).toBe("api");
+  });
+
+  it("drops every token key and every token value from an env map", () => {
+    expect(
+      withoutClaudeSubscriptionTokens({
+        CLAUDE_CODE_OAUTH_TOKEN: "x",
+        anthropic_oauth_token: "x",
+        ANTHROPIC_TOKEN: "x",
+        ANTHROPIC_API_KEY: "sk-ant-oat01-x",
+        ANTHROPIC_AUTH_TOKEN: "gateway-token",
+        KEEP: "kept",
+        BINDING: { type: "secret_ref", secretId: "s" },
+      }),
+    ).toEqual({ ANTHROPIC_AUTH_TOKEN: "gateway-token", KEEP: "kept", BINDING: { type: "secret_ref", secretId: "s" } });
+  });
+});
+
+describe("isClaudeSubscriptionLaneRun", () => {
+  it("is a local CLI run with no API credential", () => {
+    expect(isClaudeSubscriptionLaneRun({ config: {}, target: null, hostEnv: EMPTY_HOST })).toBe(true);
+    expect(isClaudeSubscriptionLaneRun({ config: { engine: "cli" }, hostEnv: EMPTY_HOST })).toBe(true);
+    expect(
+      isClaudeSubscriptionLaneRun({
+        config: { env: { ANTHROPIC_API_KEY: "sk-ant-oat01-x" } },
+        hostEnv: EMPTY_HOST,
+      }),
+    ).toBe(true);
+  });
+
+  it("is not the lane with an API credential, a remote target, or the ACP engine", () => {
+    expect(
+      isClaudeSubscriptionLaneRun({ config: { env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" } }, hostEnv: EMPTY_HOST }),
+    ).toBe(false);
+    expect(isClaudeSubscriptionLaneRun({ config: {}, hostEnv: { ANTHROPIC_API_KEY: "sk-ant-api03-host" } })).toBe(false);
+    expect(isClaudeSubscriptionLaneRun({ config: { env: { CLAUDE_CODE_USE_BEDROCK: "1" } }, hostEnv: EMPTY_HOST })).toBe(
+      false,
+    );
+    expect(isClaudeSubscriptionLaneRun({ config: {}, target: REMOTE_SANDBOX, hostEnv: EMPTY_HOST })).toBe(false);
+    expect(isClaudeSubscriptionLaneRun({ config: {}, targetIsRemote: true, hostEnv: EMPTY_HOST })).toBe(false);
+    expect(isClaudeSubscriptionLaneRun({ config: { engine: "ACP" }, hostEnv: EMPTY_HOST })).toBe(false);
+  });
+
+  it("ignores the host env for a managed AI connection", () => {
+    expect(
+      isClaudeSubscriptionLaneRun({
+        config: { managedAiConnection: { provider: "anthropic" }, env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" } },
+        hostEnv: EMPTY_HOST,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("claudeConfigDeclaresApiCredential", () => {
+  it("counts API key bindings, gateway tokens, and cloud provider flags", () => {
+    expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "s" } } })).toBe(true);
+    expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: { type: "user_secret_ref", key: "k" } } })).toBe(true);
+    expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: { type: "plain", value: "sk-ant-api03" } } })).toBe(true);
+    expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_AUTH_TOKEN: "gateway" } })).toBe(true);
+    expect(claudeConfigDeclaresApiCredential({ env: { CLAUDE_CODE_USE_VERTEX: { type: "plain", value: "1" } } })).toBe(true);
+    expect(claudeConfigDeclaresApiCredential({ managedAiConnection: { provider: "anthropic" } })).toBe(true);
+  });
+
+  it("does not count an empty value, a subscription token, or nothing", () => {
+    expect(claudeConfigDeclaresApiCredential({})).toBe(false);
+    expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: { type: "plain", value: " " } } })).toBe(false);
+    expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: "sk-ant-oat01-x" } })).toBe(false);
+    expect(claudeConfigDeclaresApiCredential({ env: { CLAUDE_CODE_USE_BEDROCK: "0" } })).toBe(false);
   });
 });

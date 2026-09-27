@@ -117,6 +117,16 @@ vi.mock("../routes/ai-connections.js", async (importOriginal) => ({
   validateAiApiKey: mockValidateAiApiKey,
 }));
 
+// The owner-only gate of the Claude subscription lane reads the instance's
+// users; these tests direct its verdict instead.
+const mockResolveClaudeSubscriptionEligibility = vi.hoisted(() =>
+  vi.fn(async (): Promise<Record<string, unknown>> => ({ allowed: true })),
+);
+vi.mock("../services/claude-subscription-policy.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/claude-subscription-policy.js")>()),
+  resolveClaudeSubscriptionEligibility: mockResolveClaudeSubscriptionEligibility,
+}));
+
 function mockManagedRuntime(method: "api_key" | "subscription") {
   mockPrepareManagedAiRuntime.mockImplementation(
     async (_db: unknown, input: { config: Record<string, unknown> }) => ({
@@ -493,6 +503,96 @@ describe("agent test-environment route", () => {
       unregisterServerAdapter("claude_local");
       if (previous) registerServerAdapter(previous);
     }
+  });
+
+  describe("Claude subscription lane owner-only gate", () => {
+    const hostCredentialKeys = [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_USE_BEDROCK",
+    ] as const;
+    let savedHostEnv: Record<string, string | undefined> = {};
+    beforeEach(() => {
+      savedHostEnv = Object.fromEntries(hostCredentialKeys.map((key) => [key, process.env[key]]));
+      for (const key of hostCredentialKeys) delete process.env[key];
+    });
+    afterEach(() => {
+      for (const key of hostCredentialKeys) {
+        if (savedHostEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedHostEnv[key];
+      }
+    });
+
+    async function withClaudeProbe(run: (probe: ReturnType<typeof vi.fn>) => Promise<void>) {
+      const { registerServerAdapter, getServerAdapter, unregisterServerAdapter } = await import("../adapters/index.js");
+      const previous = getServerAdapter("claude_local");
+      unregisterServerAdapter("claude_local");
+      const probe = vi.fn(async () => ({
+        adapterType: "claude_local",
+        status: "pass" as const,
+        checks: [{ code: "claude_hello_probe_passed", level: "info" as const, message: "ok" }],
+        testedAt: new Date(0).toISOString(),
+      }));
+      registerServerAdapter({ ...externalAdapter, type: "claude_local", testEnvironment: probe });
+      try {
+        await run(probe);
+      } finally {
+        unregisterServerAdapter("claude_local");
+        if (previous) registerServerAdapter(previous);
+      }
+    }
+
+    it("refuses a subscription-lane Test before probing when the instance has other users", async () => {
+      mockResolveClaudeSubscriptionEligibility.mockResolvedValueOnce({
+        allowed: false,
+        reason: "subscription_not_allowed",
+        message:
+          "Claude subscription runs are limited to the server owner's own use. This instance has other users, so give this agent an Anthropic API key.",
+      });
+      await withClaudeProbe(async (probe) => {
+        const app = await createApp();
+        const res = await request(app)
+          .post("/api/companies/company-1/adapters/claude_local/test-environment")
+          .send({ adapterConfig: { cwd: "/" } });
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+        expect(res.body.status).toBe("fail");
+        expect(res.body.checks).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              code: "claude_subscription_not_allowed",
+              level: "error",
+              message:
+                "Claude subscription runs are limited to the server owner's own use. This instance has other users, so give this agent an Anthropic API key.",
+            }),
+          ]),
+        );
+        // The hello probe would use the server's Claude sign-in; it never runs.
+        expect(probe).not.toHaveBeenCalled();
+      });
+    });
+
+    it("runs the probe for the owner, and never consults the gate for an API-key agent", async () => {
+      await withClaudeProbe(async (probe) => {
+        const app = await createApp();
+        const owner = await request(app)
+          .post("/api/companies/company-1/adapters/claude_local/test-environment")
+          .send({ adapterConfig: { cwd: "/" } });
+        expect(owner.status, JSON.stringify(owner.body)).toBe(200);
+        expect(owner.body.status).toBe("pass");
+        expect(mockResolveClaudeSubscriptionEligibility).toHaveBeenCalledTimes(1);
+        expect(probe).toHaveBeenCalledTimes(1);
+
+        mockResolveClaudeSubscriptionEligibility.mockClear();
+        const apiKey = await request(app)
+          .post("/api/companies/company-1/adapters/claude_local/test-environment")
+          // The secrets mock passes env values through unresolved, so use the
+          // resolved (string) form the real resolution produces.
+          .send({ adapterConfig: { cwd: "/", env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" } } });
+        expect(apiKey.status, JSON.stringify(apiKey.body)).toBe(200);
+        expect(mockResolveClaudeSubscriptionEligibility).not.toHaveBeenCalled();
+        expect(probe).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   it("passes one-shot provider credentials only to the probe, never persistence normalization", async () => {

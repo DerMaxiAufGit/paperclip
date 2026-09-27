@@ -18,6 +18,7 @@ import {
   RUNTIME_EXPOSURE_BIND_HOST,
   RUNTIME_EXPOSURE_BIND_MODE,
   isClaudeSubscriptionTokenEnvKey,
+  isClaudeSubscriptionTokenValue,
   rewriteUrlHostToLoopback,
   readRuntimeExposureIntent,
   resolveDeclaredRuntimeExposureConfig,
@@ -675,14 +676,31 @@ export async function ensureServerWorkspaceLinksCurrent(
   );
 }
 
-export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of Object.keys(env)) {
-    // A Claude subscription credential never reaches a spawned process.
-    if (key.startsWith("PAPERCLIP_") || isClaudeSubscriptionTokenEnvKey(key)) {
+/**
+ * Drop every Claude subscription credential from a runtime service or workspace
+ * command env: an entry whose key names one, and an entry whose value is one
+ * (`sk-ant-oat…` and the other Claude.ai token prefixes), whatever its key.
+ * Applied to the merged env, so adapter env and service env overrides are
+ * covered too.
+ */
+export function withoutClaudeSubscriptionTokenEntries<T extends Record<string, string | undefined>>(env: T): T {
+  for (const [key, value] of Object.entries(env)) {
+    if (isClaudeSubscriptionTokenEnvKey(key) || isClaudeSubscriptionTokenValue(value)) {
       delete env[key];
     }
   }
+  return env;
+}
+
+export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PAPERCLIP_")) {
+      delete env[key];
+    }
+  }
+  // A Claude subscription credential never reaches a spawned process.
+  withoutClaudeSubscriptionTokenEntries(env);
   // These origin settings belong to the parent instance. Letting them leak into a
   // managed worktree runtime can send auth cookies and OAuth callbacks to the wrong
   // Paperclip instance. Runtime/service overrides are merged back after sanitizing.
@@ -4990,14 +5008,14 @@ function resolveWorkspaceCommandExecution(input: {
     renderTemplate(asString(input.command.cwd, "."), templateData),
     input.workspace.cwd,
   );
-  const env = {
+  const env = withoutClaudeSubscriptionTokenEntries({
     ...sanitizeRuntimeServiceBaseEnv(process.env),
     ...input.adapterEnv,
     ...renderRuntimeServiceEnv({
       envConfig: parseObject(input.command.env),
       templateData,
     }),
-  } as Record<string, string>;
+  } as Record<string, string>);
 
   return {
     name,
@@ -6114,10 +6132,10 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   for (const [key, value] of Object.entries(renderRuntimeServiceEnv({ envConfig, templateData }))) {
     runtimeEnvOverrides[key] = value;
   }
-  const env: Record<string, string> = {
+  const env: Record<string, string> = withoutClaudeSubscriptionTokenEntries({
     ...sanitizeRuntimeServiceBaseEnv(process.env),
     ...runtimeEnvOverrides,
-  } as Record<string, string>;
+  } as Record<string, string>);
   // Managed Paperclip worktrees are development environments, so their UI
   // should track source edits without each project repeating this setting.
   // An HTTPS profile must publish the companion HMR listener before it can use

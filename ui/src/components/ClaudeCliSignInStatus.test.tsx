@@ -57,6 +57,34 @@ describe("ClaudeCliSignInStatus", () => {
     expect(host.textContent).toContain("Check again");
   });
 
+  it("says a subscription cannot be used on an instance with other users, without sign-in steps", async () => {
+    getAdapterAuthSignal.mockResolvedValue({ status: "absent", reason: "subscription_not_allowed" });
+    await mount();
+    await vi.waitFor(() =>
+      expect(host.textContent).toContain(
+        "Claude subscription runs are limited to the server owner's own use. This instance has other users, so give this agent an Anthropic API key.",
+      ),
+    );
+    expect(host.textContent).not.toContain("/login");
+    expect(host.textContent).not.toContain("Check again");
+  });
+
+  it("keeps the rejection panel free of sign-in steps after an auth failure on such an instance", async () => {
+    getAdapterAuthSignal.mockResolvedValue({ status: "absent", reason: "subscription_not_allowed" });
+    await mount(<ClaudeCliSignInStatus companyId="c1" environmentId={null} afterAuthFailure />);
+    await vi.waitFor(() => expect(host.textContent).toContain("limited to the server owner's own use"));
+    expect(host.textContent).not.toContain("/login");
+  });
+
+  it("does not count a subscription token in ANTHROPIC_API_KEY as an API credential", () => {
+    expect(
+      claudeRunUsesApiCredential({ adapterConfig: { env: { ANTHROPIC_API_KEY: { type: "plain", value: "sk-ant-oat01-x" } } } }),
+    ).toBe(false);
+    expect(
+      claudeRunUsesApiCredential({ adapterConfig: { env: { ANTHROPIC_API_KEY: { type: "plain", value: "sk-ant-api03-x" } } } }),
+    ).toBe(true);
+  });
+
   it("keeps the sign-in steps for an unconfirmed status with no reason", async () => {
     getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
     await mount();

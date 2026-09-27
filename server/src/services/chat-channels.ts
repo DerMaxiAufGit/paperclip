@@ -231,6 +231,7 @@ import {
   type IssueAssignmentWakeupDeps,
 } from "./issue-assignment-wakeup.js";
 import { issueService } from "./issues.js";
+import { claudeConfigDeclaresApiCredential } from "@paperclipai/adapter-claude-local/server";
 import {
   authorizeNativeChatReviewPresentation,
   NativeChatReviewPresentationContentionError,
@@ -365,6 +366,12 @@ import type {
   Thread,
 } from "chat";
 import { Actions, Button, Card, CardText, LinkButton } from "chat";
+
+function asChatRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
 
 // Only these closed fields may reach Activity or a delivery-batch response.
 // The resolution predicate yields one boolean, never the private envelope.
@@ -5929,7 +5936,14 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   ) {
     if ((input.provider as string) === "agentmail") throw badRequest("Use the email inbox setup API for AgentMail");
     const agent = await db
-      .select({ id: agents.id, name: agents.name, status: agents.status })
+      .select({
+        id: agents.id,
+        name: agents.name,
+        status: agents.status,
+        adapterType: agents.adapterType,
+        adapterConfig: agents.adapterConfig,
+        runtimeConfig: agents.runtimeConfig,
+      })
       .from(agents)
       .where(
         and(
@@ -5940,6 +5954,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       .then((rows) => rows[0] ?? null);
     if (!agent)
       throw unprocessable("The selected agent does not belong to this company");
+    // A claude_local agent on the Claude subscription lane (no API credential)
+    // runs on the server owner's own Claude sign-in, and a run started by a
+    // chat guest is refused. Start such an endpoint closed to unlinked people.
+    const claudeSubscriptionLaneAgent =
+      agent.adapterType === "claude_local" &&
+      !asChatRecord(agent.runtimeConfig).aiConnection &&
+      !claudeConfigDeclaresApiCredential(asChatRecord(agent.adapterConfig));
     if (!isAgentStatusInvokable(agent.status)) {
       throw unprocessable(
         "The selected agent must be active before it can be connected to chat",
@@ -6032,7 +6053,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         // enables that surface, even when this process is running against a
         // database created before the column default was hardened.
         allowGroupChats: input.provider !== "microsoft-teams",
-        allowUnlinkedPeople: !["slack", "imessage-photon"].includes(input.provider),
+        allowUnlinkedPeople:
+          !["slack", "imessage-photon"].includes(input.provider) &&
+          !claudeSubscriptionLaneAgent,
         capabilities: CAPABILITIES[input.provider],
         setup: {
           step: "provider_setup",

@@ -61,6 +61,10 @@ export function createSanitizedAcpxSpawnInput(
   for (const [key, value] of Object.entries(source)) {
     if (typeof value !== "string") continue;
     if (!allowed.has(key) && !/^LC_[A-Z0-9_]{1,32}$/.test(key)) continue;
+    // A Claude.ai credential (`sk-ant-oat…` access token, `sk-ant-ort…`
+    // refresh token, `sk-ant-sid…` session key) never crosses the launch
+    // boundary, whatever allowlisted key carries it.
+    if (/^sk-ant-(oat|ort|sid)/.test(value.trim().toLowerCase())) continue;
     if (key.includes("\0") || value.includes("\0")) {
       throw new Error("ACPX environment contains a null byte");
     }

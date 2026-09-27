@@ -1557,10 +1557,13 @@ export async function prepareWorkspaceForSshExecution(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
   remoteDir?: string;
+  /** Extra tar exclude patterns for the working-tree upload (matched at any depth). */
+  exclude?: string[];
   onProgress?: RuntimeProgressSink;
 }): Promise<{ gitBacked: boolean }> {
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
   const gitSnapshot = await readLocalGitWorkspaceSnapshot(input.localDir);
+  const extraExclude = input.exclude ?? [];
 
   if (gitSnapshot) {
     await importGitWorkspaceToSsh({
@@ -1574,7 +1577,7 @@ export async function prepareWorkspaceForSshExecution(input: {
       spec: input.spec,
       localDir: input.localDir,
       remoteDir,
-      exclude: [".git", ".paperclip-runtime"],
+      exclude: [".git", ".paperclip-runtime", ...extraExclude],
       onProgress: input.onProgress,
       progressLabel: "workspace",
     });
@@ -1595,7 +1598,7 @@ export async function prepareWorkspaceForSshExecution(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir,
-    exclude: [".paperclip-runtime"],
+    exclude: [".paperclip-runtime", ...extraExclude],
     onProgress: input.onProgress,
     progressLabel: "workspace",
   });

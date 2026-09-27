@@ -12556,6 +12556,60 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     ]);
   });
 
+  it("starts a chat endpoint closed to unlinked people for a claude_local agent on the Claude subscription lane", async () => {
+    const fixture = await seedCompany();
+    const subscriptionAgentId = randomUUID();
+    const apiKeyAgentId = randomUUID();
+    await db.insert(agents).values([
+      {
+        id: subscriptionAgentId,
+        companyId: fixture.companyId,
+        name: "Claude Subscription",
+        role: "engineer",
+        status: "idle",
+        adapterType: "claude_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: apiKeyAgentId,
+        companyId: fixture.companyId,
+        name: "Claude API Key",
+        role: "engineer",
+        status: "idle",
+        adapterType: "claude_local",
+        adapterConfig: {
+          env: { ANTHROPIC_API_KEY: { type: "secret_ref", secretId: randomUUID(), version: "latest" } },
+        },
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    const { service } = createService();
+    // A chat guest's run on the subscription lane is refused, so the endpoint
+    // starts closed to people who are not linked to a Paperclip user.
+    const subscription = await service.create(
+      fixture.companyId,
+      { provider: "telegram", assignedAgentId: subscriptionAgentId },
+      "owner-user",
+    );
+    expect(subscription.allowUnlinkedPeople).toBe(false);
+    // An API-key agent keeps the provider default, and so does another adapter.
+    const apiKey = await service.create(
+      fixture.companyId,
+      { provider: "telegram", assignedAgentId: apiKeyAgentId },
+      "owner-user",
+    );
+    expect(apiKey.allowUnlinkedPeople).toBe(true);
+    const runner = await service.create(
+      fixture.companyId,
+      { provider: "telegram", assignedAgentId: fixture.assignedAgentId },
+      "owner-user",
+    );
+    expect(runner.allowUnlinkedPeople).toBe(true);
+  });
+
   it("activates Slack only after provider verification and a real test message", async () => {
     const fixture = await seedCompany();
     const { runtime, service } = createService();

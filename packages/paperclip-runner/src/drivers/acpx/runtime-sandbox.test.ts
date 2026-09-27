@@ -19,11 +19,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
 import { createAcpxRecoveryBinding } from "./recovery-identity.js";
 import {
+  CLAUDE_ACPX_API_KEY_REQUIRED_MESSAGE,
+  assertClaudeAcpxApiCredential,
   prepareAcpxRuntimeSandbox,
   readAcpxRecoveryWorkspace,
 } from "./runtime-sandbox.js";
 
 const temporaryDirectories: string[] = [];
+const CLAUDE_API_KEY_ENVIRONMENT = { ANTHROPIC_API_KEY: "sk-ant-api03-test" };
 
 afterEach(async () => {
   await Promise.all(
@@ -31,6 +34,44 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { force: true, recursive: true })),
   );
+});
+
+describe("ACPX runtime sandbox Claude API key requirement", () => {
+  it("refuses a Claude sandbox without an Anthropic API key, before any filesystem work", async () => {
+    const fixture = await sandboxFixture("claude");
+    for (const environment of [
+      {},
+      { ANTHROPIC_API_KEY: "   " },
+      // A Claude subscription token is never an API key, whatever key holds it.
+      { ANTHROPIC_API_KEY: "sk-ant-oat01-subscription" },
+      // Subscription token keys never cross the ACPX allowlist.
+      { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-subscription" },
+      { ANTHROPIC_AUTH_TOKEN: "gateway-token" },
+    ]) {
+      await expect(
+        prepareAcpxRuntimeSandbox({ binding: fixture.binding, agent: "claude", environment }),
+      ).rejects.toThrow(CLAUDE_ACPX_API_KEY_REQUIRED_MESSAGE);
+    }
+    await expect(lstat(fixture.binding.runtimeRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("uses the same message as remote claude_local targets", () => {
+    expect(CLAUDE_ACPX_API_KEY_REQUIRED_MESSAGE).toBe(
+      "Claude on remote targets needs an Anthropic API key; subscription use is limited to the claude CLI signed in on this server.",
+    );
+    expect(() => assertClaudeAcpxApiCredential({ ANTHROPIC_API_KEY: "sk-ant-api03-x" })).not.toThrow();
+  });
+
+  it("never passes a subscription token value to any ACPX agent", async () => {
+    const fixture = await sandboxFixture("codex");
+    const sandbox = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+      environment: { OPENAI_API_KEY: "sk-ant-oat01-subscription", HTTPS_PROXY: "http://proxy" },
+    });
+    expect(sandbox.launchEnvironment.OPENAI_API_KEY).toBeUndefined();
+    expect(sandbox.launchEnvironment.HTTPS_PROXY).toBe("http://proxy");
+  });
 });
 
 describe("ACPX runtime sandbox", () => {
@@ -41,6 +82,7 @@ describe("ACPX runtime sandbox", () => {
       const sandbox = await prepareAcpxRuntimeSandbox({
         binding: { ...fixture.binding, requestedModel: model },
         agent: "claude",
+        environment: CLAUDE_API_KEY_ENVIRONMENT,
       });
       const settingsPath = join(sandbox.agentHomeDirectory, "settings.json");
       expect(JSON.parse(await readFile(settingsPath, "utf8"))).toMatchObject({
@@ -56,7 +98,11 @@ describe("ACPX runtime sandbox", () => {
     for (const model of ["claude-sonnet-5", "custom-claude-model"]) {
       const binding = { ...fixture.binding, requestedModel: model, effectiveModel: model };
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const sandbox = await prepareAcpxRuntimeSandbox({ binding, agent: "claude" });
+        const sandbox = await prepareAcpxRuntimeSandbox({
+          binding,
+          agent: "claude",
+          environment: CLAUDE_API_KEY_ENVIRONMENT,
+        });
         const settings = JSON.parse(await readFile(join(sandbox.agentHomeDirectory, "settings.json"), "utf8"));
         expect(settings).toMatchObject({ model, availableModels: [model] });
       }

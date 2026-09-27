@@ -71,8 +71,21 @@ export interface StagedWorkspace {
   readonly reused: boolean;
 }
 
+/**
+ * Per-stage options a managed-home seam may pass. `workspaceExclude` lists
+ * workspace-relative paths that are neither shipped into the sandbox nor synced
+ * back to the host (for example a Claude sign-in file inside a config dir that
+ * lives in the workspace).
+ */
+export interface StageWorkspaceOptions {
+  readonly workspaceExclude?: readonly string[];
+}
+
 /** The leaf staging primitive the engine injects. It ships one asset set. */
-export type StageWorkspace = (assets: AdapterManagedRuntimeAsset[]) => Promise<PreparedAdapterExecutionTargetRuntime>;
+export type StageWorkspace = (
+  assets: AdapterManagedRuntimeAsset[],
+  options?: StageWorkspaceOptions,
+) => Promise<PreparedAdapterExecutionTargetRuntime>;
 
 /**
  * The managed-home seam result, in the shape the site consumes. The engine maps
@@ -258,8 +271,8 @@ export function createSandboxRunSite(options: SandboxRunSiteOptions): SandboxRun
         }
         const envBeforeStage = { ...options.env };
         let freshlyStaged: PreparedAdapterExecutionTargetRuntime | null = null;
-        const stage: StageWorkspace = async (assets) => {
-          const result = await options.stage(assets);
+        const stage: StageWorkspace = async (assets, stageOptions) => {
+          const result = await options.stage(assets, stageOptions);
           freshlyStaged = result;
           return result;
         };

@@ -205,6 +205,31 @@ describe("acpx identity split and launch environment", () => {
     }
   });
 
+  it("drops a Claude subscription token value and the other token keys from the ACP launch env", () => {
+    const launchEnvironment = finalizeLaunchEnvironment(
+      {
+        ANTHROPIC_API_KEY: "sk-ant-oat01-in-api-key",
+        ANTHROPIC_OAUTH_TOKEN: "oauth",
+        anthropic_token: "token",
+        KEEP_ME: "kept",
+      },
+      [],
+      {
+        acpxAgent: "claude",
+        inheritHostEnvironment: true,
+        inheritedEnv: { PATH: "/usr/bin", ANTHROPIC_AUTH_TOKEN: "sk-ant-oat01-host" },
+        platform: "linux",
+      },
+    );
+    const env = launchEnvironment.env as Record<string, string>;
+    expect(env.KEEP_ME).toBe("kept");
+    expect(Object.values(env).some((value) => value.startsWith("sk-ant-oat"))).toBe(false);
+    const keys = Object.keys(env).map((key) => key.toUpperCase());
+    expect(keys).not.toContain("ANTHROPIC_OAUTH_TOKEN");
+    expect(keys).not.toContain("ANTHROPIC_TOKEN");
+    expect(keys).not.toContain("ANTHROPIC_API_KEY");
+  });
+
   it("does not project any ambient host environment across a remote boundary", () => {
     const inherited = {
       PATH: "/host/bin",

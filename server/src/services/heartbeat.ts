@@ -11,7 +11,12 @@ import { resolvePersistedClaudeLocalEngine } from "./claude-local-engine.js";
 import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from "./explicit-native-continuation.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS, resolveRunAiConnectionBinding } from "./ai-connection-runtime.js";
-import { aiConnectionBindingSchema, isClaudeSubscriptionTokenEnvKey } from "@paperclipai/shared";
+import { aiConnectionBindingSchema, isClaudeSubscriptionTokenEnvEntry, isClaudeSubscriptionTokenValue } from "@paperclipai/shared";
+import { CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE, isClaudeSubscriptionLaneRun } from "@paperclipai/adapter-claude-local/server";
+import {
+  resolveClaudeSubscriptionEligibility,
+  resolveClaudeSubscriptionTriggerViolation,
+} from "./claude-subscription-policy.js";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
@@ -1473,6 +1478,16 @@ const MANAGED_GITHUB_TOKEN_KEYS = new Set([
   "PAPERCLIP_GIT_TOKEN",
 ]);
 
+/**
+ * True when a Paperclip Runner run env carries an Anthropic API key for the
+ * runner's Claude ACPX lane. Only `ANTHROPIC_API_KEY` crosses the runner's
+ * ACPX allowlist, and a Claude subscription token (`sk-ant-oat…`) is never one.
+ */
+export function runnerClaudeAcpxHasApiKey(env: Record<string, unknown>): boolean {
+  const apiKey = typeof env.ANTHROPIC_API_KEY === "string" ? env.ANTHROPIC_API_KEY.trim() : "";
+  return apiKey.length > 0 && !isClaudeSubscriptionTokenValue(apiKey);
+}
+
 function stripForbiddenEnvBindings(
   envValue: unknown,
   managedGitHubCredentials = false,
@@ -1480,10 +1495,11 @@ function stripForbiddenEnvBindings(
   const record = parseObject(envValue);
   const filtered = Object.fromEntries(
     Object.entries(record).filter(
-      ([key]) =>
+      ([key, binding]) =>
         !FORBIDDEN_ENV_BINDING_KEYS.has(key) &&
-        // A Claude subscription credential never reaches a run, in any letter case.
-        !isClaudeSubscriptionTokenEnvKey(key) &&
+        // A Claude subscription credential never reaches a run: not under a key
+        // that names one (any letter case), and not as a literal token value.
+        !isClaudeSubscriptionTokenEnvEntry(key, binding) &&
         !(managedGitHubCredentials && MANAGED_GITHUB_TOKEN_KEYS.has(key)),
     ),
   );
@@ -10677,6 +10693,52 @@ export function heartbeatService(
       outputDocumentKey: row.outputDocumentKey,
       fileInventory,
     };
+  }
+
+  // The owner-only and trigger-source gates of the Claude subscription lane
+  // (see claude-subscription-policy.ts). Throws a configuration-incomplete
+  // failure, which is not retried and routes to a human.
+  async function assertClaudeSubscriptionLaneAllowed(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    agentId: string;
+    issueId: string | null;
+    config: Record<string, unknown>;
+    targetIsRemote: boolean;
+  }) {
+    if (
+      !isClaudeSubscriptionLaneRun({
+        config: input.config,
+        targetIsRemote: input.targetIsRemote,
+      })
+    ) {
+      return;
+    }
+    const eligibility = await resolveClaudeSubscriptionEligibility(db);
+    if (!eligibility.allowed) {
+      throw new ConfigurationIncompleteFailure(eligibility.message, {
+        configurationIncomplete: {
+          reason: eligibility.reason,
+          agentId: input.agentId,
+          actionUrl: `/agents/${input.agentId}/runtime`,
+          fingerprint: `claude-subscription:${input.agentId}:${eligibility.reason}`,
+        },
+      });
+    }
+    const trigger = await resolveClaudeSubscriptionTriggerViolation(db, {
+      run: input.run,
+      issueId: input.issueId,
+    });
+    if (trigger) {
+      throw new ConfigurationIncompleteFailure(trigger.message, {
+        configurationIncomplete: {
+          reason: trigger.reason,
+          trigger: trigger.kind,
+          agentId: input.agentId,
+          actionUrl: `/agents/${input.agentId}/runtime`,
+          fingerprint: `claude-subscription:${input.agentId}:${trigger.reason}:${trigger.kind}`,
+        },
+      });
+    }
   }
 
   async function getRoutineEnvForExecutionIssue(
@@ -21206,6 +21268,19 @@ export function heartbeatService(
         context.aiConnection = { ...managedAiRuntime.attribution, identity: managedAiRuntime.identity };
         await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ aiConnection: context.aiConnection })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
       }
+      // A claude_local run on the Claude subscription lane (the claude CLI signed
+      // in on this server, no API credential) is for the server owner's own use
+      // only. Refuse it before any workspace or process work when the instance
+      // has other users, or when the wake came from outside the owner.
+      if (agent.adapterType === "claude_local") {
+        await assertClaudeSubscriptionLaneAllowed({
+          run,
+          agentId: agent.id,
+          issueId: issueId ?? null,
+          config: resolvedConfig,
+          targetIsRemote: (selectedEnvironmentForConfig?.driver ?? "local") !== "local",
+        });
+      }
       if (secretManifest.length > 0) {
         context.paperclipSecrets = {
           manifest: secretManifest,
@@ -23317,6 +23392,30 @@ export function heartbeatService(
                   },
                 );
               }
+            }
+            // A Paperclip Runner's Claude ACPX lane never uses a Claude
+            // subscription (only the claude CLI on this server may). Refuse to
+            // launch it without an Anthropic API key in the run env, with the
+            // message remote claude_local targets use.
+            if (
+              nativeRuntimeResolution.profile.backend === "acpx_runtime" &&
+              // The runner's ACPX lane defaults to the Claude agent profile.
+              (readNonEmptyString(runnerAdapterConfig.acpxAgent) ?? "claude") === "claude" &&
+              !runnerClaudeAcpxHasApiKey(parseObject(runtimeConfig.env))
+            ) {
+              throw new ConfigurationIncompleteFailure(
+                CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE,
+                {
+                  configurationIncomplete: {
+                    reason: "claude_api_key_required",
+                    companyId: agent.companyId,
+                    agentId: agent.id,
+                    requiredEnvKeys: ["ANTHROPIC_API_KEY"],
+                    actionUrl: `/agents/${agent.id}/runtime`,
+                    fingerprint: `runner-claude-api-key:${agent.id}`,
+                  },
+                },
+              );
             }
             const executionMode =
               issueRef.workMode === "planning" && !isConversation(issueContext) && !acceptedPlanContinuationWake

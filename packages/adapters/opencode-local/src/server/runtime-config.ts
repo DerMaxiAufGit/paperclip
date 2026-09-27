@@ -2,12 +2,54 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
+import { readHarnessCliFlagValues } from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 
 type PreparedOpenCodeRuntimeConfig = {
   env: Record<string, string>;
   notes: string[];
   cleanup: () => Promise<void>;
 };
+
+/**
+ * True when an OpenCode model reference (`provider/model`) talks to Anthropic
+ * directly. Anthropic models reached through another provider (OpenRouter,
+ * Amazon Bedrock, Google Vertex, a gateway) do not count.
+ */
+export function isOpenCodeAnthropicModel(model: string | null | undefined): boolean {
+  const trimmed = (model ?? "").trim().toLowerCase();
+  const slash = trimmed.indexOf("/");
+  return slash > 0 && trimmed.slice(0, slash).trim() === "anthropic";
+}
+
+/**
+ * `isOpenCodeAnthropicModel` for the command line OpenCode actually gets.
+ * Paperclip appends the agent's extra args after its own `--model`, so an extra
+ * `--model anthropic/…` (or `-m`) also makes the run an Anthropic run.
+ */
+export function isOpenCodeAnthropicRun(input: {
+  model: string | null | undefined;
+  extraArgs?: readonly string[] | null;
+}): boolean {
+  if (isOpenCodeAnthropicModel(input.model)) return true;
+  return readHarnessCliFlagValues(input.extraArgs, ["-m", "--model"]).some((model) =>
+    isOpenCodeAnthropicModel(model),
+  );
+}
+
+/** Env keys OpenCode's Anthropic provider reads as an API key. */
+export const OPENCODE_ANTHROPIC_API_KEY_ENV_KEYS = ["ANTHROPIC_API_KEY"] as const;
+
+/**
+ * Only the official claude binary may use a Claude subscription. OpenCode keeps
+ * provider logins (including a Claude Pro/Max OAuth login) in its `auth.json`,
+ * and a stored login wins over ANTHROPIC_API_KEY. When `OPENCODE_AUTH_CONTENT`
+ * is set, OpenCode reads its logins from that JSON instead of the file, so an
+ * empty object makes an Anthropic run use the API key. Paperclip never reads
+ * the file. Stored logins of other providers are hidden for that run too.
+ */
+export function hideOpenCodeStoredLogins(env: Record<string, string>): void {
+  env.OPENCODE_AUTH_CONTENT = "{}";
+}
 
 function resolveXdgConfigHome(env: Record<string, string>): string {
   return (

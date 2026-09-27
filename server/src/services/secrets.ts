@@ -37,11 +37,12 @@ import type {
 } from "@paperclipai/shared";
 import {
   CLASS3_STATIC_LEASE_ALLOWLIST,
-  CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE,
+  CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
   createSecretProviderConfigSchema,
   deriveProjectUrlKey,
   envBindingSchema,
   isClaudeSubscriptionTokenEnvKey,
+  isClaudeSubscriptionTokenValue,
   isUuidLike,
   normalizeAgentUrlKey,
   secretProviderConfigPayloadSchema,
@@ -1684,6 +1685,16 @@ export function secretService(db: Db | DbTransaction) {
     return resolvedVersion;
   }
 
+  // Paperclip never stores a Claude subscription token (`sk-ant-oat…`) as a
+  // company or user secret, whatever the secret is named. Every create and
+  // rotate path that writes a value calls this first.
+  function assertNotClaudeSubscriptionTokenSecretValue(value: string | null | undefined): void {
+    if (!isClaudeSubscriptionTokenValue(value)) return;
+    throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
+      code: "claude_subscription_token_unsupported",
+    });
+  }
+
   async function normalizeEnvConfig(
     companyId: string,
     envValue: unknown,
@@ -1701,7 +1712,7 @@ export function secretService(db: Db | DbTransaction) {
       // company import) passes here. Paperclip never stores a Claude
       // subscription credential, in any letter case.
       if (isClaudeSubscriptionTokenEnvKey(key)) {
-        throw unprocessable(CLAUDE_CODE_OAUTH_TOKEN_UNSUPPORTED_MESSAGE, {
+        throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
           code: "claude_subscription_token_unsupported",
           key,
         });
@@ -1714,6 +1725,14 @@ export function secretService(db: Db | DbTransaction) {
 
       const binding = canonicalizeBinding(parsed.data as EnvBinding);
       if (binding.type === "plain") {
+        // A subscription token value (`sk-ant-oat…`) is refused under any key,
+        // for example ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN.
+        if (isClaudeSubscriptionTokenValue(binding.value)) {
+          throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
+            code: "claude_subscription_token_unsupported",
+            key,
+          });
+        }
         if (opts?.strictMode && isSensitiveEnvKey(key) && binding.value.trim().length > 0) {
           throw unprocessable(
             `Strict secret mode requires secret references for sensitive key: ${key}`,
@@ -1870,6 +1889,7 @@ export function secretService(db: Db | DbTransaction) {
     },
     actor?: { userId?: string | null; agentId?: string | null },
   ) {
+    assertNotClaudeSubscriptionTokenSecretValue(input.value);
     const existing = await getByName(companyId, input.name);
     if (existing) throw conflict(`Secret already exists: ${input.name}`);
     const key = normalizeSecretKey(input.key);
@@ -1998,6 +2018,7 @@ export function secretService(db: Db | DbTransaction) {
     },
     actor?: { userId?: string | null; agentId?: string | null },
   ) {
+    assertNotClaudeSubscriptionTokenSecretValue(input.value);
     const existing = await getByName(companyId, input.name);
     if (existing) throw conflict(`Secret already exists: ${input.name}`);
     const key = normalizeSecretKey(input.key ?? input.name);
@@ -2209,6 +2230,7 @@ export function secretService(db: Db | DbTransaction) {
     },
     actor?: { userId?: string | null; agentId?: string | null },
   ) {
+    assertNotClaudeSubscriptionTokenSecretValue(input.value);
     const secret = await getById(secretId);
     if (!secret) throw notFound("Secret not found");
     if (secret.status !== "active") throw unprocessable("Cannot rotate a non-active secret");
@@ -2768,6 +2790,7 @@ export function secretService(db: Db | DbTransaction) {
     },
     actor?: { userId?: string | null; agentId?: string | null },
   ) {
+    assertNotClaudeSubscriptionTokenSecretValue(input.value);
     const definition = await resolveUserSecretDefinition(companyId, input);
     if (definition.status !== "active") {
       throw unprocessable("User secret definition is not active");

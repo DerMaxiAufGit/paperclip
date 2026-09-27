@@ -43,6 +43,7 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { setClaudeSubscriptionDeploymentMode } from "./services/claude-subscription-policy.js";
 import { logger } from "./middleware/logger.js";
 import { setStartupRecoveryPhase } from "./startup-recovery-state.js";
 import {
@@ -653,6 +654,9 @@ async function startServerWithDatabaseTeardown(
   // Auth, routes, or child-runtime configuration capture any public URL.
   const restoredCloudRuntimeIdentity = await initializeCloudRuntimeIdentity(db as any);
   if (restoredCloudRuntimeIdentity) config = loadConfig();
+  // The Claude subscription lane is limited to the server owner's own use; its
+  // gate reads the deployment mode from here (see claude-subscription-policy).
+  setClaudeSubscriptionDeploymentMode(config.deploymentMode);
 
   if (config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
     throw new Error(

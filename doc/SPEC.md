@@ -222,10 +222,17 @@ remain authoritative.
 
 Claude subscription boundary: Paperclip never reads, stores, forwards, or
 injects a Claude subscription credential. A Claude subscription is used only
-when `claude_local` runs the official `claude` CLI (its default engine) on the
-Paperclip server, signed in by the operating system user that runs Paperclip.
-The Claude ACP engine and remote execution targets authenticate with an
-Anthropic API key (or a cloud provider such as Bedrock or Vertex).
+when `claude_local` runs the official `claude` CLI on the Paperclip server,
+signed in by the operating system user that runs Paperclip; with no engine set,
+a local run without an API credential uses that CLI engine. The Claude ACP
+engine and remote execution targets authenticate with an Anthropic API
+credential (an API key, a gateway token, or a cloud provider such as Bedrock,
+Vertex, or Foundry). The subscription is for the server owner's own use only:
+it is refused on an `authenticated` instance with more than one active human
+user, and for runs that a chat guest, an inbound email, a plugin (including
+plugin webhooks), or a routine's public webhook trigger started. Other harnesses (Hermes, OpenCode,
+Pi) need an Anthropic API key for Anthropic models. Paperclip does not show
+Claude plan usage.
 
 ### Adapter Interface
 

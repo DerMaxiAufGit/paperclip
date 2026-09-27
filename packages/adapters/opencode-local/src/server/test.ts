@@ -28,7 +28,14 @@ import {
 import { discoverOpenCodeModels, ensureOpenCodeModelConfiguredAndAvailable } from "./models.js";
 import { parseOpenCodeJsonl } from "./parse.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
-import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
+import {
+  hideOpenCodeStoredLogins,
+  isOpenCodeAnthropicRun,
+  OPENCODE_ANTHROPIC_API_KEY_ENV_KEYS,
+  prepareOpenCodeRuntimeConfig,
+  prepareManagedOpenCodeRemoteHomes,
+} from "./runtime-config.js";
+import { resolveClaudeSubscriptionHarnessViolation } from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -126,6 +133,30 @@ export async function testEnvironment(
 
   // Prevent OpenCode from writing an opencode.json into the working directory.
   env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+
+  // Only the official claude binary may use a Claude subscription: an
+  // Anthropic model needs ANTHROPIC_API_KEY (the same gate `execute` applies),
+  // and the probe hides OpenCode's stored logins like the run does.
+  const configuredExtraArgs = (() => {
+    const fromExtraArgs = asStringArray(config.extraArgs);
+    if (fromExtraArgs.length > 0) return fromExtraArgs;
+    return asStringArray(config.args);
+  })();
+  const anthropicRoute = isOpenCodeAnthropicRun({ model: asString(config.model, ""), extraArgs: configuredExtraArgs });
+  const subscriptionViolation = resolveClaudeSubscriptionHarnessViolation({
+    anthropicRoute,
+    env: targetIsRemote ? env : { ...process.env, ...env },
+    apiKeyEnvKeys: OPENCODE_ANTHROPIC_API_KEY_ENV_KEYS,
+  });
+  if (subscriptionViolation) {
+    checks.push({
+      code: "opencode_anthropic_api_key_required",
+      level: "error",
+      message: subscriptionViolation,
+      hint: "Add ANTHROPIC_API_KEY to this agent's environment as a secret, pick a non-Anthropic model, or use the Claude (claude_local) adapter. An Anthropic key stored by `opencode auth login` or in opencode.json does not count, and an Anthropic run hides every OpenCode stored login, so providers that use one (for example a small_model or subagent) need their key in the agent env too.",
+    });
+  }
+  if (anthropicRoute) hideOpenCodeStoredLogins(env);
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
@@ -329,7 +360,7 @@ export async function testEnvironment(
       }
     }
 
-    if (canRunProbe && modelValidationPassed) {
+    if (canRunProbe && modelValidationPassed && !subscriptionViolation) {
       const extraArgs = (() => {
         const fromExtraArgs = asStringArray(config.extraArgs);
         if (fromExtraArgs.length > 0) return fromExtraArgs;

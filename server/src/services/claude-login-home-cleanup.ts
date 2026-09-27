@@ -12,14 +12,20 @@ import { logger as serverLogger } from "../middleware/logger.js";
  * used by the OpenAI/Codex (`CODEX_HOME`) and xAI/Grok (`GROK_HOME`) login
  * attempts, which may be live across a restart, so only children that look like
  * a Claude config home are removed. Symlinks are never followed.
+ *
+ * A Claude login home is recognized only by which files exist in it: a regular
+ * file named `.claude.json`, `.credentials.json` or `credentials.json`. The
+ * cleanup never opens or reads those files, so it never reads a Claude sign-in.
  */
 
 export const LOCAL_AI_LOGIN_HOMES_DIRNAME = "ai-local-logins";
 
-const CLAUDE_CONFIG_MARKER_FILE = ".claude.json";
-const CLAUDE_CREDENTIAL_FILES = [".credentials.json", "credentials.json"] as const;
-// Claude credential files are a few KiB; refuse to parse anything unexpectedly large.
-const MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024;
+const CLAUDE_LOGIN_HOME_MARKER_FILES = [".claude.json", ".credentials.json", "credentials.json"] as const;
+// Codex and Grok keep their login in `auth.json`. A home that has one belongs to
+// them and is never treated as a Claude login home, whatever else it holds.
+const OTHER_CLI_LOGIN_FILES = ["auth.json"] as const;
+// Stale seed settings are a few KiB; refuse to parse anything unexpectedly large.
+const MAX_SEED_SETTINGS_BYTES = 1024 * 1024;
 
 export interface ClaudeLoginHomeCleanupLogger {
   info(obj: Record<string, unknown>, msg: string): void;
@@ -45,6 +51,7 @@ function errnoCode(err: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
+/** lstat only: a symlink is never a regular file here, and nothing is opened. */
 async function isRegularFile(filePath: string): Promise<boolean> {
   try {
     return (await lstat(filePath)).isFile();
@@ -53,27 +60,21 @@ async function isRegularFile(filePath: string): Promise<boolean> {
   }
 }
 
-async function hasClaudeOauthCredential(filePath: string): Promise<boolean> {
+async function entryExists(filePath: string): Promise<boolean> {
   try {
-    const stat = await lstat(filePath);
-    if (!stat.isFile() || stat.size > MAX_CREDENTIAL_FILE_BYTES) return false;
-    const parsed: unknown = JSON.parse(await readFile(filePath, "utf8"));
-    return (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      !Array.isArray(parsed) &&
-      Object.prototype.hasOwnProperty.call(parsed, "claudeAiOauth")
-    );
+    await lstat(filePath);
+    return true;
   } catch {
-    // Unreadable or invalid JSON is not evidence of a Claude login home.
     return false;
   }
 }
 
 async function isClaudeLoginHome(directory: string): Promise<boolean> {
-  if (await isRegularFile(path.join(directory, CLAUDE_CONFIG_MARKER_FILE))) return true;
-  for (const name of CLAUDE_CREDENTIAL_FILES) {
-    if (await hasClaudeOauthCredential(path.join(directory, name))) return true;
+  for (const name of OTHER_CLI_LOGIN_FILES) {
+    if (await entryExists(path.join(directory, name))) return false;
+  }
+  for (const name of CLAUDE_LOGIN_HOME_MARKER_FILES) {
+    if (await isRegularFile(path.join(directory, name))) return true;
   }
   return false;
 }
@@ -192,7 +193,7 @@ async function seedCarriesCredentialSettings(snapshotDir: string): Promise<boole
   const settingsPath = path.join(snapshotDir, "settings.json");
   try {
     const stat = await lstat(settingsPath);
-    if (!stat.isFile() || stat.size > MAX_CREDENTIAL_FILE_BYTES) return false;
+    if (!stat.isFile() || stat.size > MAX_SEED_SETTINGS_BYTES) return false;
     const parsed: unknown = JSON.parse(await readFile(settingsPath, "utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
     return CLAUDE_SETTINGS_CREDENTIAL_KEYS.some((key) =>

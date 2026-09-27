@@ -2,6 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Record every path the cleanup service reads, so a test can prove it never
+// opens a file inside a login home.
+const readFileCalls = vi.hoisted(() => [] as string[]);
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: vi.fn((...args: Parameters<typeof actual.readFile>) => {
+      readFileCalls.push(String(args[0]));
+      return actual.readFile(...args);
+    }),
+  };
+});
 import {
   LOCAL_AI_LOGIN_HOMES_DIRNAME,
   removeLeftoverClaudeLoginHomes,
@@ -61,7 +75,7 @@ describe("removeLeftoverClaudeLoginHomes", () => {
     expect(await exists(loginsDir)).toBe(false);
   });
 
-  it("removes a home whose .credentials.json holds claudeAiOauth and drops the emptied parent", async () => {
+  it("removes a home that has a .credentials.json file and drops the emptied parent", async () => {
     const logger = createLoggerSpy();
     const home = await writeHome(loginsDir, "claude-oauth", { ".credentials.json": claudeCredentials });
 
@@ -91,7 +105,7 @@ describe("removeLeftoverClaudeLoginHomes", () => {
     expect(logger.info.mock.calls[0]?.[1]).toBe(`Removed 2 leftover Claude login home(s) from ${loginsDir}`);
   });
 
-  it("keeps Codex and Grok homes, top-level files, and non-Claude credential files", async () => {
+  it("keeps Codex and Grok homes, empty attempts, and top-level files", async () => {
     const logger = createLoggerSpy();
     const claude = await writeHome(loginsDir, "claude", { ".credentials.json": claudeCredentials });
     const codex = await writeHome(loginsDir, "codex", {
@@ -99,14 +113,16 @@ describe("removeLeftoverClaudeLoginHomes", () => {
       "auth.json": JSON.stringify({ tokens: { access_token: "codex" } }),
     });
     const grok = await writeHome(loginsDir, "grok", {
-      "settings.json": "{}",
-      "credentials.json": JSON.stringify({ xaiOauth: { accessToken: "grok" } }),
+      "auth.json": JSON.stringify({ "https://issuer.x.ai::00000000-0000-4000-8000-000000000000": {} }),
     });
-    const invalidJson = await writeHome(loginsDir, "invalid-json", { ".credentials.json": "{not json" });
-    const nestedKey = await writeHome(loginsDir, "nested-key", {
-      ".credentials.json": JSON.stringify({ wrapper: { claudeAiOauth: {} } }),
+    // A home with a Codex/Grok login file is theirs, even next to a Claude-named file.
+    const grokWithCredentials = await writeHome(loginsDir, "grok-with-credentials", {
+      "auth.json": "{}",
+      "credentials.json": "{}",
     });
     const empty = await writeHome(loginsDir, "empty-attempt", {});
+    const markerDirectory = await writeHome(loginsDir, "marker-directory", {});
+    await fs.mkdir(path.join(markerDirectory, ".credentials.json"));
     const topLevelFile = path.join(loginsDir, ".claude.json");
     await fs.writeFile(topLevelFile, "{}");
 
@@ -114,12 +130,34 @@ describe("removeLeftoverClaudeLoginHomes", () => {
 
     expect(result).toEqual({ removed: 1, failed: 0 });
     expect(await exists(claude)).toBe(false);
-    for (const kept of [codex, grok, invalidJson, nestedKey, empty, topLevelFile]) {
+    for (const kept of [codex, grok, grokWithCredentials, empty, markerDirectory, topLevelFile]) {
       expect(await exists(kept)).toBe(true);
     }
     expect(await fs.readFile(path.join(codex, "auth.json"), "utf8")).toContain("codex");
     expect(await exists(loginsDir)).toBe(true);
     expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("recognizes a Claude login home by file names alone, without reading the files", async () => {
+    const logger = createLoggerSpy();
+    // Content that the old reader rejected (invalid JSON, no claudeAiOauth key)
+    // does not matter: only the file names count.
+    const invalidJson = await writeHome(loginsDir, "invalid-json", { ".credentials.json": "{not json" });
+    const otherShape = await writeHome(loginsDir, "other-shape", {
+      "credentials.json": JSON.stringify({ wrapper: {} }),
+    });
+    const unreadable = await writeHome(loginsDir, "unreadable", { ".credentials.json": claudeCredentials });
+    await fs.chmod(path.join(unreadable, ".credentials.json"), 0o000);
+
+    readFileCalls.length = 0;
+    const result = await removeLeftoverClaudeLoginHomes({ instanceRoot, logger });
+
+    expect(result).toEqual({ removed: 3, failed: 0 });
+    for (const removed of [invalidJson, otherShape, unreadable]) {
+      expect(await exists(removed)).toBe(false);
+    }
+    expect(readFileCalls).toEqual([]);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 

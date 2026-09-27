@@ -12,12 +12,21 @@ import type {
 } from "@paperclipai/adapter-utils";
 
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
+import {
+  isAnthropicApiCredentialValue,
+  resolveClaudeSubscriptionHarnessViolation,
+} from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
+
 import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
-import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
-import { resolveHermesCommand } from "./execute.js";
+import {
+  detectModel,
+  isHermesAnthropicRunRoute,
+  resolveProvider,
+  inferProviderFromModel,
+} from "./detect-model.js";
+import { HERMES_ANTHROPIC_KEY_LOCATION_HINT, resolveHermesCommand } from "./execute.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -138,40 +147,18 @@ async function checkApiKeys(
 ): Promise<AdapterEnvironmentCheck | null> {
   // The server resolves secret refs into config.env before calling testEnvironment,
   // so we check config.env first (adapter-configured secrets), then fall back to
-  // process.env (server/host environment), then ~/.hermes/.env (Hermes local config).
+  // process.env (server/host environment). Paperclip does not read
+  // ~/.hermes/.env: Hermes keeps Claude sign-in tokens (ANTHROPIC_TOKEN) there.
   const envConfig = (config.env ?? {}) as Record<string, unknown>;
   const resolvedEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string" && value.length > 0) resolvedEnv[key] = value;
   }
 
-  // Also read ~/.hermes/.env — Hermes stores API keys there by default and does
-  // not export them to the parent process, so Paperclip's process.env won't
-  // contain them.  Parsing this file ensures the environment test reports
-  // accurate results for keys that Hermes already knows about.
-  const hermesEnvKeys: Record<string, string> = {};
-  try {
-    const homeDir = process.env.HOME || process.env.USERPROFILE || "/root";
-    const hermesEnvPath = `${homeDir}/.hermes/.env`;
-    const content = readFileSync(hermesEnvPath, "utf-8");
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIdx = trimmed.indexOf("=");
-      if (eqIdx > 0) {
-        const key = trimmed.substring(0, eqIdx).trim();
-        const value = trimmed.substring(eqIdx + 1).trim();
-        if (value.length > 0) hermesEnvKeys[key] = value;
-      }
-    }
-  } catch {
-    // ~/.hermes/.env may not exist — that's fine
-  }
-
   const has = (key: string): boolean =>
-    !!(resolvedEnv[key] ?? process.env[key] ?? hermesEnvKeys[key]);
+    !!(resolvedEnv[key] ?? process.env[key]);
 
-  const hasAnthropic = has("ANTHROPIC_API_KEY");
+  const hasAnthropic = isAnthropicApiCredentialValue(resolvedEnv.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY);
   const hasOpenRouter = has("OPENROUTER_API_KEY");
   const hasOpenAI = has("OPENAI_API_KEY");
   const hasZai = has("ZAI_API_KEY");
@@ -236,9 +223,52 @@ async function checkApiKeys(
 
   return {
     level: "warn",
-    message: "No LLM API keys found in environment",
-    hint: "Set API keys in the agent's env secrets or ~/.hermes/.env. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
+    message: "No LLM API keys found in the agent or server environment",
+    hint: "Set API keys in the agent's env secrets. Hermes may still find keys in ~/.hermes/.env, which Paperclip does not read. Hermes supports: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ZAI_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY",
     code: "hermes_no_api_keys",
+  };
+}
+
+/**
+ * Only the official claude binary may use a Claude subscription. A Hermes run
+ * on the Anthropic provider needs ANTHROPIC_API_KEY in the agent or server env,
+ * the same gate `execute` applies before it starts Hermes.
+ */
+function checkClaudeSubscriptionPolicy(
+  config: Record<string, unknown>,
+  detectedConfig: Awaited<ReturnType<typeof detectModel>> | null,
+): AdapterEnvironmentCheck | null {
+  const explicitProvider = asString(config.provider);
+  const model = asString(config.model) || DEFAULT_MODEL;
+  const { provider: resolvedProvider } = resolveProvider({
+    explicitProvider,
+    detectedProvider: detectedConfig?.provider,
+    detectedModel: detectedConfig?.model,
+    detectedBaseUrl: detectedConfig?.baseUrl,
+    detectedHasApiKey: detectedConfig?.hasApiKey,
+    detectedApiMode: detectedConfig?.apiMode,
+    model,
+  });
+  const extraArgs = Array.isArray(config.extraArgs)
+    ? config.extraArgs.filter((value): value is string => typeof value === "string")
+    : [];
+  const anthropicRoute = isHermesAnthropicRunRoute({
+    resolvedProvider,
+    // `execute` reads the Hermes config only when no explicit provider is set.
+    detectedProvider: explicitProvider ? null : detectedConfig?.provider,
+    extraArgs,
+  });
+  const env: Record<string, string | undefined> = { ...process.env };
+  for (const [key, value] of Object.entries((config.env ?? {}) as Record<string, unknown>)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  const violation = resolveClaudeSubscriptionHarnessViolation({ anthropicRoute, env });
+  if (!violation) return null;
+  return {
+    level: "error",
+    message: violation,
+    hint: `Add ANTHROPIC_API_KEY to this agent's environment as a secret, pick a non-Anthropic provider, or use the Claude (claude_local) adapter. ${HERMES_ANTHROPIC_KEY_LOCATION_HINT}`,
+    code: "hermes_anthropic_api_key_required",
   };
 }
 
@@ -373,6 +403,10 @@ export async function testEnvironment(
   // 7. Provider/model consistency
   const providerCheck = await checkProviderConsistency(config, detectedConfig);
   if (providerCheck) checks.push(providerCheck);
+
+  // 8. Anthropic runs need an API key (no Claude subscription outside claude)
+  const subscriptionCheck = checkClaudeSubscriptionPolicy(config, detectedConfig);
+  if (subscriptionCheck) checks.push(subscriptionCheck);
 
   // Determine overall status
   const hasErrors = checks.some((c) => c.level === "error");

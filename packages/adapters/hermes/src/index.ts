@@ -79,6 +79,12 @@ tools, persistent memory, session persistence, skills, and MCP support.
 - Python 3.10+ installed
 - Hermes Agent installed: \`pip install hermes-agent\`
 - At least one LLM API key configured in ~/.hermes/.env
+- Anthropic models (provider \`anthropic\`, or \`claude-*\` models without another provider) need
+  \`ANTHROPIC_API_KEY\` in this agent's environment. Only the official claude binary may use a
+  Claude subscription, so Paperclip refuses an Anthropic run without the key; use the Claude
+  (claude_local) adapter to run on the claude CLI signed in on this server. A key kept only in
+  ~/.hermes/.env or ~/.hermes/config.yaml does not count (Paperclip does not read those files):
+  move it into the agent env as a secret. A \`--provider\` or \`-m\`/\`--model\` in extraArgs counts too.
 
 ## Core Configuration
 

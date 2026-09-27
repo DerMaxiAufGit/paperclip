@@ -20,6 +20,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importActual) => {
 import { prepareAdapterExecutionTargetRuntime } from "@paperclipai/adapter-utils/execution-target";
 import {
   buildClaudeAcpConfig,
+  claudeConfigCredentialWorkspaceExcludes,
   createClaudeAcpExecutor,
   nodeVersionMeetsClaudeAcpMinimum,
   resolveClaudeAcpBillingIdentity,
@@ -1154,15 +1155,16 @@ describe("claude_local ACP lane", () => {
     }
   });
 
-  it("remaps a workspace-relative explicit CLAUDE_CONFIG_DIR onto the in-sandbox workspace path", async () => {
+  it("ignores an explicit CLAUDE_CONFIG_DIR inside the workspace and never stages or syncs back its sign-in files", async () => {
     const root = await makeTempRoot("paperclip-claude-acp-explicit-inworkspace-");
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
-    // Operator pins a config dir that lives INSIDE the workspace cwd, so it is
-    // staged into the sandbox and its host prefix must be remapped onto the
-    // in-sandbox workspace dir (never forwarded as the host path).
+    // Operator pins a config dir that lives INSIDE the workspace cwd and holds a
+    // Claude sign-in. The remote lane runs only on an API key: the dir is not
+    // used as the remote config dir, and its sign-in files never enter the
+    // sandbox or come back from it.
     const operatorConfigDir = path.join(localCwd, ".claude-config");
     await fs.mkdir(operatorConfigDir, { recursive: true });
     await fs.writeFile(
@@ -1170,13 +1172,41 @@ describe("claude_local ACP lane", () => {
       JSON.stringify({ permissions: { defaultMode: "acceptEdits" } }),
       "utf8",
     );
+    await fs.writeFile(path.join(operatorConfigDir, ".credentials.json"), "host-sign-in", "utf8");
+    await fs.writeFile(path.join(operatorConfigDir, "credentials.json"), "host-sign-in-2", "utf8");
     process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home");
     process.env.PAPERCLIP_INSTANCE_ID = "test";
+
+    const stagedCredentialFiles: string[] = [];
+    const runtime = new FakeRuntime({});
+    const startTurn = runtime.startTurn.bind(runtime);
+    runtime.startTurn = (input) => {
+      const turn = startTurn(input);
+      const remoteWorkspaceCwd = input.handle.cwd ?? remoteCwd;
+      return {
+        ...turn,
+        result: (async () => {
+          for (const name of [".credentials.json", "credentials.json"]) {
+            const staged = path.join(remoteWorkspaceCwd, ".claude-config", name);
+            if (await fs.stat(staged).then(() => true, () => false)) stagedCredentialFiles.push(name);
+          }
+          // A sign-in written in the sandbox never syncs back to the host.
+          await fs.mkdir(path.join(remoteWorkspaceCwd, ".claude-config"), { recursive: true });
+          await fs.writeFile(path.join(remoteWorkspaceCwd, ".claude-config", ".credentials.json"), "sandbox-sign-in", "utf8");
+          await fs.writeFile(path.join(remoteWorkspaceCwd, ".claude-config", "credentials.json"), "sandbox-sign-in", "utf8");
+          await fs.writeFile(path.join(remoteWorkspaceCwd, "from-sandbox.txt"), "synced", "utf8");
+          return await turn.result;
+        })(),
+      };
+    };
 
     const meta: AdapterInvocationMeta[] = [];
     const logs: string[] = [];
     const execute = createClaudeAcpExecutor({
-      createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(options) as never,
+      createRuntime: (options: FakeRuntimeOptions) => {
+        Object.assign(runtime.options, options);
+        return runtime as never;
+      },
     });
     const result = await execute(
       buildContext(localCwd, {
@@ -1210,14 +1240,19 @@ describe("claude_local ACP lane", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    // Prefix remapped host→sandbox: same relative subpath, in-sandbox workspace root.
-    expect(meta[0]?.env?.CLAUDE_CONFIG_DIR).toBe(path.posix.join(remoteCwd, ".claude-config"));
-    expect(meta[0]?.env?.CLAUDE_CONFIG_DIR).not.toBe(operatorConfigDir);
-    // No managed config seed is materialized — the operator dir is authoritative.
-    expect(String(meta[0]?.env?.CLAUDE_CONFIG_DIR ?? "")).not.toContain(".paperclip-runtime");
-    expect(logs.join("")).toContain(
-      `Remapped operator CLAUDE_CONFIG_DIR from host path ${operatorConfigDir}`,
-    );
+    // Not remapped onto the in-sandbox workspace: the managed config is seeded instead.
+    const remoteConfigDir = String(meta[0]?.env?.CLAUDE_CONFIG_DIR ?? "");
+    expect(remoteConfigDir).not.toBe(operatorConfigDir);
+    expect(remoteConfigDir).not.toBe(path.posix.join(remoteCwd, ".claude-config"));
+    expect(remoteConfigDir).toContain(".paperclip-runtime");
+    expect(logs.join("")).toContain("is inside the staged workspace; ignoring it on the remote target");
+    expect(logs.join("")).not.toContain("Remapped operator CLAUDE_CONFIG_DIR");
+    // Never staged into the sandbox.
+    expect(stagedCredentialFiles).toEqual([]);
+    // Never synced back: the host sign-in files are untouched, other changes land.
+    await expect(fs.readFile(path.join(operatorConfigDir, ".credentials.json"), "utf8")).resolves.toBe("host-sign-in");
+    await expect(fs.readFile(path.join(operatorConfigDir, "credentials.json"), "utf8")).resolves.toBe("host-sign-in-2");
+    await expect(fs.readFile(path.join(localCwd, "from-sandbox.txt"), "utf8")).resolves.toBe("synced");
   });
 
   it("ignores a host-only explicit CLAUDE_CONFIG_DIR that cannot reach the sandbox and seeds the managed config instead", async () => {
@@ -1528,5 +1563,37 @@ describe("resolveClaudeAcpBillingIdentity", () => {
         executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/work" },
       } as never).billingType,
     ).toBe("unknown");
+  });
+});
+
+describe("claudeConfigCredentialWorkspaceExcludes", () => {
+  it("excludes the sign-in files of each Claude config dir inside the workspace", () => {
+    const workspace = path.join(os.tmpdir(), "ws");
+    expect(
+      claudeConfigCredentialWorkspaceExcludes({
+        workspaceLocalDir: workspace,
+        configDirs: [
+          path.join(workspace, ".claude-config"),
+          path.join(workspace, "nested", "claude"),
+          path.join(os.tmpdir(), "outside"),
+          "relative/path",
+          "",
+          null,
+          undefined,
+        ],
+      }),
+    ).toEqual([
+      ".claude-config/.credentials.json",
+      ".claude-config/credentials.json",
+      "nested/claude/.credentials.json",
+      "nested/claude/credentials.json",
+    ]);
+  });
+
+  it("excludes top-level sign-in files when the config dir is the workspace itself", () => {
+    const workspace = path.join(os.tmpdir(), "ws");
+    expect(
+      claudeConfigCredentialWorkspaceExcludes({ workspaceLocalDir: workspace, configDirs: [workspace] }),
+    ).toEqual([".credentials.json", "credentials.json"]);
   });
 });

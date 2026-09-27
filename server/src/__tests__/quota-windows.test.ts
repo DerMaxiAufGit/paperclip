@@ -3,10 +3,8 @@ import os from "node:os";
 import path from "node:path";
 
 // Pure utility functions — import directly from adapter source.
-// The Claude quota comes only from the claude CLI /usage panel; Paperclip no
-// longer reads the Claude sign-in or calls Anthropic's usage endpoint.
-import { parseClaudeCliUsageText } from "@paperclipai/adapter-claude-local/server";
-
+// Claude has no quota windows: Paperclip neither reads the Claude sign-in nor
+// scrapes the claude CLI /usage panel (see the claude-local quota tests).
 import {
   secondsToWindowLabel,
   readCodexAuthInfo,
@@ -153,65 +151,6 @@ describe("WHAM used_percent normalization via fetchCodexQuota", () => {
     });
     const windows = await fetchCodexQuota("token", null);
     expect(windows[0]!.usedPercent).toBe(null);
-  });
-});
-
-describe("parseClaudeCliUsageText", () => {
-  it("parses the Claude usage panel layout into quota windows", () => {
-    const raw = `
-      Settings:  Status   Config   Usage
-      Current session
-      2% used
-      Resets 5pm (America/Chicago)
-
-      Current week (all models)
-      47% used
-      Resets Mar 18 at 7:59am (America/Chicago)
-
-      Current week (Sonnet only)
-      0% used
-      Resets Mar 18 at 8:59am (America/Chicago)
-
-      Extra usage
-      Extra usage not enabled • /extra-usage to enable
-    `;
-
-    expect(parseClaudeCliUsageText(raw)).toEqual([
-      {
-        label: "Current session",
-        usedPercent: 2,
-        resetsAt: null,
-        valueLabel: null,
-        detail: "Resets 5pm (America/Chicago)",
-      },
-      {
-        label: "Current week (all models)",
-        usedPercent: 47,
-        resetsAt: null,
-        valueLabel: null,
-        detail: "Resets Mar 18 at 7:59am (America/Chicago)",
-      },
-      {
-        label: "Current week (Sonnet only)",
-        usedPercent: 0,
-        resetsAt: null,
-        valueLabel: null,
-        detail: "Resets Mar 18 at 8:59am (America/Chicago)",
-      },
-      {
-        label: "Extra usage",
-        usedPercent: null,
-        resetsAt: null,
-        valueLabel: null,
-        detail: "Extra usage not enabled • /extra-usage to enable",
-      },
-    ]);
-  });
-
-  it("throws a useful error when the Claude CLI panel reports a usage load failure", () => {
-    expect(() => parseClaudeCliUsageText("Failed to load usage data")).toThrow(
-      "Claude CLI could not load usage data. Open the CLI and retry `/usage`.",
-    );
   });
 });
 

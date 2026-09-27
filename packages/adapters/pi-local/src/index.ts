@@ -39,4 +39,5 @@ Notes:
 - Sessions are stored in ~/.pi/paperclips/ and resumed with --session.
 - All tools (read, bash, edit, write, grep, find, ls) are enabled by default.
 - Agent instructions are appended to Pi's system prompt via --append-system-prompt, while the user task is sent via -p.
+- Anthropic models (\`anthropic/...\`) need ANTHROPIC_API_KEY (or a gateway ANTHROPIC_AUTH_TOKEN) in this agent's env. Only the official claude binary may use a Claude subscription, so Paperclip refuses the run without a key and runs Pi with an agent config dir that leaves out auth.json, so a stored Pi login is not used. A key kept only in Pi's auth.json does not count: move it into the agent env. A \`--provider\` or \`--model\` in extraArgs counts too.
 `;

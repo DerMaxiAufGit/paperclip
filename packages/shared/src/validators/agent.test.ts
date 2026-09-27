@@ -26,7 +26,7 @@ describe("agent adapterConfig.env Claude subscription token rejection", () => {
     const issues = claudeTokenIssues(result);
     expect(issues).toHaveLength(1);
     expect(issues[0]?.message).toBe(
-      "CLAUDE_CODE_OAUTH_TOKEN is not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.",
+      "Claude subscription tokens (CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_REFRESH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_TOKEN, or any sk-ant-oat, sk-ant-ort or sk-ant-sid value) are not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.",
     );
     expect(issues[0]?.path).toEqual(["adapterConfig", "env", "CLAUDE_CODE_OAUTH_TOKEN"]);
   });

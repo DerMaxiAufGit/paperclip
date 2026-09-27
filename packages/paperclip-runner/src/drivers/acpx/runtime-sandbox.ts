@@ -35,6 +35,37 @@ import {
   type AcpxRecoveryBinding,
 } from "./recovery-identity.js";
 
+/**
+ * The runner's Claude ACPX lane never uses a Claude subscription: a Claude
+ * sign-in is only used by the official `claude` CLI on the Paperclip server
+ * itself. So this lane needs an Anthropic API key (`ANTHROPIC_API_KEY`, the
+ * only Claude credential the ACPX environment allowlist passes). The text is
+ * the same message the claude_local adapter uses for remote targets
+ * (`CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE`); this package does not depend on
+ * that adapter, so it is repeated here.
+ */
+export const CLAUDE_ACPX_API_KEY_REQUIRED_MESSAGE =
+  "Claude on remote targets needs an Anthropic API key; subscription use is limited to the claude CLI signed in on this server.";
+
+/**
+ * Prefixes of a Claude.ai credential (OAuth access token, OAuth refresh token,
+ * session key); such a value is never an API key. Mirrors
+ * `CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PREFIXES` in @paperclipai/shared.
+ */
+const CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PATTERN = /^sk-ant-(oat|ort|sid)/;
+
+/**
+ * Refuse to prepare a Claude ACPX sandbox without an Anthropic API key. A
+ * subscription token (`sk-ant-oat…`, `sk-ant-ort…`, `sk-ant-sid…`) in
+ * `ANTHROPIC_API_KEY` does not count.
+ */
+export function assertClaudeAcpxApiCredential(environment: NodeJS.ProcessEnv): void {
+  const apiKey = environment.ANTHROPIC_API_KEY?.trim() ?? "";
+  if (!apiKey || CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PATTERN.test(apiKey.toLowerCase())) {
+    throw new Error(CLAUDE_ACPX_API_KEY_REQUIRED_MESSAGE);
+  }
+}
+
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_SANDBOX_ENVIRONMENT_BYTES = 512 * 1024;
@@ -328,6 +359,12 @@ export async function prepareAcpxRuntimeSandbox(input: {
   /** Public operations on the runner-owned Paperclip MCP bridge only. */
   tools?: readonly Readonly<Record<string, unknown>>[];
 }): Promise<AcpxRuntimeSandbox> {
+  // Fail before any filesystem work: the Claude lane runs only on an API key.
+  if (input.agent === "claude") {
+    assertClaudeAcpxApiCredential(
+      createSanitizedAcpxSpawnInput(input.environment, input.agent).env,
+    );
+  }
   const expectedRoot = input.binding.runtimeRoot;
   if (resolve(expectedRoot) !== expectedRoot) {
     throw new Error("ACPX runtime root must be an absolute normalized path");

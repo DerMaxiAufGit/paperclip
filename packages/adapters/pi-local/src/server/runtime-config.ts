@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { readHarnessCliFlagValues } from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 
 type PreparedPiRuntimeConfig = {
   env: Record<string, string>;
@@ -87,6 +88,83 @@ function parseProviderConfig(
   }
 }
 
+/**
+ * True when a Pi model reference talks to Anthropic directly: the `anthropic`
+ * provider, or a bare `claude-*` model ID without a provider (Pi then matches
+ * it against its catalog, where Anthropic serves it). Anthropic models reached
+ * through another provider (OpenRouter, Bedrock, Vertex, a gateway) do not
+ * count.
+ */
+export function isPiAnthropicModel(model: string | null | undefined): boolean {
+  const trimmed = (model ?? "").trim().toLowerCase();
+  if (!trimmed) return false;
+  const slash = trimmed.indexOf("/");
+  if (slash >= 0) return trimmed.slice(0, slash).trim() === "anthropic";
+  return trimmed.startsWith("claude");
+}
+
+/**
+ * `isPiAnthropicModel` for the command line Pi actually gets. Paperclip appends
+ * the agent's extra args after its own `--provider` and `--model`, and the last
+ * value wins, so an extra `--provider anthropic` or an extra Anthropic model
+ * also makes the run an Anthropic run.
+ */
+export function isPiAnthropicRun(input: {
+  model: string | null | undefined;
+  extraArgs?: readonly string[] | null;
+}): boolean {
+  if (isPiAnthropicModel(input.model)) return true;
+  const extraProviders = readHarnessCliFlagValues(input.extraArgs, ["--provider"]).map((value) =>
+    value.toLowerCase(),
+  );
+  if (extraProviders.includes("anthropic")) return true;
+  const configuredModel = (input.model ?? "").trim();
+  const slash = configuredModel.indexOf("/");
+  const configuredProvider = slash > 0 ? configuredModel.slice(0, slash).trim().toLowerCase() : "";
+  const effectiveProvider = extraProviders.at(-1) ?? configuredProvider;
+  return readHarnessCliFlagValues(input.extraArgs, ["--model"]).some((model) =>
+    model.includes("/") || !effectiveProvider ? isPiAnthropicModel(model) : effectiveProvider === "anthropic",
+  );
+}
+
+/**
+ * Env keys Pi reads as an Anthropic API credential. `ANTHROPIC_OAUTH_TOKEN` is
+ * Pi's Claude sign-in slot and never counts; the spawn layer drops it.
+ */
+export const PI_ANTHROPIC_API_KEY_ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] as const;
+
+// Pi's stored logins (`/login`) live in `auth.json` in the agent config dir, and
+// a stored credential wins over every env key. Leave it (and its lock) out of a
+// managed agent dir so an Anthropic run authenticates with the API key.
+function isPiStoredLoginEntry(name: string): boolean {
+  return name === "auth.json" || name.startsWith("auth.json.");
+}
+
+function resolveHostPiAgentDir(env: Record<string, string>): string {
+  const fromEnv = (env.PI_CODING_AGENT_DIR ?? process.env.PI_CODING_AGENT_DIR ?? "").trim();
+  return fromEnv || path.join(os.homedir(), ".pi", "agent");
+}
+
+// Link every entry of the host agent dir except the stored logins, so Pi keeps
+// its settings, models, extensions and tools. Only the directory listing is
+// read; no file content is.
+async function linkHostPiAgentDirWithoutLogins(sourceDir: string, targetDir: string): Promise<number> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(sourceDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return 0;
+    throw err;
+  }
+  let linked = 0;
+  for (const name of entries) {
+    if (isPiStoredLoginEntry(name)) continue;
+    await fs.symlink(path.join(sourceDir, name), path.join(targetDir, name));
+    linked += 1;
+  }
+  return linked;
+}
+
 // Materialize custom Pi providers supplied via PAPERCLIP_PI_PROVIDERS (a JSON
 // object in Pi's models.json "providers" shape) into a managed agent-config dir.
 //
@@ -104,14 +182,48 @@ function parseProviderConfig(
 // a literal apiKey or a server-side-expanded {env:VAR} placeholder). For remote
 // execution targets, execute.ts ships the dir to the sandbox as a runtime asset
 // and repoints PI_CODING_AGENT_DIR at the in-sandbox copy.
+//
+// With `hideStoredLogins` (an Anthropic run), Pi also never sees the host
+// `auth.json`: only the official claude binary may use a Claude subscription,
+// and a stored Pi login would win over ANTHROPIC_API_KEY. Without custom
+// providers, a local run gets a managed agent dir that links every host entry
+// except `auth.json`; a remote run gets an empty one (shipped by execute.ts), so
+// the remote Pi does not read a login stored there either.
 export async function preparePiRuntimeConfig(input: {
   env: Record<string, string>;
+  hideStoredLogins?: boolean;
+  targetIsRemote?: boolean;
 }): Promise<PreparedPiRuntimeConfig> {
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
   const { providers, warning } = parseProviderConfig(
     input.env.PAPERCLIP_PI_PROVIDERS ?? process.env.PAPERCLIP_PI_PROVIDERS,
     resolveEnv,
   );
+  if (!providers && input.hideStoredLogins) {
+    const agentConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-agent-config-"));
+    try {
+      if (!input.targetIsRemote) {
+        await linkHostPiAgentDirWithoutLogins(resolveHostPiAgentDir(input.env), agentConfigDir);
+      }
+    } catch (err) {
+      await fs.rm(agentConfigDir, { recursive: true, force: true }).catch(() => undefined);
+      throw err;
+    }
+    return {
+      env: {
+        ...input.env,
+        PI_CODING_AGENT_DIR: agentConfigDir,
+      },
+      notes: [
+        ...(warning ? [warning] : []),
+        "Anthropic model: Pi runs with an agent config dir without auth.json, so it uses the Anthropic API key instead of a stored login.",
+      ],
+      agentConfigDir,
+      cleanup: async () => {
+        await fs.rm(agentConfigDir, { recursive: true, force: true });
+      },
+    };
+  }
   if (!providers) {
     return {
       env: input.env,

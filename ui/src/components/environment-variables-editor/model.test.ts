@@ -172,7 +172,7 @@ describe("validateName", () => {
 
   it("rejects the Claude subscription token key in any letter case", () => {
     const message =
-      "CLAUDE_CODE_OAUTH_TOKEN is not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.";
+      "Claude subscription tokens (CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_REFRESH_TOKEN, ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_TOKEN, or any sk-ant-oat, sk-ant-ort or sk-ant-sid value) are not supported. Claude subscriptions are used through the claude CLI signed in on this server; use ANTHROPIC_API_KEY for API-key access.";
     expect(validateName("CLAUDE_CODE_OAUTH_TOKEN", new Set(), reserved)).toEqual({ level: "error", message });
     expect(validateName("claude_code_oauth_token", new Set(), reserved)).toEqual({ level: "error", message });
     expect(validateName("ANTHROPIC_API_KEY", new Set(), reserved)).toBeNull();

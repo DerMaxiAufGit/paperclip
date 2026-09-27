@@ -5,8 +5,12 @@ import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CONNECTION_INTENT_AGENT_GUIDANCE } from "@paperclipai/shared";
-import { isNeverForwardedChildEnvKey, sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
-export { NEVER_FORWARDED_CHILD_ENV_KEYS, isNeverForwardedChildEnvKey } from "./remote-execution-env.js";
+import { isNeverForwardedChildEnvEntry, sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
+export {
+  NEVER_FORWARDED_CHILD_ENV_KEYS,
+  isNeverForwardedChildEnvEntry,
+  isNeverForwardedChildEnvKey,
+} from "./remote-execution-env.js";
 import {
   buildLocalProcessSandboxSpawnTarget,
   type LocalProcessSandboxOptions,
@@ -3389,10 +3393,14 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
-/** Delete every Claude subscription credential key (see `NEVER_FORWARDED_CHILD_ENV_KEYS`). */
+/**
+ * Delete every Claude subscription credential: each key in
+ * `NEVER_FORWARDED_CHILD_ENV_KEYS`, and each entry whose value is a
+ * subscription token (`sk-ant-oat…`) under any key.
+ */
 function deleteNeverForwardedChildEnvKeys(env: Record<string, string | undefined>): void {
-  for (const key of Object.keys(env)) {
-    if (isNeverForwardedChildEnvKey(key)) delete env[key];
+  for (const [key, value] of Object.entries(env)) {
+    if (isNeverForwardedChildEnvEntry(key, value)) delete env[key];
   }
 }
 

@@ -1968,6 +1968,13 @@
       "when": 1790270962937,
       "tag": "0282_remove_claude_subscription_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 283,
+      "version": "7",
+      "when": 1790537538779,
+      "tag": "0283_remove_claude_subscription_tokens_from_env",
+      "breakpoints": true
     }
   ]
 }

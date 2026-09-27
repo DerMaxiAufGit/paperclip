@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { preparePiRuntimeConfig } from "./runtime-config.js";
+import { isPiAnthropicModel, isPiAnthropicRun, preparePiRuntimeConfig } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
 
@@ -222,6 +223,113 @@ describe("preparePiRuntimeConfig", () => {
     });
     expect(prepared.env.PI_CODING_AGENT_DIR).toBeUndefined();
     expect(prepared.notes).toEqual([]);
+    await prepared.cleanup();
+  });
+});
+
+describe("isPiAnthropicModel", () => {
+  it("matches the anthropic provider and bare claude-* IDs only", () => {
+    expect(isPiAnthropicModel("anthropic/claude-sonnet-4-5")).toBe(true);
+    expect(isPiAnthropicModel(" Anthropic/claude-opus-4 ")).toBe(true);
+    expect(isPiAnthropicModel("claude-sonnet-4-5")).toBe(true);
+    expect(isPiAnthropicModel("openrouter/anthropic/claude-sonnet-4-5")).toBe(false);
+    expect(isPiAnthropicModel("amazon-bedrock/anthropic.claude-sonnet-4-5")).toBe(false);
+    expect(isPiAnthropicModel("openai/gpt-5.4-mini")).toBe(false);
+    expect(isPiAnthropicModel("")).toBe(false);
+    expect(isPiAnthropicModel(null)).toBe(false);
+  });
+});
+
+describe("isPiAnthropicRun", () => {
+  it("counts a provider or model that extra args set after --provider and --model", () => {
+    expect(isPiAnthropicRun({ model: "openai/gpt-5", extraArgs: ["--provider", "anthropic"] })).toBe(true);
+    expect(isPiAnthropicRun({ model: "openai/gpt-5", extraArgs: ["--model", "anthropic/claude-opus-4"] })).toBe(true);
+    expect(isPiAnthropicRun({ model: "", extraArgs: ["--model=claude-sonnet-4-5"] })).toBe(true);
+    expect(isPiAnthropicRun({ model: "openai/gpt-5", extraArgs: ["--provider=anthropic", "--model", "x"] })).toBe(true);
+    // A bare model stays on the configured provider.
+    expect(isPiAnthropicRun({ model: "openrouter/x", extraArgs: ["--model", "claude-sonnet-4-5"] })).toBe(false);
+    expect(isPiAnthropicRun({ model: "openai/gpt-5", extraArgs: ["--thinking", "high"] })).toBe(false);
+  });
+});
+
+describe("preparePiRuntimeConfig hideStoredLogins", () => {
+  async function hostAgentDir(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-host-agent-"));
+    cleanupPaths.add(dir);
+    await fs.writeFile(path.join(dir, "auth.json"), '{"anthropic":{"type":"oauth"}}');
+    await fs.mkdir(path.join(dir, "auth.json.lock"));
+    await fs.writeFile(path.join(dir, "settings.json"), '{"defaultThinkingLevel":"high"}');
+    await fs.writeFile(path.join(dir, "models.json"), '{"providers":{}}');
+    await fs.mkdir(path.join(dir, "extensions"));
+    return dir;
+  }
+
+  it("links every host agent entry except the stored logins for a local run", async () => {
+    const host = await hostAgentDir();
+    const prepared = await preparePiRuntimeConfig({
+      env: { PI_CODING_AGENT_DIR: host },
+      hideStoredLogins: true,
+    });
+    const managed = prepared.env.PI_CODING_AGENT_DIR!;
+    cleanupPaths.add(managed);
+
+    expect(managed).not.toBe(host);
+    expect(prepared.agentConfigDir).toBe(managed);
+    expect((await fs.readdir(managed)).sort()).toEqual(["extensions", "models.json", "settings.json"]);
+    expect(await fs.readlink(path.join(managed, "settings.json"))).toBe(path.join(host, "settings.json"));
+    expect(prepared.notes.join("\n")).toMatch(/without auth\.json/);
+
+    await prepared.cleanup();
+    await expect(fs.stat(managed)).rejects.toMatchObject({ code: "ENOENT" });
+    // The host agent dir and its login are untouched.
+    expect(await fs.readFile(path.join(host, "auth.json"), "utf8")).toContain("oauth");
+  });
+
+  it("gives a remote run an empty managed agent dir", async () => {
+    const host = await hostAgentDir();
+    const prepared = await preparePiRuntimeConfig({
+      env: { PI_CODING_AGENT_DIR: host },
+      hideStoredLogins: true,
+      targetIsRemote: true,
+    });
+    cleanupPaths.add(prepared.agentConfigDir!);
+
+    expect(await fs.readdir(prepared.agentConfigDir!)).toEqual([]);
+    await prepared.cleanup();
+  });
+
+  it("works when the host agent dir does not exist", async () => {
+    const prepared = await preparePiRuntimeConfig({
+      env: { PI_CODING_AGENT_DIR: path.join(os.tmpdir(), "paperclip-pi-missing-agent-dir-does-not-exist") },
+      hideStoredLogins: true,
+    });
+    cleanupPaths.add(prepared.agentConfigDir!);
+
+    expect(await fs.readdir(prepared.agentConfigDir!)).toEqual([]);
+    await prepared.cleanup();
+  });
+
+  it("keeps the custom-provider dir, which never holds auth.json", async () => {
+    const host = await hostAgentDir();
+    const prepared = await preparePiRuntimeConfig({
+      env: {
+        PI_CODING_AGENT_DIR: host,
+        PAPERCLIP_PI_PROVIDERS: JSON.stringify({ gateway: { baseUrl: "https://gateway.example", models: [] } }),
+      },
+      hideStoredLogins: true,
+    });
+    cleanupPaths.add(prepared.agentConfigDir!);
+
+    expect(await fs.readdir(prepared.agentConfigDir!)).toEqual(["models.json"]);
+    await prepared.cleanup();
+  });
+
+  it("does nothing without hideStoredLogins", async () => {
+    const host = await hostAgentDir();
+    const prepared = await preparePiRuntimeConfig({ env: { PI_CODING_AGENT_DIR: host } });
+
+    expect(prepared.agentConfigDir).toBeNull();
+    expect(prepared.env.PI_CODING_AGENT_DIR).toBe(host);
     await prepared.cleanup();
   });
 });

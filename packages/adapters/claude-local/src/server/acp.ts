@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -212,6 +213,45 @@ export function resolveClaudeAcpBillingIdentity(
 }
 
 /**
+ * File names under which Claude Code stores a Claude sign-in in its config dir
+ * (`CLAUDE_CONFIG_DIR`, default `~/.claude`). A remote target runs only with an
+ * Anthropic API key, so these files are never staged into a sandbox and never
+ * synced back from one.
+ */
+export const CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES = [".credentials.json", "credentials.json"] as const;
+
+function workspaceRelativePath(workspaceLocalDir: string, candidate: string): string | null {
+  if (!candidate || !path.isAbsolute(candidate)) return null;
+  const relative = path.relative(path.resolve(workspaceLocalDir), path.resolve(candidate));
+  if (relative.length === 0) return "";
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return relative.split(path.sep).join(path.posix.sep);
+}
+
+/**
+ * Workspace-relative paths of the Claude sign-in files of every Claude config
+ * dir that lives inside the staged workspace: the agent's explicit
+ * `CLAUDE_CONFIG_DIR`, the server's own `CLAUDE_CONFIG_DIR`, and the default
+ * `~/.claude` (when the workspace contains the home directory). The remote ACP
+ * lane excludes them from both the workspace upload and the teardown sync-back.
+ */
+export function claudeConfigCredentialWorkspaceExcludes(input: {
+  workspaceLocalDir: string;
+  configDirs: ReadonlyArray<string | null | undefined>;
+}): string[] {
+  const excludes = new Set<string>();
+  for (const configDir of input.configDirs) {
+    const trimmed = typeof configDir === "string" ? configDir.trim() : "";
+    const relative = workspaceRelativePath(input.workspaceLocalDir, trimmed);
+    if (relative === null) continue;
+    for (const name of CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES) {
+      excludes.add(relative ? `${relative}/${name}` : name);
+    }
+  }
+  return [...excludes];
+}
+
+/**
  * Claude remote managed-home seed for the runner-backed remote sandbox ACP lane.
  * Mirrors the Claude CLI lane (`claude-local/execute.ts`): ship a sanitized
  * config seed (settings.json + CLAUDE.md, no credentials) as the `config-seed`
@@ -221,11 +261,13 @@ export function resolveClaudeAcpBillingIdentity(
  * copied back. The teardown hook therefore only syncs the sandbox workspace back
  * to the host; it does not touch credentials.
  *
- * An explicit `CLAUDE_CONFIG_DIR` (user-managed) is honored only if it can reach
- * the remote sandbox; a host-only path cannot, so we do NOT forward it verbatim
- * (that would start remote Claude with no config/credentials). See the branch
- * below for the two portable dispositions. The engine's `useRemoteProcessSession`
- * gate already guarantees the remote sandbox (managed-home) target.
+ * An explicit `CLAUDE_CONFIG_DIR` (user-managed) is never forwarded to the
+ * sandbox: a host-only path cannot reach it, and a path inside the staged
+ * workspace would ship that directory's Claude sign-in with the workspace. Both
+ * are ignored in favor of the managed config seed. The sign-in files of any
+ * Claude config dir inside the workspace are excluded from the workspace upload
+ * and from the sync-back. The engine's `useRemoteProcessSession` gate already
+ * guarantees the remote sandbox (managed-home) target.
  */
 async function prepareClaudeRemoteManagedHome(
   input: AcpxRemoteManagedHomeContext,
@@ -249,41 +291,30 @@ async function prepareClaudeRemoteManagedHome(
     typeof envConfig.CLAUDE_CONFIG_DIR === "string" && envConfig.CLAUDE_CONFIG_DIR.trim().length > 0
       ? envConfig.CLAUDE_CONFIG_DIR.trim()
       : "";
+  const workspaceExclude = claudeConfigCredentialWorkspaceExcludes({
+    workspaceLocalDir: input.workspaceLocalDir,
+    configDirs: [
+      explicitClaudeConfigDir,
+      process.env.CLAUDE_CONFIG_DIR,
+      path.join(os.homedir(), ".claude"),
+    ],
+  });
   if (explicitClaudeConfigDir && !input.config.managedAiConnection) {
-    // User-managed escape hatch. Unlike the Claude CLI lane
-    // (`claude-local/execute.ts`), which runs the process on the same host and can
-    // forward the operator's path verbatim, the remote ACP lane spawns Claude
-    // inside a sandbox that CANNOT see host paths. Forwarding an absolute host
-    // path unchanged would leave remote Claude without the requested config or
-    // credentials, so we choose one of two portable dispositions:
-    //   1. The path lives INSIDE the staged workspace → remap its prefix onto the
-    //      in-sandbox workspace dir so it resolves against the copied files.
-    //   2. The path is host-only (outside the workspace) → it cannot cross into
-    //      the sandbox, so ignore the un-portable override and seed the managed
-    //      config instead (falling through below), which guarantees working
-    //      config/credentials. Logged loudly so the substitution is diagnosable.
-    const relativeToWorkspace = path.relative(input.workspaceLocalDir, explicitClaudeConfigDir);
-    const isUnderWorkspace =
-      relativeToWorkspace.length > 0 &&
-      !relativeToWorkspace.startsWith("..") &&
-      !path.isAbsolute(relativeToWorkspace);
-    if (isUnderWorkspace) {
-      const stagedRuntime = await input.stage([]);
-      const remoteWorkspaceDir = stagedRuntime.workspaceRemoteDir ?? input.workspaceLocalDir;
-      const remappedConfigDir = path.posix.join(
-        remoteWorkspaceDir,
-        relativeToWorkspace.split(path.sep).join(path.posix.sep),
-      );
-      env.CLAUDE_CONFIG_DIR = remappedConfigDir;
-      await onLog(
-        "stdout",
-        `[paperclip] Remapped operator CLAUDE_CONFIG_DIR from host path ${explicitClaudeConfigDir} onto the in-sandbox workspace path ${remappedConfigDir} for the remote ACP run.\n`,
-      );
-      return { stagedRuntime, teardown: registerWorkspaceSyncBack(stagedRuntime) };
-    }
+    // User-managed override. Unlike the Claude CLI lane (`claude-local/execute.ts`),
+    // which runs the process on the same host and can forward the operator's
+    // path verbatim, the remote ACP lane spawns Claude inside a sandbox. A
+    // host-only path cannot cross into the sandbox, and a path inside the staged
+    // workspace would carry that directory's Claude sign-in into the sandbox.
+    // The remote lane runs only with an API key, so ignore the override either
+    // way and seed the managed config instead (falling through below). Logged
+    // loudly so the substitution is diagnosable.
+    const insideWorkspace =
+      workspaceRelativePath(input.workspaceLocalDir, explicitClaudeConfigDir) !== null;
     await onLog(
       "stderr",
-      `[paperclip] operator-provided CLAUDE_CONFIG_DIR=${explicitClaudeConfigDir} is outside the staged workspace and cannot reach the remote sandbox; ignoring the host-only path and seeding the managed Claude config instead.\n`,
+      insideWorkspace
+        ? `[paperclip] operator-provided CLAUDE_CONFIG_DIR=${explicitClaudeConfigDir} is inside the staged workspace; ignoring it on the remote target (its Claude sign-in files are neither staged nor synced back) and seeding the managed Claude config instead.\n`
+        : `[paperclip] operator-provided CLAUDE_CONFIG_DIR=${explicitClaudeConfigDir} is outside the staged workspace and cannot reach the remote sandbox; ignoring the host-only path and seeding the managed Claude config instead.\n`,
     );
   }
 
@@ -302,12 +333,23 @@ async function prepareClaudeRemoteManagedHome(
   // concurrent writer) from pulling an arbitrary host file into the sandbox.
   // The engine rewrites the prompt onto the in-sandbox copy once this asset
   // is staged.
-  const stagedRuntime = await input.stage([
-    { key: "config-seed", localDir: claudeConfigSeedDir, followSymlinks: true },
-    ...(input.skillsBundleDir
-      ? [{ key: "skills", localDir: input.skillsBundleDir, followSymlinks: false }]
-      : []),
-  ]);
+  // The config seed never carries a Claude sign-in file: the managed seed holds
+  // only settings.json and CLAUDE.md, and a managed AI connection's config dir
+  // is staged with its sign-in files excluded.
+  const stagedRuntime = await input.stage(
+    [
+      {
+        key: "config-seed",
+        localDir: claudeConfigSeedDir,
+        followSymlinks: true,
+        exclude: [...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES],
+      },
+      ...(input.skillsBundleDir
+        ? [{ key: "skills", localDir: input.skillsBundleDir, followSymlinks: false }]
+        : []),
+    ],
+    workspaceExclude.length > 0 ? { workspaceExclude } : undefined,
+  );
 
   const remoteClaudeRuntimeRoot =
     stagedRuntime.runtimeRootDir ??

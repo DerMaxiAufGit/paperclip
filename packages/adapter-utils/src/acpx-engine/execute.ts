@@ -56,7 +56,7 @@ import {
   ensurePathInEnv,
   ensurePaperclipSkillSymlink,
   isForbiddenConfigEnvKey,
-  isNeverForwardedChildEnvKey,
+  isNeverForwardedChildEnvEntry,
   isPaperclipExternalChatTurn,
   isPaperclipRuntimeEnvKey,
   joinPromptSections,
@@ -321,7 +321,17 @@ export interface AcpxRemoteManagedHomeContext {
    * runtime. The seam passes its per-adapter home `assets` here; the returned
    * `assetDirs`/`runtimeRootDir` are what it remaps the home env var onto.
    */
-  stage: (assets: AdapterManagedRuntimeAsset[]) => Promise<PreparedAdapterExecutionTargetRuntime>;
+  stage: (
+    assets: AdapterManagedRuntimeAsset[],
+    options?: {
+      /**
+       * Workspace-relative paths that are neither shipped into the sandbox nor
+       * synced back to the host at teardown (for example the Claude sign-in
+       * files of a config dir that lives inside the workspace).
+       */
+      workspaceExclude?: readonly string[];
+    },
+  ) => Promise<PreparedAdapterExecutionTargetRuntime>;
 }
 
 export interface AcpxRemoteManagedHomeResult {
@@ -1640,6 +1650,9 @@ async function stageAcpRemoteRuntime(input: {
   workspaceRemoteDir?: string;
   timeoutSec: number;
   assets?: AdapterManagedRuntimeAsset[];
+  // Workspace-relative paths neither staged into the sandbox nor restored to
+  // the host (the prepared runtime applies them to both directions).
+  workspaceExclude?: readonly string[];
   // Referenced (additional) projects to stage into the sandbox as plain,
   // read-only trees alongside the anchor workspace. Empty unless run prep
   // resolved referenced projects (gated upstream), so the anchor-only path is
@@ -1665,6 +1678,9 @@ async function stageAcpRemoteRuntime(input: {
     workspaceLocalDir: input.workspaceLocalDir,
     ...(input.workspaceRemoteDir ? { workspaceRemoteDir: input.workspaceRemoteDir } : {}),
     ...(input.assets && input.assets.length > 0 ? { assets: input.assets } : {}),
+    ...(input.workspaceExclude && input.workspaceExclude.length > 0
+      ? { workspaceExclude: [...input.workspaceExclude] }
+      : {}),
     ...(input.additionalSources && input.additionalSources.length > 0
       ? { additionalSources: input.additionalSources }
       : {}),
@@ -2270,7 +2286,7 @@ async function buildRuntime(input: {
       target: remoteTarget,
       env,
       isCompatibleResume,
-      stage: (assets) =>
+      stage: (assets, stageOptions) =>
         stageAcpRemoteRuntime({
           runId,
           target: remoteTarget,
@@ -2279,6 +2295,7 @@ async function buildRuntime(input: {
           workspaceRemoteDir: sessionCwd,
           timeoutSec,
           assets,
+          workspaceExclude: stageOptions?.workspaceExclude,
           additionalSources,
           onLog: input.ctx.onLog,
           onRuntimeProgress: input.ctx.onRuntimeProgress,
@@ -2642,11 +2659,12 @@ function resolveRuntimeEnv(
     (options.platform ?? process.platform) === "win32",
   );
   // A Claude subscription credential never reaches an ACP child, whether it
-  // comes from the host projection or from the explicit run env.
+  // comes from the host projection or from the explicit run env: neither a key
+  // that names one nor a subscription token value under any other key.
   const finalEnv = Object.fromEntries(
     Object.entries(mergedEnv).filter(
       (entry): entry is [string, string] =>
-        typeof entry[1] === "string" && !isNeverForwardedChildEnvKey(entry[0]),
+        typeof entry[1] === "string" && !isNeverForwardedChildEnvEntry(entry[0], entry[1]),
     ),
   );
   // codex-acp supports both key names, but ACP clients must select its

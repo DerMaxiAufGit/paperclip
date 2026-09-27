@@ -148,7 +148,6 @@ export function billingTypeDisplayName(billingType: BillingType): string {
 
 export function quotaSourceDisplayName(source: string): string {
   const map: Record<string, string> = {
-    "claude-cli": "Claude CLI",
     "bedrock": "AWS Bedrock",
     "codex-rpc": "Codex app server",
     "codex-wham": "ChatGPT WHAM",

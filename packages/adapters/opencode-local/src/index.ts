@@ -102,4 +102,11 @@ Notes:
 - When \`dangerouslySkipPermissions\` is enabled, Paperclip injects a temporary \
   runtime config with \`permission=allow\` so headless runs do \
   not stall on approval prompts.
+- Anthropic models (\`anthropic/...\`) need ANTHROPIC_API_KEY in this agent's env. \
+  Only the official claude binary may use a Claude subscription, so Paperclip \
+  refuses the run without a key and sets OPENCODE_AUTH_CONTENT={} so a stored \
+  OpenCode login is not used. A key from \`opencode auth login\` or opencode.json \
+  does not count, and every stored login is hidden for that run, so other \
+  providers the run uses (for example small_model) need their key in the agent \
+  env too. A \`-m\`/\`--model\` in extraArgs counts too.
 `;

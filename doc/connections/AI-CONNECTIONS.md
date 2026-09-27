@@ -80,18 +80,52 @@ intermediate Claude.ai credentials or session tokens.
   in on this server; Paperclip does not import Claude sign-ins.” The local
   sign-in routes (`/local/attempts`, `/local/check`, and `/local`) reject the
   `anthropic` provider with 422 and the same message.
-- `CLAUDE_CODE_OAUTH_TOKEN` is rejected as an env key wherever Paperclip stores
-  env (agent, project, routine, environment, issue override, company import,
-  secret binding proposals), and Paperclip removes it from every process it
-  starts, including ACP, SSH, and sandbox launches.
-- A database migration deletes the Anthropic subscription connections that
-  earlier versions stored, with their grants, env bindings, and secrets. Until
-  it runs, such a connection is listed as unavailable so its owner can remove
-  it, and it never runs.
+- Claude subscription tokens are the env keys `CLAUDE_CODE_OAUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_TOKEN`, and
+  the sign-in handoff keys `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`,
+  `CCR_OAUTH_TOKEN_FILE`, `CLAUDE_CODE_HOST_CREDS_FILE`, and
+  `CLAUDE_CODE_SESSION_ACCESS_TOKEN` (any letter case), and any value that
+  starts with `sk-ant-oat`, `sk-ant-ort`, or `sk-ant-sid`, under any key. They are rejected wherever
+  Paperclip stores env (agent, project, routine, environment, issue override,
+  secret binding proposals; a company import skips the keys with a warning), a
+  company or user secret rejects such a value, and Paperclip removes
+  them from every process it starts, including ACP, SSH, sandbox, and runner
+  launches. A managed Anthropic connection whose stored value is a `sk-ant-oat`
+  token is refused at run time (`claude_subscription_token_unsupported`).
+- Migrations 0282 and 0283 delete the Anthropic subscription connections that
+  earlier versions stored, with their grants, env bindings, and secrets, and
+  remove token entries from stored env maps, issue overrides, and `hire_agent`
+  approvals. Until they run, such a connection is listed as unavailable so its
+  owner can remove it, and it never runs. They delete only database rows: a
+  value held in an external secret provider (AWS Secrets Manager, GCP Secret
+  Manager, Vault) stays there until the operator deletes it.
 - The agent setup status panel reads the `claude_local` auth-signal route, which
   runs only `claude auth status` on the server. Anthropic API-key connections
   work as before, on every engine and execution target. The Claude ACP engine
-  and remote targets require one (or Bedrock/Vertex).
+  and remote targets require an API credential (an API key or connection, a
+  gateway `ANTHROPIC_AUTH_TOKEN`, or Bedrock/Vertex/Foundry).
+- Owner only: the subscription lane (a `claude_local` run on this server with no
+  API credential and no `engine: "acp"`) is allowed only in `local_trusted`
+  mode, or in `authenticated` mode with at most one active human user (a user
+  account with an instance role or an active company membership). Otherwise the
+  run fails before launch with `configuration_incomplete` (reason
+  `subscription_not_allowed`), the environment Test reports
+  `claude_subscription_not_allowed`, and the auth-signal route reports `absent`
+  with reason `subscription_not_allowed` instead of running `claude auth status`.
+- Trigger source: even for the owner, a subscription-lane run fails before
+  launch (reason `claude_subscription_external_trigger`) when a chat guest not
+  linked to a Paperclip user, an inbound email, a plugin (including plugin
+  webhooks and plugin-relayed comments, interactions and approvals), or a
+  routine's public webhook trigger started it, or when a wake no Paperclip user
+  requested continues a task one of these created. A new chat endpoint for such an
+  agent starts with unlinked people turned off.
+- Other harnesses: only the official `claude` binary may use a Claude
+  subscription. Hermes, OpenCode, and Pi refuse an Anthropic-provider run
+  without an Anthropic API key in the harness env and hide their own stored
+  logins for the run. Anthropic models reached through another provider
+  (OpenRouter, Bedrock, Vertex, a gateway) are not affected.
+- Claude usage: the Costs page shows no Claude plan usage or quota windows.
+  Paperclip does not run the CLI `/usage` panel and does not read the sign-in.
 
 ## Storage and API
 

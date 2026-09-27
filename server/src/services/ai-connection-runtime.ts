@@ -7,6 +7,8 @@ import { and, eq, isNotNull } from "drizzle-orm";
 import { type Db, aiProviderDefaults, companySecrets, connectionGrants } from "@paperclipai/db";
 import {
   AI_CONNECTION_CAPABILITIES,
+  CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+  isClaudeSubscriptionTokenValue,
   type AiConnectionBinding,
 } from "@paperclipai/shared";
 import { aiConnectionService } from "./ai-connections.js";
@@ -69,7 +71,10 @@ export function isAiConnectionBusy(error: unknown): error is HttpError {
 export const AI_AUTH_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
+  // Claude subscription token keys: never injected, always blanked and stripped.
   "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_OAUTH_TOKEN",
+  "ANTHROPIC_TOKEN",
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
@@ -139,7 +144,7 @@ export async function assertManagedAiProjectAuth(
         ? [".codex/config.toml"]
         : [];
   const pattern =
-    "apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|model_provider[[:space:]]*=|env_key[[:space:]]*=|experimental_bearer_token|cli_auth_credentials_store";
+    "apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_OAUTH_TOKEN|ANTHROPIC_TOKEN|sk-ant-oat|OPENAI_API_KEY|model_provider[[:space:]]*=|env_key[[:space:]]*=|experimental_bearer_token|cli_auth_credentials_store";
   if (target?.kind === "remote" && files.length) {
     // Only inspect for conflicting keys; never return configuration or credential values.
     const result = await runAdapterExecutionTargetProcess(
@@ -191,7 +196,7 @@ done`,
       try {
         const content = await readFile(path.join(directory, relative), "utf8");
         if (
-          /apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|model_provider\s*=|env_key\s*=|experimental_bearer_token|cli_auth_credentials_store/.test(
+          /apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_OAUTH_TOKEN|ANTHROPIC_TOKEN|sk-ant-oat|OPENAI_API_KEY|model_provider\s*=|env_key\s*=|experimental_bearer_token|cli_auth_credentials_store/.test(
             content,
           )
         ) {
@@ -306,6 +311,13 @@ export async function prepareManagedAiRuntime(
         code: "ai_connection_incompatible",
       });
     const value = await service.credential(selection);
+    // Paperclip never injects a Claude subscription token, whatever connection
+    // or env key would carry it. A stored value from before this rule is refused.
+    if (isClaudeSubscriptionTokenValue(value)) {
+      throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
+        code: "claude_subscription_token_unsupported",
+      });
+    }
     home = await mkdtemp(
       path.join(
         os.tmpdir(),

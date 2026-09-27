@@ -11,6 +11,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { readHarnessCliFlagValues } from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 import { MODEL_PREFIX_PROVIDER_HINTS, VALID_PROVIDERS } from "../shared/constants.js";
 
 export interface DetectedModel {
@@ -214,4 +215,49 @@ export function resolveProvider(options: {
 
   // 5. Let Hermes auto-detect
   return { provider: "auto", resolvedFrom: "auto" };
+}
+
+/**
+ * True when a Hermes run talks to Anthropic directly: the resolved provider is
+ * `anthropic`, or it is `auto` and ~/.hermes/config.yaml selects `anthropic`
+ * (Hermes then resolves that provider itself). Hermes's Anthropic provider can
+ * use a Claude sign-in (its own OAuth login or the Claude Code credentials
+ * file), so such a run needs an Anthropic API key. Anthropic models reached
+ * through another provider (for example OpenRouter) do not count.
+ */
+export function isHermesAnthropicRoute(options: {
+  resolvedProvider: string;
+  detectedProvider?: string | null;
+}): boolean {
+  if (options.resolvedProvider === "anthropic") return true;
+  return (
+    options.resolvedProvider === "auto" &&
+    (options.detectedProvider ?? "").trim().toLowerCase() === "anthropic"
+  );
+}
+
+/**
+ * `isHermesAnthropicRoute` for the command line Hermes actually gets. Paperclip
+ * appends the agent's `extraArgs` after its own `-m` and `--provider`, and
+ * Hermes (argparse) keeps the last value and accepts abbreviated long options,
+ * so an extra `--provider anthropic`, or an extra model that Hermes resolves to
+ * Anthropic on the `auto` provider, also makes the run an Anthropic run.
+ */
+export function isHermesAnthropicRunRoute(options: {
+  resolvedProvider: string;
+  detectedProvider?: string | null;
+  extraArgs?: readonly string[] | null;
+}): boolean {
+  if (isHermesAnthropicRoute(options)) return true;
+  const extraProviders = readHarnessCliFlagValues(options.extraArgs, ["--provider"], { abbreviations: true })
+    .map((value) => value.toLowerCase());
+  if (extraProviders.includes("anthropic")) return true;
+  const extraModels = readHarnessCliFlagValues(options.extraArgs, ["-m", "--model"], { abbreviations: true });
+  if (extraModels.length === 0) return false;
+  const effectiveProvider = extraProviders.at(-1) ?? options.resolvedProvider;
+  if (effectiveProvider !== "auto") return false;
+  return (
+    extraModels.some((model) => inferProviderFromModel(model) === "anthropic") ||
+    isHermesAnthropicRoute({ resolvedProvider: "auto", detectedProvider: options.detectedProvider })
+  );
 }

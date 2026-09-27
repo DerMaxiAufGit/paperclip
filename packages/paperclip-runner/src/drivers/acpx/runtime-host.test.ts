@@ -1700,6 +1700,8 @@ async function hostFixture() {
       runtimeDirectory,
       normalizedSessionId: "normalized-session-1",
       workingDirectory,
+      // The Claude ACPX lane runs only with an Anthropic API key.
+      environment: { ANTHROPIC_API_KEY: "sk-ant-api03-fixture" } as NodeJS.ProcessEnv,
     },
     dependencies(
       input: Pick<AcpxRuntimeHostDependencies, "openRuntime"> &
