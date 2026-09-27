@@ -60,7 +60,7 @@ Agent SDK overview says the same for agents built on the Agent SDK.
 - Phase 2: done. Anthropic `subscription` method, host sign-in import, isolated Claude login homes, and `claude setup-token` capture are removed; `CLAUDE_CODE_OAUTH_TOKEN` is rejected as an env key in every persisted env map (server-side in secrets `normalizeEnvConfig`, plus request schemas for agent, project, routine, environment, issue overrides), in secret binding proposals, and is skipped with an import warning in company imports. Agent-created claude_local hires are never defaulted onto a managed Anthropic binding; a responsible user without an Anthropic default runs the agent on the server CLI.
 - Phase 3: done. `ClaudeCliSignInStatus` replaces "Connect your Claude subscription" and shows `claude auth status` from the auth-signal route (with a "CLI not installed" state from reason `cli_missing`). It shows only when the target is this server; sandbox/SSH targets get API-key guidance, and a Paperclip Runner's Claude lane is API-key only. Onboarding blocks the hire when the CLI probe reports `claude_hello_probe_auth_required`.
 - Phase 4: done, then narrowed in Phase 7. The OAuth usage call, credential file and Keychain reads, and `quota-probe.ts` are removed. The CLI `/usage` scrape that replaced them was removed in Phase 7: Paperclip shows no Claude plan usage.
-- Phase 5: done. Migration `0282_remove_claude_subscription_credentials.sql` deletes stored Anthropic subscription AI connections with their grants, defaults, agent bindings and login sessions, the `CLAUDE_CODE_OAUTH_TOKEN` user secret of the removed `claude setup-token` flow with its captured values, and every `CLAUDE_CODE_OAUTH_TOKEN` env entry, binding, declaration and proposal. The follow-up migration `0283_remove_claude_subscription_tokens_from_env.sql` (Phase 7) covers the env maps 0282 missed and the widened token rules. Neither migration can delete a value held in an external secret provider (AWS Secrets Manager, GCP Secret Manager, Vault); the operator deletes those there.
+- Phase 5: done. Migration `0285_remove_claude_subscription_credentials.sql` deletes stored Anthropic subscription AI connections with their grants, defaults, agent bindings and login sessions, the `CLAUDE_CODE_OAUTH_TOKEN` user secret of the removed `claude setup-token` flow with its captured values, and every `CLAUDE_CODE_OAUTH_TOKEN` env entry, binding, declaration and proposal. The follow-up migration `0286_remove_claude_subscription_tokens_from_env.sql` (Phase 7) covers the env maps 0285 missed and the widened token rules. Neither migration can delete a value held in an external secret provider (AWS Secrets Manager, GCP Secret Manager, Vault); the operator deletes those there. The two migrations were first numbered 0282 and 0283; see the renumbering note under "5. Database".
 - Login route removal: done. The `claude-login` route, `runClaudeLogin`, the
   OpenAPI entry, the UI client method and run-page button, and the CLI command
   are removed. A run that fails with `claude_auth_required` shows
@@ -149,11 +149,25 @@ Agent SDK overview says the same for agents built on the Agent SDK.
 
 ### 5. Database
 
-- Done: `0282_remove_claude_subscription_credentials.sql` deletes stored
+- Done: `0285_remove_claude_subscription_credentials.sql` deletes stored
   Anthropic subscription AI connections, their grants, env bindings and secret
   rows. Destructive; approved by the user.
-- Done: follow-up `0283_remove_claude_subscription_tokens_from_env.sql` (see
+- Done: follow-up `0286_remove_claude_subscription_tokens_from_env.sql` (see
   Phase 7).
+- Renumbered on 2026-09-28. Upstream took migration numbers 0282 to 0284
+  (`0282_colossal_shocker`, `0283_jittery_psynapse`, `0284_petite_genesis`), so
+  the fork's `0282_remove_claude_subscription_credentials.sql` and
+  `0283_remove_claude_subscription_tokens_from_env.sql` became 0285 and 0286.
+  Their SQL content is byte-for-byte unchanged, so the comments inside 0286
+  still say "0282". The migration runner in `packages/db/src/client.ts`
+  identifies an applied migration by the sha256 of its content, not by its file
+  name or journal position. A database that already applied the fork
+  migrations under the old names treats 0285 and 0286 as applied, and applies
+  upstream's 0282 to 0284 once, after them. On every later upstream merge, do
+  the same: keep upstream's journal and snapshots, move the fork migrations
+  after upstream's newest number with their content unchanged, append their
+  journal entries with larger `when` values, and chain their snapshots (copies
+  of upstream's newest snapshot, because the fork migrations change no schema).
 
 ### 6. Docs, tests, full check
 
@@ -195,7 +209,15 @@ concurrency cap.
   whose wake came from outside Paperclip (reason
   `claude_subscription_external_trigger`, `trigger` one of):
   - `chat_guest`: a chat message from a person not linked to a Paperclip user
-    (a system-requested wake whose requester is a chat external principal);
+    (a system-requested wake whose requester is a chat external principal).
+    A chat wake (its id is an `inbound_wakeup` or `failed_run_retry` chat
+    action) attributed to a user whose chat account has no `linked` identity
+    link to that user on the endpoint counts too, whatever the wake's
+    requester type; so does a GitHub automatic review whose delivery is marked
+    `githubAuthority.guest` or whose pull request author or event sender is not
+    linked to the user (chat-channels attributes these to the configured
+    responsible user). Such chat-attributed user wakes also get the task-origin
+    check below;
   - `email`: an inbound email (requester `agentmail`, reason `email_received`,
     or a run context that names an email endpoint without a user wake);
   - `plugin`: `agents.invoke`, plugin agent sessions and plugin issue wakeups,
@@ -281,9 +303,9 @@ concurrency cap.
   files. The SSH transport now honours `workspaceExclude` for its tar upload
   and its restore baseline (matched at any depth, so the restore never reads an
   excluded local file as deleted).
-- **Follow-up migration.** `0283_remove_claude_subscription_tokens_from_env.sql`
+- **Follow-up migration.** `0286_remove_claude_subscription_tokens_from_env.sql`
   removes, from issue assignee overrides and `hire_agent` approval payloads
-  (both missed by 0282) and again from agent, environment, project, routine and
+  (both missed by 0285) and again from agent, environment, project, routine and
   routine-revision env maps, every entry with a token key, a plain `sk-ant-oat`
   value, or a `user_secret_ref` to the deleted `CLAUDE_CODE_OAUTH_TOKEN`
   definition. It deletes the matching secret bindings, declarations and pending

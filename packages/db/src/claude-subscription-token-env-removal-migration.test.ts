@@ -10,7 +10,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./test-embedded-postgres.js";
 
-const MIGRATION_FILE = "0283_remove_claude_subscription_tokens_from_env.sql";
+const MIGRATION_FILE = "0286_remove_claude_subscription_tokens_from_env.sql";
 const migrationSql = fs.readFileSync(
   path.join(import.meta.dirname, "migrations", MIGRATION_FILE),
   "utf8",
@@ -206,7 +206,7 @@ describeEmbeddedPostgres("claude subscription token env removal executable migra
           NOTE: "mentions sk-ant-oat in the middle, not as a prefix",
         };
 
-        // ---- Agents (0282 scrubbed CLAUDE_CODE_OAUTH_TOKEN; now the wider rules).
+        // ---- Agents (0285 scrubbed CLAUDE_CODE_OAUTH_TOKEN; now the wider rules).
         const a1 = await agent(c1, "claude_local", {
           model: "claude-sonnet",
           env: {
@@ -239,7 +239,7 @@ describeEmbeddedPostgres("claude subscription token env removal executable migra
         });
         const a5 = await agent(c1, "process", { command: "echo" });
 
-        // ---- Issue assignee overrides (missed by 0282).
+        // ---- Issue assignee overrides (missed by 0285).
         const i1 = await issue(c1, {
           useProjectWorkspace: true,
           adapterConfig: {
@@ -259,7 +259,7 @@ describeEmbeddedPostgres("claude subscription token env removal executable migra
         const i4 = await issue(c1, null);
         const i5 = await issue(c1, { adapterConfig: { env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-only" } } });
 
-        // ---- hire_agent approvals (missed by 0282).
+        // ---- hire_agent approvals (missed by 0285).
         const hireEnv = {
           ANTHROPIC_TOKEN: { type: "secret_ref", secretId: oauthSecret },
           ANTHROPIC_AUTH_TOKEN: "sk-ant-oat01-hire",

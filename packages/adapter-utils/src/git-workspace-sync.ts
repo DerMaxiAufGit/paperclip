@@ -201,9 +201,12 @@ export async function readGitWorkspaceSnapshot(localDir: string, includeReposito
       timeout: 10_000,
       maxBuffer: 1024 * 1024,
     }),
+    // A generated output tree can exceed 1 MiB of filenames with only a few
+    // thousand files. Keep the explicit file snapshot (and a finite bound):
+    // collapsing directories would let later files enter the staging copy.
     runExpensiveWorkspaceGit(localDir, ["ls-files", "--others", "--exclude-standard", "-z"], "adapter_sync.untracked_files", {
       timeout: 10_000,
-      maxBuffer: 1024 * 1024,
+      maxBuffer: 32 * 1024 * 1024,
     }),
     runExpensiveWorkspaceGit(localDir, ["diff", "--name-only", "-z", "--diff-filter=D", "HEAD", "--"], "adapter_sync.deleted_files", {
       timeout: 10_000,
@@ -593,7 +596,13 @@ export async function withShallowGitWorkspaceClone<T>(
         localDir: path.join(input.localDir, repository.path),
         snapshot: repository.snapshot,
       }, async (nestedClone) => {
-        await fs.cp(nestedClone, path.join(cloneDir, repository.path), { recursive: true });
+        // Preserve repository-relative links. fs.cp otherwise rewrites them to
+        // absolute paths into nestedClone, which is deleted after this callback
+        // and is outside the workspace when the sandbox restores its files.
+        await fs.cp(nestedClone, path.join(cloneDir, repository.path), {
+          recursive: true,
+          verbatimSymlinks: true,
+        });
       });
     }
     if (input.snapshot.repositories?.length) {

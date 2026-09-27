@@ -1965,15 +1965,36 @@
     {
       "idx": 282,
       "version": "7",
-      "when": 1790270962937,
-      "tag": "0282_remove_claude_subscription_credentials",
+      "when": 1790004509370,
+      "tag": "0282_colossal_shocker",
       "breakpoints": true
     },
     {
       "idx": 283,
       "version": "7",
+      "when": 1790018362070,
+      "tag": "0283_jittery_psynapse",
+      "breakpoints": true
+    },
+    {
+      "idx": 284,
+      "version": "7",
+      "when": 1790439010225,
+      "tag": "0284_petite_genesis",
+      "breakpoints": true
+    },
+    {
+      "idx": 285,
+      "version": "7",
+      "when": 1790439010226,
+      "tag": "0285_remove_claude_subscription_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 286,
+      "version": "7",
       "when": 1790537538779,
-      "tag": "0283_remove_claude_subscription_tokens_from_env",
+      "tag": "0286_remove_claude_subscription_tokens_from_env",
       "breakpoints": true
     }
   ]

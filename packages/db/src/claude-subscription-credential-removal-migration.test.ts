@@ -10,7 +10,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./test-embedded-postgres.js";
 
-const MIGRATION_FILE = "0282_remove_claude_subscription_credentials.sql";
+const MIGRATION_FILE = "0285_remove_claude_subscription_credentials.sql";
 const migrationSql = fs.readFileSync(
   path.join(import.meta.dirname, "migrations", MIGRATION_FILE),
   "utf8",

@@ -22,6 +22,16 @@ export function resolveClaudeModel(
 }
 
 export const type = "claude_local";
+
+export function claudeLocalReasoningEffortsForModel(model: string): readonly string[] {
+  const id = model.trim().replace(/\[1m\]$/, "").replace(/^(?:(?:us|eu|apac|global)\.)?anthropic\./, "");
+  if (/^claude-haiku-/.test(id)) return [];
+  if (/^claude-(?:opus-5(?:-5)?|opus-4-[78]|sonnet-5|fable-5(?:-1)?)$/.test(id)) {
+    return ["low", "medium", "high", "xhigh", "max"];
+  }
+  if (/^claude-(?:opus|sonnet)-4-6(?:-v1)?$/.test(id)) return ["low", "medium", "high", "max"];
+  return ["low", "medium", "high"];
+}
 export const label = "Claude Code";
 
 export const SANDBOX_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code";
@@ -32,6 +42,7 @@ export const models = [
   { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
   { id: "claude-fable-5", label: "Claude Fable 5" },
   { id: "claude-mythos-5", label: "Claude Mythos 5" },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
   { id: "claude-opus-5", label: "Claude Opus 5" },
   { id: "claude-opus-4-7", label: "Claude Opus 4.7" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
@@ -49,7 +60,7 @@ Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file injected at runtime
 - model (string, optional): Claude model id. Missing or blank defaults to ${DEFAULT_CLAUDE_LOCAL_MODEL} in both CLI and ACP, including existing agents. Explicit model IDs and ANTHROPIC_MODEL overrides are preserved. Bedrock/Vertex without an explicit model retain their provider default.
-- effort (string, optional): reasoning effort passed via --effort (low|medium|high)
+- effort (string, optional): model-specific reasoning effort passed via --effort (low|medium|high; current Opus, Sonnet 5, and Fable models also support xhigh|max)
 - chrome (boolean, optional): pass --chrome when running Claude
 - promptTemplate (string, optional): run prompt template
 - maxTurnsPerRun (number, optional): max turns for one run
@@ -77,8 +88,9 @@ Operational fields:
 - graceSec (number, optional): SIGTERM grace period in seconds
 
 Notes:
+- Claude Opus 5.5 uses model ID \`claude-opus-5-5\` and requires Claude Code v2.1.280 or later.
 - Claude subscription use is limited to the local CLI engine. The ACP engine and every remote execution target (SSH, sandbox, runner) need an Anthropic API credential and fail before launch without one: ANTHROPIC_API_KEY, a gateway ANTHROPIC_AUTH_TOKEN that is not a sk-ant-oat subscription token, or Bedrock/Vertex/Foundry (CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX, CLAUDE_CODE_USE_FOUNDRY). A Paperclip Runner's Claude lane accepts only ANTHROPIC_API_KEY.
-- Paperclip never stores or forwards a Claude subscription token: the env keys CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_REFRESH_TOKEN, ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_TOKEN, the sign-in handoff keys CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, CCR_OAUTH_TOKEN_FILE, CLAUDE_CODE_HOST_CREDS_FILE and CLAUDE_CODE_SESSION_ACCESS_TOKEN (any letter case), and any sk-ant-oat, sk-ant-ort or sk-ant-sid value under any key are rejected in env and secrets and removed from every process it starts. The local CLI engine uses the claude CLI's own sign-in. Migrations 0282 and 0283 removed stored tokens from the Paperclip database; a value held in an external secret provider (AWS Secrets Manager, GCP Secret Manager, Vault) is not deleted and must be removed there.
+- Paperclip never stores or forwards a Claude subscription token: the env keys CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_REFRESH_TOKEN, ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_TOKEN, the sign-in handoff keys CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, CCR_OAUTH_TOKEN_FILE, CLAUDE_CODE_HOST_CREDS_FILE and CLAUDE_CODE_SESSION_ACCESS_TOKEN (any letter case), and any sk-ant-oat, sk-ant-ort or sk-ant-sid value under any key are rejected in env and secrets and removed from every process it starts. The local CLI engine uses the claude CLI's own sign-in. Migrations 0285 and 0286 removed stored tokens from the Paperclip database; a value held in an external secret provider (AWS Secrets Manager, GCP Secret Manager, Vault) is not deleted and must be removed there.
 - Owner only: a run on the subscription lane (local target, no API credential, engine not "acp") is allowed only when the deployment mode is local_trusted, or authenticated with at most one active human user. Otherwise it fails before launch (configuration_incomplete, reason subscription_not_allowed); give the agent an API key.
 - Trigger source: even for the owner, a subscription-lane run fails before launch (reason claude_subscription_external_trigger) when its wake came from a chat guest not linked to a Paperclip user, a plugin (including plugin webhooks), or a routine's public webhook trigger.
 - Paperclip shows no Claude plan usage on the Costs page; it only runs \`claude auth status\` for the sign-in panel.

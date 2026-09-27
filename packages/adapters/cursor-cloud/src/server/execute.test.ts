@@ -168,6 +168,22 @@ describe("cursor_cloud execute", () => {
     expect(prompt).not.toContain("Create child issues");
   });
 
+  it("delivers a large wake through the SDK prompt without a configured JSON env copy", async () => {
+    const sdkAgent = createMockSdkAgent();
+    createMock.mockResolvedValue(sdkAgent);
+    const ctx = createContext();
+    const description = "start " + "context ".repeat(25_000) + " end";
+    ctx.config.env = { CURSOR_API_KEY: "cursor-secret", PAPERCLIP_WAKE_PAYLOAD_JSON: description };
+    ctx.context.paperclipWake = {
+      reason: "issue_assigned",
+      issue: { id: "issue-1", description },
+    };
+    const result = await execute(ctx);
+    expect(result.exitCode).toBe(0);
+    expect(createMock.mock.calls[0]?.[0]?.cloud?.envVars).not.toHaveProperty("PAPERCLIP_WAKE_PAYLOAD_JSON");
+    expect(sdkAgent.send.mock.calls[0]?.[0]).toContain(description);
+  });
+
   it("creates a fresh Cursor agent and injects Paperclip env without CURSOR_API_KEY", async () => {
     const run = createMockRun({
       agentId: "agent-fresh",
@@ -258,6 +274,30 @@ describe("cursor_cloud execute", () => {
     expect(env).not.toHaveProperty("CURSOR_API_KEY");
     expect(env).toMatchObject({ EXTRA_FLAG: "0", PADDED_VALUE: "  retain whitespace  " });
     expect(Object.values(env).every((value) => value !== "")).toBe(true);
+  });
+
+  it("never sends a Claude subscription token to Cursor's cloud VM", async () => {
+    createMock.mockResolvedValue(createMockSdkAgent());
+    const ctx = createContext();
+    // A resolved secret_ref may carry a token Paperclip never validated.
+    ctx.config.env = {
+      CURSOR_API_KEY: "cursor-secret",
+      ANTHROPIC_API_KEY: "sk-ant-oat01-resolved-subscription",
+      CLAUDE_CODE_OAUTH_TOKEN: "opaque-subscription-token",
+      anthropic_oauth_token: "opaque-subscription-token",
+      REFRESH_VALUE: " SK-ANT-ORT01-refresh",
+      EXTRA_FLAG: "1",
+    };
+
+    await execute(ctx);
+
+    const env = createMock.mock.calls[0]?.[0]?.cloud?.envVars as Record<string, string>;
+    expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(env).not.toHaveProperty("anthropic_oauth_token");
+    expect(env).not.toHaveProperty("REFRESH_VALUE");
+    expect(JSON.stringify(env)).not.toMatch(/sk-ant-(oat|ort)|opaque-subscription-token/i);
+    expect(env).toMatchObject({ EXTRA_FLAG: "1" });
   });
 
   it("reports dispatch before starting the first remote SDK operation", async () => {

@@ -254,6 +254,58 @@ describe("resolveExecutionRunAdapterConfig", () => {
     expect(JSON.stringify(result.resolvedConfig.env)).not.toContain("PAPERCLIP_RUNNER_NETWORK_ACCESS");
   });
 
+  it("drops a Claude subscription token that a secret reference resolves to, from every env scope", async () => {
+    // Stored secrets (or external provider values) Paperclip never validated.
+    const resolveAdapterConfigForRuntime = vi.fn(async (_companyId, config: Record<string, unknown>) => ({
+      config: {
+        ...config,
+        env: { ANTHROPIC_API_KEY: "sk-ant-oat01-agent-secret", AGENT_ONLY: "agent-only" },
+      },
+      secretKeys: new Set(["ANTHROPIC_API_KEY"]),
+      manifest: [],
+    }));
+    const resolveEnvBindings = vi
+      .fn()
+      .mockResolvedValueOnce({
+        env: { ENV_TOKEN: " SK-ANT-ORT01-refresh", ENV_ONLY: "environment-only" },
+        secretKeys: new Set(["ENV_TOKEN"]),
+        manifest: [],
+      })
+      .mockResolvedValueOnce({
+        env: { PROJECT_TOKEN: "sk-ant-sid01-session", PROJECT_ONLY: "project-only" },
+        secretKeys: new Set(["PROJECT_TOKEN"]),
+        manifest: [],
+      })
+      .mockResolvedValueOnce({
+        env: { ROUTINE_TOKEN: "sk-ant-oat01-routine", ROUTINE_ONLY: "routine-only" },
+        secretKeys: new Set(["ROUTINE_TOKEN"]),
+        manifest: [],
+      });
+    const secretRef = { type: "secret_ref", secretId: "secret-1", version: "latest" };
+
+    const result = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      environmentId: "environment-1",
+      environmentEnv: { ENV_TOKEN: secretRef, ENV_ONLY: "environment-only" },
+      executionRunConfig: { env: { ANTHROPIC_API_KEY: secretRef, AGENT_ONLY: "agent-only" } },
+      projectEnv: { PROJECT_TOKEN: secretRef, PROJECT_ONLY: "project-only" },
+      routineEnv: { ROUTINE_TOKEN: secretRef, ROUTINE_ONLY: "routine-only" },
+      routineId: "routine-1",
+      trustedEnvProjection: { BROKERED_TOKEN: "sk-ant-oat01-brokered", BROKERED_OK: "brokered" },
+      secretsSvc: { resolveAdapterConfigForRuntime, resolveEnvBindings } as any,
+    });
+
+    expect(result.resolvedConfig.env).toEqual({
+      ENV_ONLY: "environment-only",
+      AGENT_ONLY: "agent-only",
+      PROJECT_ONLY: "project-only",
+      ROUTINE_ONLY: "routine-only",
+      BROKERED_OK: "brokered",
+    });
+    expect(JSON.stringify(result.resolvedConfig)).not.toMatch(/sk-ant-(oat|ort|sid)/i);
+  });
+
   it("skips project env resolution when the project has no bindings", async () => {
     const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
       config: { env: { AGENT_ONLY: "agent-only" } },

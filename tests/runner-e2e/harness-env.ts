@@ -1,4 +1,6 @@
 import path from "node:path";
+import { isClaudeSubscriptionTokenEnvKey } from "../../packages/shared/src/validators/secret.js";
+import { chatNeedsApiTools, isManagedHiringCase } from "./chat-cases.js";
 import { CREDENTIAL_NAMES } from "./types.js";
 import type { MatrixExecution } from "./types.js";
 
@@ -25,6 +27,10 @@ const AMBIENT_EXTERNAL_STATE_KEYS = [
   "PAPERCLIP_STORAGE_S3_FORCE_PATH_STYLE",
 ] as const;
 const PROVIDER_SECRET_KEY = /^(?:OPENAI|ANTHROPIC|OPENROUTER|DAYTONA)(?:_|$)/;
+// Ambient Claude subscription tokens (CLAUDE_CODE_OAUTH_TOKEN and friends) never
+// reach the server: it uses a subscription only through its own claude CLI login.
+const isStrippedProviderKey = (key: string) =>
+  PROVIDER_SECRET_KEY.test(key) || isClaudeSubscriptionTokenEnvKey(key);
 
 export function runnerE2EServerControlPaths(temporaryRoot: string) {
   const controlDirectory = path.join(temporaryRoot, "control");
@@ -107,9 +113,9 @@ export function buildRunnerE2EProcessEnvironment(
   // Announcements are unrelated to the scenarios and obscure screenshot evidence.
   result.PAPERCLIP_ANNOUNCEMENTS_ENABLED = "false";
   delete result.OPENCODE_ALLOW_ALL_MODELS;
-  // Hiring needs the opt-in native API surface. Scope this to the explicit
-  // manual hiring story; production and other suites retain their defaults.
-  if (executions.some((e) => e.suite.id === "everyday-workflows" && e.task.id === "hire-reuse")) {
+  // These stories explicitly require the native API surface. Other suites
+  // retain the server default or any supplied operator restriction.
+  if (executions.some((e) => isManagedHiringCase(e.suite.id, e.task.id) || chatNeedsApiTools(e.suite.id, e.task.id))) {
     result.PAPERCLIP_RUNNER_API_TOOLS_ENABLED = "true";
   }
   if (
@@ -136,7 +142,7 @@ export function buildPaperclipServerEnvironment(
 ): NodeJS.ProcessEnv {
   const result = { ...source };
   for (const key of Object.keys(result)) {
-    if (PROVIDER_SECRET_KEY.test(key)) delete result[key];
+    if (isStrippedProviderKey(key)) delete result[key];
   }
   for (const key of [
     ...CREDENTIAL_NAMES,
@@ -186,6 +192,12 @@ export function assertIsolatedServerEnvironment(
     ...AMBIENT_EXTERNAL_STATE_KEYS,
   ]) {
     if (env[key])
+      throw new Error(
+        `Paperclip server environment unexpectedly contains ${key}`,
+      );
+  }
+  for (const key of Object.keys(env)) {
+    if (env[key] && isClaudeSubscriptionTokenEnvKey(key))
       throw new Error(
         `Paperclip server environment unexpectedly contains ${key}`,
       );

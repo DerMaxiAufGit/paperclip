@@ -59,9 +59,9 @@ Paperclip never reads, stores, forwards, or injects a Claude sign-in:
 - Paperclip does not show Claude plan usage. See
   [Claude usage on the Costs page](#claude-usage-on-the-costs-page).
 - Two database migrations delete the Claude subscription credentials that
-  earlier versions stored. Migration 0282 removes subscription connections with
+  earlier versions stored. Migration 0285 removes subscription connections with
   their grants, the `claude setup-token` secret, and `CLAUDE_CODE_OAUTH_TOKEN`
-  env entries and bindings. Migration 0283 also removes the other token keys
+  env entries and bindings. Migration 0286 also removes the other token keys
   and plain `sk-ant-oat`, `sk-ant-ort`, and `sk-ant-sid` values from stored env
   maps, issue overrides, and hire approvals. The migrations delete only rows in the Paperclip database. A
   value stored in an external secret provider (AWS Secrets Manager, GCP Secret
@@ -368,6 +368,8 @@ credentials. So an Anthropic model on another harness needs an API key:
 Claude ACP runs that end with a typed provider-quota error retain the quota
 classification and any parsed reset time. Recovery waits until that time, or
 uses its existing one-hour quota backoff when no reset time is available.
+This includes the Claude bridge's typed “The Claude account has no available
+quota.” fallback, which carries no reset timestamp.
 The adapter inspects the terminal provider message in memory; the run result
 and run log retain only the generic failure message, recovery labels, and reset
 timestamp. Context, turn, rate, and configured budget limits are not treated as

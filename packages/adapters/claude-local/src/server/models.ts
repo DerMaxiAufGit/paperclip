@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import { models as DIRECT_MODELS } from "../index.js";
+import { isClaudeSubscriptionTokenValue } from "./credential-policy.js";
 
 const ANTHROPIC_MODELS_ENDPOINT = "/v1/models";
 const ANTHROPIC_MODELS_TIMEOUT_MS = 5000;
@@ -9,10 +10,15 @@ const ANTHROPIC_API_VERSION = "2023-06-01";
 
 /** AWS Bedrock model IDs — region-qualified identifiers required by the Bedrock API. */
 const BEDROCK_MODELS: AdapterModel[] = [
-  { id: "us.anthropic.claude-opus-4-8-v1", label: "Bedrock Opus 4.8" },
+  { id: "us.anthropic.claude-opus-4-8", label: "Bedrock Opus 4.8" },
+  { id: "us.anthropic.claude-opus-5-5", label: "Bedrock Opus 5.5" },
+  { id: "us.anthropic.claude-opus-5", label: "Bedrock Opus 5" },
+  { id: "us.anthropic.claude-sonnet-5", label: "Bedrock Sonnet 5" },
   // Fable 5.1's documented geo inference ID carries no -v1 suffix, unlike earlier entries.
   { id: "us.anthropic.claude-fable-5-1", label: "Bedrock Fable 5.1" },
-  { id: "us.anthropic.claude-fable-5-v1", label: "Bedrock Fable 5" },
+  { id: "us.anthropic.claude-fable-5", label: "Bedrock Fable 5" },
+  { id: "us.anthropic.claude-opus-4-7", label: "Bedrock Opus 4.7" },
+  { id: "us.anthropic.claude-sonnet-4-6", label: "Bedrock Sonnet 4.6" },
   { id: "us.anthropic.claude-opus-4-6-v1", label: "Bedrock Opus 4.6" },
   { id: "us.anthropic.claude-sonnet-4-5-20250929-v2:0", label: "Bedrock Sonnet 4.5" },
   { id: "us.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Bedrock Haiku 4.5" },
@@ -55,7 +61,9 @@ function mergedWithFallback(models: AdapterModel[]): AdapterModel[] {
 
 function resolveAnthropicApiKey(): string | null {
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-  return apiKey && apiKey.length > 0 ? apiKey : null;
+  // A Claude subscription token is never an API key; Paperclip does not send it.
+  if (!apiKey || apiKey.length === 0 || isClaudeSubscriptionTokenValue(apiKey)) return null;
+  return apiKey;
 }
 
 function resolveAnthropicBaseUrl(): string {

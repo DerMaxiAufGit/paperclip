@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agentWakeupRequests,
   agents,
   authUsers,
+  chatActions,
+  chatDeliveries,
+  chatEndpoints,
   chatExternalPrincipals,
+  chatIdentityLinks,
   companies,
   companyMemberships,
   createDb,
@@ -13,6 +18,8 @@ import {
   plugins,
   routineRuns,
   routines,
+  toolApplications,
+  toolConnections,
   type Db,
 } from "@paperclipai/db";
 import {
@@ -532,5 +539,439 @@ describeEmbeddedPostgres("Claude subscription owner-only and trigger-source gate
     // An ordinary board task keeps its follow-ups.
     const manualIssueId = await originIssue({ companyId, agentId, originKind: "manual" });
     await expect(recoveryWake(manualIssueId)).resolves.toBeNull();
+  });
+
+  async function insertChatEndpoint(companyId: string, agentId: string, provider: "github" | "slack") {
+    const applicationId = randomUUID();
+    const connectionId = randomUUID();
+    const endpointId = randomUUID();
+    await db.insert(toolApplications).values({ id: applicationId, companyId, name: `${provider} bot`, type: "chat" });
+    await db.insert(toolConnections).values({
+      id: connectionId,
+      companyId,
+      applicationId,
+      name: provider,
+      uid: `${provider}-${connectionId}`,
+      connectionPurpose: "channel",
+      transport: "chat_sdk",
+      status: "active",
+    });
+    await db.insert(chatEndpoints).values({
+      id: endpointId,
+      companyId,
+      connectionId,
+      provider,
+      publicId: randomUUID(),
+      assignedAgentId: agentId,
+      status: "active",
+    });
+    return endpointId;
+  }
+
+  /** An external chat account, linked to `linkedUserId` on the endpoint when given. */
+  async function chatPrincipal(input: {
+    companyId: string;
+    endpointId: string;
+    provider: "github" | "slack";
+    externalId: string;
+    linkedUserId?: string;
+    linkStatus?: "linked" | "pending";
+  }) {
+    const principalId = randomUUID();
+    await db.insert(chatExternalPrincipals).values({
+      id: principalId,
+      companyId: input.companyId,
+      provider: input.provider,
+      providerAccountId: "account-1",
+      externalId: input.externalId,
+    } as never);
+    if (input.linkedUserId) {
+      await db.insert(chatIdentityLinks).values({
+        companyId: input.companyId,
+        endpointId: input.endpointId,
+        principalId,
+        paperclipUserId: input.linkedUserId,
+        status: input.linkStatus ?? "linked",
+      });
+    }
+    return principalId;
+  }
+
+  /** The normalized event of a signed GitHub pull_request webhook (a GitHub automatic review). */
+  function githubAutomaticEvent(input: {
+    author: string;
+    sender: string;
+    guest: boolean;
+    responsibleUserId: string;
+  }) {
+    return {
+      kind: "mention",
+      githubAutomatic: {
+        revision: 1,
+        policy: { invocation: "allowed_authors" },
+        context: {
+          event: "synchronize",
+          repository: "acme/app",
+          repositoryId: "42",
+          pullNumber: 7,
+          author: { id: input.author, login: `user-${input.author}`, isBot: false },
+          sender: { id: input.sender, login: `user-${input.sender}` },
+        },
+      },
+      githubAuthority: {
+        guest: input.guest,
+        responsibleUserId: input.responsibleUserId,
+        sponsorUserId: null,
+      },
+      principal: { externalId: input.author },
+    };
+  }
+
+  /**
+   * A chat message's durable wake, as chat-channels stages it: an
+   * `inbound_wakeup` chat action for the delivery, and a wake request with the
+   * action's id and attribution. Returns the gate's verdict for the run.
+   */
+  async function chatMessageRun(input: {
+    companyId: string;
+    agentId: string;
+    endpointId: string;
+    principalId: string;
+    issueId: string;
+    requestedByActorType: "user" | "system";
+    requestedByActorId: string;
+    normalizedEvent: Record<string, unknown>;
+  }) {
+    const deliveryId = randomUUID();
+    await db.insert(chatDeliveries).values({
+      id: deliveryId,
+      companyId: input.companyId,
+      endpointId: input.endpointId,
+      principalId: input.principalId,
+      providerEventId: `event-${deliveryId}`,
+      deduplicationKey: `dedupe-${deliveryId}`,
+      eventKind: "mention",
+      normalizedEvent: input.normalizedEvent,
+      state: "processed",
+    });
+    const actionId = randomUUID();
+    const commentId = randomUUID();
+    await db.insert(chatActions).values({
+      id: actionId,
+      companyId: input.companyId,
+      endpointId: input.endpointId,
+      deliveryId,
+      principalId: input.principalId,
+      kind: "inbound_wakeup",
+      providerActionId: `inbound_wakeup:${deliveryId}`,
+      status: "processed",
+      payload: {
+        version: 1,
+        issueId: input.issueId,
+        agentId: input.agentId,
+        commentId,
+        sessionGeneration: 1,
+        requestedByActorType: input.requestedByActorType,
+        requestedByActorId: input.requestedByActorId,
+      },
+    });
+    const runId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: actionId,
+      companyId: input.companyId,
+      agentId: input.agentId,
+      source: "automation",
+      reason: "issue_commented",
+      requestedByActorType: input.requestedByActorType,
+      requestedByActorId: input.requestedByActorId,
+      payload: { issueId: input.issueId, commentId },
+      runId,
+    });
+    return resolveClaudeSubscriptionTriggerViolation(db, {
+      run: {
+        id: runId,
+        companyId: input.companyId,
+        wakeupRequestId: actionId,
+        contextSnapshot: { issueId: input.issueId },
+      },
+      issueId: input.issueId,
+    });
+  }
+
+  it("refuses GitHub automatic reviews of a guest's pull request that chat attributes to the owner", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const endpointId = await insertChatEndpoint(companyId, agentId, "github");
+    // No sourceTrust on the task: the gate must not depend on the low-trust
+    // review policy that chat-channels applies to the task.
+    const issueId = await originIssue({
+      companyId,
+      agentId,
+      originKind: "chat_channel",
+      originId: `${endpointId}:github:acme/app:7:1`,
+    });
+    // A configured guest author: not linked to any Paperclip user. The review
+    // policy makes the configured responsible user (the owner) the requester.
+    const guestPrincipalId = await chatPrincipal({ companyId, endpointId, provider: "github", externalId: "1001" });
+    await expect(
+      chatMessageRun({
+        companyId,
+        agentId,
+        endpointId,
+        principalId: guestPrincipalId,
+        issueId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        normalizedEvent: githubAutomaticEvent({ author: "1001", sender: "1001", guest: true, responsibleUserId: "owner" }),
+      }),
+    ).resolves.toMatchObject({ kind: "chat_guest", message: CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE });
+
+    // The same, without the delivery's guest marker: the author is still not
+    // linked to the owner the wake is attributed to.
+    await expect(
+      chatMessageRun({
+        companyId,
+        agentId,
+        endpointId,
+        principalId: guestPrincipalId,
+        issueId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        normalizedEvent: githubAutomaticEvent({ author: "1001", sender: "1001", guest: false, responsibleUserId: "owner" }),
+      }),
+    ).resolves.toMatchObject({ kind: "chat_guest" });
+  });
+
+  it("refuses GitHub automatic reviews an unlinked GitHub account triggered on the owner's pull request", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const endpointId = await insertChatEndpoint(companyId, agentId, "github");
+    const issueId = await originIssue({
+      companyId,
+      agentId,
+      originKind: "chat_channel",
+      originId: `${endpointId}:github:acme/app:8:1`,
+    });
+    const ownerPrincipalId = await chatPrincipal({
+      companyId,
+      endpointId,
+      provider: "github",
+      externalId: "2001",
+      linkedUserId: "owner",
+    });
+    const run = (sender: string) =>
+      chatMessageRun({
+        companyId,
+        agentId,
+        endpointId,
+        principalId: ownerPrincipalId,
+        issueId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        normalizedEvent: githubAutomaticEvent({ author: "2001", sender, guest: false, responsibleUserId: "owner" }),
+      });
+
+    // A push (synchronize) or reopen by a GitHub account Paperclip has never seen.
+    await expect(run("2999")).resolves.toMatchObject({ kind: "chat_guest" });
+
+    // A GitHub account whose link to the owner was never confirmed.
+    await chatPrincipal({
+      companyId,
+      endpointId,
+      provider: "github",
+      externalId: "2002",
+      linkedUserId: "owner",
+      linkStatus: "pending",
+    });
+    await expect(run("2002")).resolves.toMatchObject({ kind: "chat_guest" });
+
+    // Author and sender are both the owner's linked GitHub account.
+    await expect(run("2001")).resolves.toBeNull();
+  });
+
+  it("refuses chat wakes attributed to a user the chat account is not linked to", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const endpointId = await insertChatEndpoint(companyId, agentId, "slack");
+    const issueId = await originIssue({
+      companyId,
+      agentId,
+      originKind: "chat_channel",
+      originId: `${endpointId}:slack:C1:1`,
+    });
+    const teammatePrincipalId = await chatPrincipal({
+      companyId,
+      endpointId,
+      provider: "slack",
+      externalId: "U-teammate",
+      linkedUserId: "teammate",
+    });
+    await expect(
+      chatMessageRun({
+        companyId,
+        agentId,
+        endpointId,
+        principalId: teammatePrincipalId,
+        issueId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        normalizedEvent: { kind: "mention", principal: { externalId: "U-teammate" } },
+      }),
+    ).resolves.toMatchObject({ kind: "chat_guest" });
+
+    // The owner's own linked chat account.
+    const ownerPrincipalId = await chatPrincipal({
+      companyId,
+      endpointId,
+      provider: "slack",
+      externalId: "U-owner",
+      linkedUserId: "owner",
+    });
+    await expect(
+      chatMessageRun({
+        companyId,
+        agentId,
+        endpointId,
+        principalId: ownerPrincipalId,
+        issueId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        normalizedEvent: { kind: "mention", principal: { externalId: "U-owner" } },
+      }),
+    ).resolves.toBeNull();
+
+    // A linked user's chat message does not lift the origin check: a chat
+    // conversation an unlinked person started stays external.
+    const guestIssueId = await originIssue({
+      companyId,
+      agentId,
+      originKind: "chat_channel",
+      originId: `${endpointId}:slack:C1:2`,
+      sourceTrust: { preset: "low_trust_review", disposition: "quarantined" },
+    });
+    await expect(
+      chatMessageRun({
+        companyId,
+        agentId,
+        endpointId,
+        principalId: ownerPrincipalId,
+        issueId: guestIssueId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        normalizedEvent: { kind: "mention", principal: { externalId: "U-owner" } },
+      }),
+    ).resolves.toMatchObject({ kind: "chat_guest" });
+  });
+
+  it("checks retried and coalesced chat wakes too", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const endpointId = await insertChatEndpoint(companyId, agentId, "github");
+    const issueId = await originIssue({
+      companyId,
+      agentId,
+      originKind: "chat_channel",
+      originId: `${endpointId}:github:acme/app:9:1`,
+    });
+    const guestPrincipalId = await chatPrincipal({ companyId, endpointId, provider: "github", externalId: "3001" });
+    const deliveryId = randomUUID();
+    await db.insert(chatDeliveries).values({
+      id: deliveryId,
+      companyId,
+      endpointId,
+      principalId: guestPrincipalId,
+      providerEventId: `event-${deliveryId}`,
+      deduplicationKey: `dedupe-${deliveryId}`,
+      eventKind: "mention",
+      normalizedEvent: githubAutomaticEvent({ author: "3001", sender: "3001", guest: true, responsibleUserId: "owner" }),
+      state: "processed",
+    });
+
+    // A board retry of the failed run replays the guest's chat input with the
+    // original attribution.
+    const retryActionId = randomUUID();
+    await db.insert(chatActions).values({
+      id: retryActionId,
+      companyId,
+      endpointId,
+      principalId: guestPrincipalId,
+      kind: "failed_run_retry",
+      providerActionId: `failed_run_retry:${randomUUID()}`,
+      status: "issued",
+      payload: {
+        version: 1,
+        issueId,
+        agentId,
+        principalId: guestPrincipalId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        sources: [{ actionId: randomUUID(), deliveryId, commentId: randomUUID() }],
+        initiatedByUserId: "owner",
+      },
+    });
+    const retryRunId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: retryActionId,
+      companyId,
+      agentId,
+      source: "on_demand",
+      reason: "retry_failed_run",
+      requestedByActorType: "user",
+      requestedByActorId: "owner",
+      payload: { issueId },
+      runId: retryRunId,
+    });
+    await expect(
+      resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: retryRunId, companyId, wakeupRequestId: retryActionId, contextSnapshot: { issueId } },
+        issueId,
+      }),
+    ).resolves.toMatchObject({ kind: "chat_guest" });
+
+    // A chat receipt coalesced into a deferred owner wake (no run id of its own).
+    const ownerWakeId = await wake({
+      companyId,
+      agentId,
+      runId: randomUUID(),
+      requestedByActorType: "user",
+      requestedByActorId: "owner",
+      payload: { issueId, mutation: "comment" },
+    });
+    const coalescedActionId = randomUUID();
+    await db.insert(chatActions).values({
+      id: coalescedActionId,
+      companyId,
+      endpointId,
+      deliveryId,
+      principalId: guestPrincipalId,
+      kind: "inbound_wakeup",
+      providerActionId: `inbound_wakeup:${deliveryId}`,
+      status: "processed",
+      payload: {
+        version: 1,
+        issueId,
+        agentId,
+        commentId: randomUUID(),
+        sessionGeneration: 1,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+      },
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: coalescedActionId,
+      companyId,
+      agentId,
+      source: "automation",
+      status: "coalesced",
+      requestedByActorType: "user",
+      requestedByActorId: "owner",
+      payload: { issueId, coalescedIntoWakeupRequestId: ownerWakeId },
+    });
+    const [ownerWake] = await db
+      .select({ runId: agentWakeupRequests.runId })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, ownerWakeId));
+    await expect(
+      resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: ownerWake!.runId!, companyId, wakeupRequestId: ownerWakeId, contextSnapshot: { issueId } },
+        issueId,
+      }),
+    ).resolves.toMatchObject({ kind: "chat_guest" });
   });
 });

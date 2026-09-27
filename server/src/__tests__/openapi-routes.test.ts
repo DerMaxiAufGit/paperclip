@@ -29,6 +29,7 @@ const apiPrefixes: Record<string, string> = {
   "board-chat.ts": "/api",
   "built-in-agents.ts": "/api",
   "chat-channels.ts": "/api",
+  "slack-tools.ts": "/api",
   "email.ts": "/api",
   "cloud.ts": "/api/cloud",
   "companies.ts": "/api/companies",
@@ -403,6 +404,17 @@ describe("openapi routes", () => {
       ["get", "/api/companies/{companyId}/chat-endpoints"],
       ["post", "/api/companies/{companyId}/chat-endpoints"],
       ["get", "/api/chat-endpoints/{endpointId}"],
+      ["get", "/api/chat-endpoints/{endpointId}/github/configuration"],
+      ["put", "/api/chat-endpoints/{endpointId}/github/configuration"],
+      ["post", "/api/chat-endpoints/{endpointId}/github/verify"],
+      ["put", "/api/chat-endpoints/{endpointId}/github/progress"],
+      ["get", "/api/chat-endpoints/{endpointId}/github/reviews"],
+      ["get", "/api/chat-endpoints/{endpointId}/github/personal-connections"],
+      ["post", "/api/chat-endpoints/{endpointId}/github/identity"],
+      ["post", "/api/chat-endpoints/{endpointId}/github/people/lookup"],
+      ["post", "/api/chat-endpoints/{endpointId}/github/registration"],
+      ["post", "/api/chat-endpoints/{endpointId}/github/app"],
+      ["post", "/api/chat-endpoints/{endpointId}/github/repositories/refresh"],
       ["patch", "/api/chat-endpoints/{endpointId}"],
       ["post", "/api/chat-endpoints/{endpointId}/setup"],
       ["post", "/api/chat-endpoints/{endpointId}/setup-secret"],
@@ -859,4 +871,11 @@ describe("heartbeat run ID OpenAPI contract", () => {
     }
     expect(checked).toBe(12);
   });
+});
+
+it("documents the account binding required for preference reads", () => {
+  const operation = buildOpenApiSpec().paths["/api/auth/preferences"]?.get;
+  expect(operation?.parameters).toEqual(expect.arrayContaining([
+    expect.objectContaining({ name: "expectedUserId", in: "query", required: true }),
+  ]));
 });

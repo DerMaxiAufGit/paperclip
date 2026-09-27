@@ -30,7 +30,13 @@ export function createSanitizedClaudeManagedEnvironment(
     "RUST_BACKTRACE",
     "ANTHROPIC_API_KEY",
   ] as const) {
-    if (typeof source[key] === "string") result[key] = source[key];
+    const value = source[key];
+    if (typeof value !== "string") continue;
+    // A Claude.ai credential (`sk-ant-oat…` access token, `sk-ant-ort…`
+    // refresh token, `sk-ant-sid…` session key) is never an API key and never
+    // reaches runnerd, whatever allowlisted key carries it.
+    if (/^sk-ant-(oat|ort|sid)/.test(value.trim().toLowerCase())) continue;
+    result[key] = value;
   }
   return result;
 }

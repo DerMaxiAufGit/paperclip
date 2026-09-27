@@ -20,7 +20,7 @@ import { environments } from "./environments.js";
 //   - `failed`, `timed_out`, `cancelled`: the terminal failure states.
 //
 // Legacy values of the removed Claude `claude setup-token` flow. No current flow
-// writes them, and migration 0282 deleted every Claude login row. They stay in
+// writes them, and migration 0285 deleted every Claude login row. They stay in
 // the union and in the partial unique index so the column type and the index
 // definition do not change:
 //   - `awaiting_code`, `submitting`: the former setup-token active states.
