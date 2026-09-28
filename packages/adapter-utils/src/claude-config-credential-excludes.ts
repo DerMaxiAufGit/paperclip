@@ -117,6 +117,98 @@ export function claudeSignInWorkspaceExcludes(input: {
   return [...excludes];
 }
 
+/**
+ * Whether a workspace-relative path (segments, any case) names a Claude
+ * sign-in file by its location: a credential file anywhere inside a `.claude`
+ * dir, or `.claude.json` at any depth. Same names as the staging excludes.
+ */
+export function isClaudeSignInPathSegments(segments: readonly string[]): boolean {
+  const lowerSegments = segments.map((segment) => segment.toLowerCase());
+  const fileName = lowerSegments.at(-1) ?? "";
+  if (fileName === CLAUDE_GLOBAL_CONFIG_FILE_NAME) return true;
+  return (
+    (CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES as readonly string[]).includes(fileName) &&
+    lowerSegments.slice(0, -1).includes(".claude")
+  );
+}
+
+function isSameOrInside(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+type ClaudeSignInLocationInput = { env?: NodeJS.ProcessEnv; homeDir?: string };
+
+// The Claude config dirs the server's own `claude` reads a sign-in from (its
+// `CLAUDE_CONFIG_DIR` and `~/.claude`), plus where their sign-in files really
+// live, each in its resolved and real spelling.
+function claudeSignInLocations(input: ClaudeSignInLocationInput) {
+  const env = input.env ?? process.env;
+  const homeDir = (input.homeDir ?? os.homedir()).trim();
+  const serverConfigDir = typeof env.CLAUDE_CONFIG_DIR === "string" ? env.CLAUDE_CONFIG_DIR.trim() : "";
+  const configDirs = [serverConfigDir, homeDir ? path.join(homeDir, ".claude") : ""].filter((dir) =>
+    path.isAbsolute(dir),
+  );
+  const signInFiles = [
+    ...configDirs.flatMap((dir) =>
+      [...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES, CLAUDE_GLOBAL_CONFIG_FILE_NAME].map((name) => path.join(dir, name)),
+    ),
+    ...(path.isAbsolute(homeDir) ? [path.join(homeDir, CLAUDE_GLOBAL_CONFIG_FILE_NAME)] : []),
+  ];
+  return {
+    configDirs: [...new Set(configDirs.flatMap(pathSpellings))],
+    signInFiles: new Set(signInFiles.flatMap(pathSpellings)),
+  };
+}
+
+export type ClaudeSignInPathMatcher = (candidatePath: string) => boolean;
+
+/**
+ * A matcher for absolute host paths (pass the real path of the file that would
+ * be read or listed) that names a Claude sign-in file whatever folder a caller
+ * treats as its root: a credential file directly inside any `.claude` dir or
+ * anywhere inside the server's `CLAUDE_CONFIG_DIR` or `~/.claude`, any
+ * `.claude.json`, and the real target of each of those sign-in files when it is
+ * a link to a file of another name. Resolves the config dirs once, so a scan
+ * builds one matcher and checks every entry with it. A relative path matches
+ * nothing.
+ */
+export function createClaudeSignInPathMatcher(input: ClaudeSignInLocationInput = {}): ClaudeSignInPathMatcher {
+  const { configDirs, signInFiles } = claudeSignInLocations(input);
+  return (candidatePath) => {
+    if (!candidatePath || !path.isAbsolute(candidatePath)) return false;
+    const resolved = path.resolve(candidatePath);
+    if (signInFiles.has(resolved)) return true;
+    const fileName = path.basename(resolved).toLowerCase();
+    if (fileName === CLAUDE_GLOBAL_CONFIG_FILE_NAME) return true;
+    if (!(CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES as readonly string[]).includes(fileName)) return false;
+    if (path.basename(path.dirname(resolved)).toLowerCase() === ".claude") return true;
+    return configDirs.some((dir) => isSameOrInside(dir, resolved));
+  };
+}
+
+/** One-off form of {@link createClaudeSignInPathMatcher}. */
+export function isClaudeSignInPath(candidatePath: string, input: ClaudeSignInLocationInput = {}): boolean {
+  return createClaudeSignInPathMatcher(input)(candidatePath);
+}
+
+/**
+ * Whether handing out the files of the folder `dirPath` could expose the
+ * server's Claude sign-in: the folder is the server's `CLAUDE_CONFIG_DIR` or
+ * `~/.claude` or lies inside one of them, is itself named `.claude`, or holds
+ * one of them (the home directory and everything above it hold `~/.claude`).
+ * Checks the resolved and the real spelling of every path.
+ */
+export function overlapsClaudeConfigDir(dirPath: string, input: ClaudeSignInLocationInput = {}): boolean {
+  if (!dirPath) return false;
+  const { configDirs } = claudeSignInLocations(input);
+  return pathSpellings(dirPath).some(
+    (folder) =>
+      path.basename(folder).toLowerCase() === ".claude" ||
+      configDirs.some((dir) => isSameOrInside(dir, folder) || isSameOrInside(folder, dir)),
+  );
+}
+
 function mergeExcludeLists(first: readonly string[] | undefined, second: readonly string[]): string[] {
   return [...new Set([...(first ?? []), ...second])];
 }

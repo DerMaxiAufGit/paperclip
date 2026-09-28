@@ -1068,6 +1068,120 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(notes.body.content.data).toContain("# notes");
   });
 
+  it("denies Claude sign-in files by their real location, so a workspace that is a Claude config dir never serves them", async () => {
+    const { root, executionRoot } = await makeWorkspace();
+    // A project workspace cwd can be any host path, including a Claude config
+    // dir itself (the service user's ~/.claude on the server).
+    const configRoot = path.join(root, ".claude");
+    await fs.mkdir(configRoot, { recursive: true });
+    const graph = await seedGraph(db, { projectRoot: configRoot, executionRoot });
+    const signInFiles = [".credentials.json", "credentials.json"];
+    for (const filePath of signInFiles) {
+      await fs.writeFile(path.join(configRoot, filePath), '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x"}}\n', "utf8");
+    }
+    await fs.writeFile(path.join(configRoot, "settings.json"), '{"theme":"dark"}\n', "utf8");
+
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    for (const filePath of signInFiles) {
+      for (const route of ["content", "resolve"]) {
+        const res = await request(app)
+          .get(`/api/issues/${graph.issueId}/file-resources/${route}`)
+          .query({ workspace: "project", path: filePath });
+        expect(res.status, `${route} ${filePath}`).toBe(403);
+        expect(res.body.details, `${route} ${filePath}`).toEqual({ code: "denied_secret" });
+        expect(JSON.stringify(res.body)).not.toContain("sk-ant-oat01-x");
+      }
+      await expect(workspaceFileResourceService(db).prepareDownload(graph.issueId, { path: filePath, workspace: "project" }))
+        .rejects.toMatchObject({ status: 403 });
+    }
+
+    const availability = await request(app)
+      .post(`/api/issues/${graph.issueId}/file-resources/availability`)
+      .send({ queries: signInFiles.map((filePath) => ({ workspace: "project", path: filePath })) });
+    expect(availability.status).toBe(200);
+    for (const result of availability.body.results) {
+      expect(result).toMatchObject({ openable: false, unavailableReason: "denied_secret", resource: null });
+    }
+
+    for (const query of [{}, { q: "json" }, { mode: "recent" }]) {
+      const listed = await request(app)
+        .get(`/api/issues/${graph.issueId}/file-resources/list`)
+        .query({ workspace: "project", limit: 100, ...query });
+      expect(listed.status).toBe(200);
+      const listedPaths = listed.body.items.map((item: { relativePath: string }) => item.relativePath);
+      expect(listedPaths, JSON.stringify(query)).toContain("settings.json");
+      for (const filePath of signInFiles) expect(listedPaths, JSON.stringify(query)).not.toContain(filePath);
+    }
+
+    // The rest of the config dir stays readable.
+    const settings = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/content`)
+      .query({ workspace: "project", path: "settings.json" });
+    expect(settings.status).toBe(200);
+    expect(settings.body.content.data).toContain("dark");
+  });
+
+  it("denies the sign-in files of the server's CLAUDE_CONFIG_DIR inside a workspace, also through a symbolic link", async () => {
+    const { root, projectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, executionRoot });
+    const configDir = path.join(projectRoot, "claude-config");
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(configDir, ".credentials.json"), '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x"}}\n', "utf8");
+    await fs.writeFile(path.join(configDir, "settings.json"), '{"theme":"dark"}\n', "utf8");
+    await fs.writeFile(path.join(projectRoot, "README.md"), "# Project\n", "utf8");
+    // A link inside the workspace whose name says nothing about Claude.
+    await fs.symlink(path.join(configDir, ".credentials.json"), path.join(projectRoot, "notes.json"));
+    await execFileAsync("git", ["-C", projectRoot, "init"]);
+    // The server names its config dir through a link of its own.
+    const configLink = path.join(root, "claude-config-link");
+    await fs.symlink(configDir, configLink);
+
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    vi.stubEnv("CLAUDE_CONFIG_DIR", configLink);
+    try {
+      for (const filePath of ["claude-config/.credentials.json", "notes.json"]) {
+        const res = await request(app)
+          .get(`/api/issues/${graph.issueId}/file-resources/content`)
+          .query({ workspace: "project", path: filePath });
+        expect(res.status, filePath).toBe(403);
+        expect(res.body.details, filePath).toEqual({ code: "denied_secret" });
+        expect(JSON.stringify(res.body)).not.toContain("sk-ant-oat01-x");
+      }
+
+      for (const query of [{ path: "claude-config" }, { q: "json" }, { mode: "recent" }, { mode: "changed" }]) {
+        const listed = await request(app)
+          .get(`/api/issues/${graph.issueId}/file-resources/list`)
+          .query({ workspace: "project", limit: 100, ...query });
+        expect(listed.status, JSON.stringify(query)).toBe(200);
+        const listedPaths = listed.body.items.map((item: { relativePath: string }) => item.relativePath);
+        expect(listedPaths, JSON.stringify(query)).toContain("claude-config/settings.json");
+        expect(listedPaths, JSON.stringify(query)).not.toContain("claude-config/.credentials.json");
+      }
+
+      const readme = await request(app)
+        .get(`/api/issues/${graph.issueId}/file-resources/content`)
+        .query({ workspace: "project", path: "README.md" });
+      expect(readme.status).toBe(200);
+      expect(readme.body.content.data).toContain("# Project");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("rejects remote workspaces without fetching provider resources", async () => {
     const { projectRoot } = await makeWorkspace();
     const graph = await seedGraph(db, {

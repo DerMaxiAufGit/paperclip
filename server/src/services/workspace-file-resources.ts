@@ -2,8 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
-  CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
-  CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+  createClaudeSignInPathMatcher,
+  isClaudeSignInPathSegments,
+  type ClaudeSignInPathMatcher,
 } from "@paperclipai/adapter-utils/claude-config-credential-excludes";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issues, projects, projectWorkspaces } from "@paperclipai/db";
@@ -313,23 +314,6 @@ function normalizeWorkspaceRelativePath(input: string): NormalizedPath {
   };
 }
 
-/**
- * Fork policy (doc/plans/2026-09-24-claude-cli-only-auth.md): Paperclip never
- * reads or hands out a Claude sign-in. A workspace root that contains the
- * service user's home would otherwise serve `~/.claude/.credentials.json` or
- * `~/.claude.json`. Same file names as the remote staging excludes: a
- * credential file anywhere inside a `.claude` dir, and `.claude.json` at any
- * depth. Takes lower-cased segments.
- */
-function isClaudeSignInFile(lowerSegments: readonly string[]): boolean {
-  const fileName = lowerSegments.at(-1) ?? "";
-  if (fileName === CLAUDE_GLOBAL_CONFIG_FILE_NAME) return true;
-  return (
-    (CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES as readonly string[]).includes(fileName) &&
-    lowerSegments.slice(0, -1).includes(".claude")
-  );
-}
-
 function denyReasonForPathSegments(segments: string[]): string | null {
   const lowerSegments = segments.map((segment) => segment.toLowerCase());
   if (lowerSegments.some((segment) => DENIED_SEGMENTS.has(segment))) return "denied_path_segment";
@@ -343,7 +327,10 @@ function denyReasonForPathSegments(segments: string[]): string | null {
   if (lowerSegments.includes(".aws") || lowerSegments.includes(".ssh")) return "denied_secret";
   if (lowerSegments.length >= 2 && lowerSegments.at(-2) === ".docker" && fileName === "config.json") return "denied_secret";
   if (lowerSegments.length >= 2 && lowerSegments.at(-2) === ".kube" && fileName === "config") return "denied_secret";
-  if (isClaudeSignInFile(lowerSegments)) return "denied_secret";
+  // Fork policy (doc/plans/2026-09-24-claude-cli-only-auth.md): never serve a
+  // Claude sign-in. Relative rule here; throwIfClaudeSignInPath checks where
+  // the file really lives.
+  if (isClaudeSignInPathSegments(lowerSegments)) return "denied_secret";
 
   return null;
 }
@@ -357,6 +344,15 @@ function throwIfDenied(segments: string[]) {
 
 function shouldPruneSegments(segments: string[]) {
   return denyReasonForPathSegments(segments) != null;
+}
+
+// A workspace root can itself be a Claude config dir (~/.claude) or hold the
+// server's CLAUDE_CONFIG_DIR under any name, which the relative rule cannot see.
+function throwIfClaudeSignInPath(paths: readonly string[]) {
+  const isSignInPath = createClaudeSignInPathMatcher();
+  if (paths.some((candidate) => isSignInPath(candidate))) {
+    throw new HttpError(403, "Workspace file path is denied by policy", { code: "denied_secret" });
+  }
 }
 
 function contentTypeForPath(filePath: string): string | null {
@@ -579,6 +575,7 @@ async function statLocalCandidate(candidate: WorkspaceCandidate, normalized: Nor
     throw new HttpError(403, "Workspace file path is outside the workspace", { code: "outside_workspace" });
   }
   throwIfDenied(relativePathFromReal(rootReal, targetReal).split("/").filter(Boolean));
+  throwIfClaudeSignInPath([targetLexical, targetReal]);
 
   const stat = await fs.stat(targetReal);
   if (!stat.isFile()) {
@@ -760,6 +757,7 @@ async function listLocalFileCandidate(input: {
   rootReal: string;
   relativePath: string;
   normalizedQuery: string | null;
+  isSignInPath: ClaudeSignInPathMatcher;
 }): Promise<WorkspaceFileListItem | null> {
   let normalized: NormalizedPath;
   try {
@@ -780,6 +778,7 @@ async function listLocalFileCandidate(input: {
     if (!isInsideRoot(input.rootReal, targetReal)) return null;
     const realRelative = relativePathFromReal(input.rootReal, targetReal);
     if (shouldPruneSegments(realRelative.split("/").filter(Boolean))) return null;
+    if (input.isSignInPath(targetLexical) || input.isSignInPath(targetReal)) return null;
   } catch {
     return null;
   }
@@ -793,6 +792,7 @@ async function listLocalDirectoryChildCandidate(input: {
   relativePath: string;
   entry: import("node:fs").Dirent;
   normalizedQuery: string | null;
+  isSignInPath: ClaudeSignInPathMatcher;
 }): Promise<WorkspaceFileListItem | null> {
   let normalized: NormalizedPath;
   try {
@@ -824,6 +824,7 @@ async function listLocalDirectoryChildCandidate(input: {
     rootReal: input.rootReal,
     relativePath: input.relativePath,
     normalizedQuery: input.normalizedQuery,
+    isSignInPath: input.isSignInPath,
   });
 }
 
@@ -852,6 +853,7 @@ async function enumerateWorkspaceDirectoryChildren(input: {
   let scannedCount = 0;
   let matchedCount = 0;
   let truncated = false;
+  const isSignInPath = createClaudeSignInPathMatcher();
   for (const entry of entries) {
     scannedCount += 1;
     if (scannedCount > WORKSPACE_FILE_LIST_MAX_SCANNED_ENTRIES) {
@@ -868,6 +870,7 @@ async function enumerateWorkspaceDirectoryChildren(input: {
       relativePath,
       entry,
       normalizedQuery: input.normalizedQuery,
+      isSignInPath,
     });
     if (!item) continue;
 
@@ -904,6 +907,7 @@ async function enumerateWorkspaceFiles(input: {
   let matchedCount = 0;
   let truncated = false;
   let hitScanCap = false;
+  const isSignInPath = createClaudeSignInPathMatcher();
 
   while (dirs.length > 0) {
     const dir = dirs.shift()!;
@@ -948,6 +952,7 @@ async function enumerateWorkspaceFiles(input: {
         rootReal: input.rootReal,
         relativePath,
         normalizedQuery: input.normalizedQuery,
+        isSignInPath,
       });
       if (!item) continue;
 
@@ -1034,6 +1039,7 @@ async function listChangedWorkspaceFiles(input: {
   const { paths, hitScanCap } = parseGitStatusPaths(stdout);
   const matchedItems: WorkspaceFileListItem[] = [];
   let scannedCount = 0;
+  const isSignInPath = createClaudeSignInPathMatcher();
   for (const filePath of paths) {
     scannedCount += 1;
     const item = await listLocalFileCandidate({
@@ -1041,6 +1047,7 @@ async function listChangedWorkspaceFiles(input: {
       rootReal: input.rootReal,
       relativePath: filePath,
       normalizedQuery: input.normalizedQuery,
+      isSignInPath,
     });
     if (item) matchedItems.push(item);
   }

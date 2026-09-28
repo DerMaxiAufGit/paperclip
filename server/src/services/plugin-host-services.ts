@@ -53,6 +53,7 @@ import { pluginManagedRoutineService } from "./plugin-managed-routines.js";
 import { pluginManagedSkillService } from "./plugin-managed-skills.js";
 import {
   assertConfiguredLocalFolder,
+  assertPluginLocalFolderOutsideClaudeConfig,
   assertWritableConfiguredLocalFolder,
   getStoredLocalFolders,
   deletePluginLocalFolderFile,
@@ -1438,6 +1439,8 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const declaration = getLocalFolderDeclaration(params.folderKey);
+        // Fork policy: never a Claude config dir, checked before anything is created there.
+        assertPluginLocalFolderOutsideClaudeConfig(params.path);
         const existing = await registry.getCompanySettings(pluginId, companyId);
         const existingConfig = getStoredLocalFolders(existing?.settingsJson)[params.folderKey] ?? null;
         await preparePluginLocalFolder({

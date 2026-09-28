@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import express from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -528,6 +531,37 @@ describe.sequential("plugin local folder routes", () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain("Local folder key is not declared");
     expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+  });
+
+  // Fork policy (doc/plans/2026-09-24-claude-cli-only-auth.md): a Claude config
+  // folder is never a plugin local folder, so the board route refuses to store one.
+  it("refuses saving a Claude config folder, or a folder that holds one, as a local folder", async () => {
+    readyLocalFolderPlugin();
+    const root = mkdtempSync(path.join(os.tmpdir(), "plugin-local-folder-claude-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      const dotClaude = path.join(root, "project", ".claude");
+      const serverConfigDir = path.join(root, "operator-config");
+      mkdirSync(dotClaude, { recursive: true });
+      mkdirSync(serverConfigDir, { recursive: true });
+      process.env.CLAUDE_CONFIG_DIR = serverConfigDir;
+      const { app } = await createApp(boardActor());
+
+      for (const folderPath of [dotClaude, serverConfigDir, path.join(serverConfigDir, "projects"), root]) {
+        const res = await request(app)
+          .put(`/api/plugins/${pluginId}/companies/${companyA}/local-folders/content-root`)
+          .send({ path: folderPath });
+
+        expect(res.status, `${folderPath}: ${JSON.stringify(res.body)}`).toBe(403);
+        expect(res.body.error).toContain("Claude config folder");
+      }
+      expect(mockRegistry.getCompanySettings).not.toHaveBeenCalled();
+      expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

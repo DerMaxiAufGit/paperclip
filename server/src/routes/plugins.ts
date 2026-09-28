@@ -75,6 +75,7 @@ import {
 } from "./authz.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
 import {
+  assertPluginLocalFolderOutsideClaudeConfig,
   findLocalFolderDeclaration,
   getStoredLocalFolders,
   inspectPluginLocalFolder,
@@ -2935,6 +2936,8 @@ export function pluginRoutes(
       res.status(400).json({ error: '"path" is required and must be a non-empty string' });
       return;
     }
+    // Fork policy: a Claude config folder is never stored as a local folder.
+    assertPluginLocalFolderOutsideClaudeConfig(body.path);
 
     const existing = await registry.getCompanySettings(plugin.id, companyId);
     const declaration = requireLocalFolderDeclaration(plugin.manifestJson.localFolders ?? [], folderKey);

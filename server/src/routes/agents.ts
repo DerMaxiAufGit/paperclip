@@ -154,6 +154,7 @@ import {
 } from "../services/instance-settings.js";
 import { isClaudeSubscriptionLaneRun, probeClaudeCliAuth } from "@paperclipai/adapter-claude-local/server";
 import { resolveClaudeSubscriptionEligibility } from "../services/claude-subscription-policy.js";
+import { claudeSubscriptionProbeConfigForActor } from "../services/claude-subscription-probe.js";
 import {
   DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
   DEFAULT_CODEX_LOCAL_MODEL,
@@ -3316,6 +3317,9 @@ export function agentRoutes(
             } satisfies AdapterEnvironmentTestResult);
             return;
           }
+          // Only the board chooses how that turn runs (args, permissions,
+          // turns); an agent key gets a server-fixed probe.
+          effectiveAdapterConfig = claudeSubscriptionProbeConfigForActor(req.actor, effectiveAdapterConfig);
         }
         const managed = aiBinding ? await prepareManagedAiRuntime(db, { companyId, agentId: req.body.agentId ?? "", responsibleUserId: responsibleUserForAiRequest(req), adapterType: type, binding: aiBinding, config: effectiveAdapterConfig, allowUninstalledPersonal: !req.body.agentId, allowUninstalledShared: !req.body.agentId && await canInstallSharedAiConnectionForNewAgent(db, req, companyId, aiBinding) }) : null;
         let result;

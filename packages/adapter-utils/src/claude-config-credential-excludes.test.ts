@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +6,10 @@ import {
   CLAUDE_SIGN_IN_ANY_DEPTH_WORKSPACE_EXCLUDES,
   claudeConfigCredentialWorkspaceExcludes,
   claudeSignInWorkspaceExcludes,
+  createClaudeSignInPathMatcher,
+  isClaudeSignInPath,
+  isClaudeSignInPathSegments,
+  overlapsClaudeConfigDir,
   withClaudeSignInStagingExcludes,
   withClaudeSignInWorkspaceExcludes,
 } from "./claude-config-credential-excludes.js";
@@ -149,5 +153,162 @@ describe("claudeSignInWorkspaceExcludes", () => {
     expect(shouldExcludePath(".claude/.credentials.json", staged.workspaceBaseline?.exclude ?? [])).toBe(true);
     expect(staged.workspaceBaseline?.entries).toBe(entries);
     expect(withClaudeSignInStagingExcludes({ workspaceLocalDir: workspace })).not.toHaveProperty("workspaceBaseline");
+  });
+});
+
+describe("isClaudeSignInPathSegments", () => {
+  it("matches a credential file inside a .claude dir and .claude.json at any depth, ignoring case", () => {
+    for (const relative of [
+      ".claude/.credentials.json",
+      ".claude/credentials.json",
+      "home/svc/.claude/backups/credentials.json",
+      ".claude.json",
+      "home/svc/.Claude.json",
+      "HOME/.CLAUDE/.Credentials.json",
+    ]) {
+      expect(isClaudeSignInPathSegments(relative.split("/")), relative).toBe(true);
+    }
+    for (const relative of [
+      ".claude/settings.json",
+      "credentials.json",
+      "config/credentials.json",
+      "src/.credentials.json",
+      ".claude.json.d/readme.md",
+    ]) {
+      expect(isClaudeSignInPathSegments(relative.split("/")), relative).toBe(false);
+    }
+  });
+});
+
+describe("isClaudeSignInPath", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  const elsewhere = path.join(os.tmpdir(), "paperclip-sign-in-path-elsewhere");
+
+  it("matches a credential file directly inside any .claude dir and any .claude.json", () => {
+    const opts = { env: {}, homeDir: elsewhere };
+    const root = path.join(os.tmpdir(), "paperclip-sign-in-path");
+    for (const candidate of [
+      path.join(root, ".claude", ".credentials.json"),
+      path.join(root, ".claude", "credentials.json"),
+      path.join(root, "srv", ".CLAUDE", ".credentials.json"),
+      path.join(root, ".claude.json"),
+      path.join(root, "a", "b", ".Claude.json"),
+    ]) {
+      expect(isClaudeSignInPath(candidate, opts), candidate).toBe(true);
+    }
+    for (const candidate of [
+      path.join(root, ".claude", "settings.json"),
+      path.join(root, ".claude", "projects", "notes.md"),
+      path.join(root, "credentials.json"),
+      path.join(root, "src", ".credentials.json"),
+      path.join(root, ".claude.json.d", "readme.md"),
+      "relative/.claude/.credentials.json",
+      "",
+    ]) {
+      expect(isClaudeSignInPath(candidate, opts), candidate).toBe(false);
+    }
+  });
+
+  it("matches a credential file anywhere inside the server's CLAUDE_CONFIG_DIR and ~/.claude, whatever they are named", () => {
+    const root = path.join(os.tmpdir(), "paperclip-sign-in-path-cfg");
+    const configDir = path.join(root, "claude-config");
+    const homeDir = path.join(root, "home");
+    const opts = { env: { CLAUDE_CONFIG_DIR: ` ${configDir} ` }, homeDir };
+    expect(isClaudeSignInPath(path.join(configDir, ".credentials.json"), opts)).toBe(true);
+    expect(isClaudeSignInPath(path.join(configDir, "backups", "credentials.json"), opts)).toBe(true);
+    expect(isClaudeSignInPath(path.join(configDir, ".claude.json"), opts)).toBe(true);
+    expect(isClaudeSignInPath(path.join(homeDir, ".claude", "old", "credentials.json"), opts)).toBe(true);
+    expect(isClaudeSignInPath(path.join(homeDir, ".claude.json"), opts)).toBe(true);
+    expect(isClaudeSignInPath(path.join(configDir, "settings.json"), opts)).toBe(false);
+    expect(isClaudeSignInPath(path.join(`${configDir}-other`, ".credentials.json"), opts)).toBe(false);
+    expect(isClaudeSignInPath(path.join(root, "credentials.json"), opts)).toBe(false);
+    // A relative CLAUDE_CONFIG_DIR names no folder of this server.
+    expect(
+      isClaudeSignInPath(path.join(process.cwd(), "claude-rel", ".credentials.json"), {
+        env: { CLAUDE_CONFIG_DIR: "claude-rel" },
+        homeDir: elsewhere,
+      }),
+    ).toBe(false);
+  });
+
+  it("follows symbolic links: a config dir reached through a link, and a sign-in file that links elsewhere", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-sign-in-path-link-"));
+    cleanupDirs.push(root);
+    const realConfigDir = path.join(root, "store", "cfg");
+    await mkdir(realConfigDir, { recursive: true });
+    await writeFile(path.join(realConfigDir, ".credentials.json"), "{}", "utf8");
+    const linkedConfigDir = path.join(root, "cfg-link");
+    await symlink(realConfigDir, linkedConfigDir);
+    const homeDir = path.join(root, "home");
+    await mkdir(path.join(root, "dotfiles"), { recursive: true });
+    await mkdir(homeDir, { recursive: true });
+    await writeFile(path.join(root, "dotfiles", "claude-state.json"), "{}", "utf8");
+    await symlink(path.join(root, "dotfiles", "claude-state.json"), path.join(homeDir, ".claude.json"));
+
+    const matcher = createClaudeSignInPathMatcher({ env: { CLAUDE_CONFIG_DIR: linkedConfigDir }, homeDir });
+    expect(matcher(path.join(realConfigDir, ".credentials.json"))).toBe(true);
+    expect(matcher(path.join(linkedConfigDir, ".credentials.json"))).toBe(true);
+    expect(matcher(path.join(root, "dotfiles", "claude-state.json"))).toBe(true);
+    expect(matcher(path.join(root, "dotfiles", "other.json"))).toBe(false);
+    expect(matcher(path.join(root, "store", "credentials.json"))).toBe(false);
+  });
+});
+
+describe("overlapsClaudeConfigDir", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("flags the server's config dirs, folders inside or around them, and any folder named .claude", () => {
+    const root = path.join(os.tmpdir(), "paperclip-sign-in-overlap");
+    const configDir = path.join(root, "state", "claude-config");
+    const homeDir = path.join(root, "home", "svc");
+    const opts = { env: { CLAUDE_CONFIG_DIR: configDir }, homeDir };
+    for (const folder of [
+      configDir,
+      path.join(configDir, "projects"),
+      path.join(root, "state"),
+      root,
+      path.join(homeDir, ".claude"),
+      path.join(homeDir, ".claude", "skills"),
+      homeDir,
+      path.join(root, "repo", ".claude"),
+      path.parse(root).root,
+    ]) {
+      expect(overlapsClaudeConfigDir(folder, opts), folder).toBe(true);
+    }
+    for (const folder of [
+      path.join(root, "state", "claude-config-other"),
+      path.join(root, "repo"),
+      path.join(root, "repo", ".claude-notes"),
+      path.join(homeDir, ".paperclip", "plugin-data"),
+    ]) {
+      expect(overlapsClaudeConfigDir(folder, opts), folder).toBe(false);
+    }
+  });
+
+  it("flags a folder that reaches a config dir through a symbolic link", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-sign-in-overlap-link-"));
+    cleanupDirs.push(root);
+    const configDir = path.join(root, "store", "cfg");
+    await mkdir(configDir, { recursive: true });
+    const folderLink = path.join(root, "plugin-folder");
+    await symlink(configDir, folderLink);
+    const opts = { env: { CLAUDE_CONFIG_DIR: configDir }, homeDir: path.join(root, "home") };
+    expect(overlapsClaudeConfigDir(folderLink, opts)).toBe(true);
+    expect(overlapsClaudeConfigDir(path.join(root, "home", "notes"), opts)).toBe(false);
   });
 });

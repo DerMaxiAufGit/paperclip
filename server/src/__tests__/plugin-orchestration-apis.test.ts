@@ -496,6 +496,71 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     })).rejects.toThrow("Local folder key is not declared");
   });
 
+  it("refuses a Claude config dir as a plugin local folder before touching it", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const pluginId = randomUUID();
+    const manifest = {
+      id: "paperclip.local-folders-claude",
+      apiVersion: 1 as const,
+      version: "0.1.0",
+      displayName: "Local Folders",
+      description: "Local folder fixture",
+      author: "Paperclip",
+      categories: ["automation" as const],
+      capabilities: ["local.folders" as const],
+      entrypoints: { worker: "./dist/worker.js" },
+      localFolders: [
+        {
+          folderKey: "content-root",
+          displayName: "Content root",
+          access: "readWrite" as const,
+          requiredDirectories: ["raw"],
+        },
+      ],
+    };
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey: manifest.id,
+      packageName: "@paperclip/plugin-local-folders-claude",
+      version: "0.1.0",
+      manifestJson: manifest,
+      status: "ready",
+    });
+    const services = buildHostServices(db, pluginId, manifest.id, createEventBusStub(), undefined, { manifest });
+    const root = await makeLocalRoot();
+    const claudeDir = path.join(root, ".claude");
+    await fs.mkdir(claudeDir);
+    await fs.writeFile(path.join(claudeDir, ".credentials.json"), "{}", "utf8");
+
+    await expect(services.localFolders.configure({
+      companyId,
+      folderKey: "content-root",
+      path: claudeDir,
+      access: "readWrite",
+    })).rejects.toMatchObject({ status: 403 });
+    expect((await services.localFolders.status({ companyId, folderKey: "content-root" })).configured).toBe(false);
+    expect(await fs.readdir(claudeDir)).toEqual([".credentials.json"]);
+    await expect(services.localFolders.list({ companyId, folderKey: "content-root" })).rejects.toThrow();
+
+    // A folder that merely holds a .claude dir is allowed, minus its sign-in files.
+    await fs.writeFile(path.join(root, "notes.md"), "# Notes\n", "utf8");
+    const configured = await services.localFolders.configure({
+      companyId,
+      folderKey: "content-root",
+      path: root,
+      access: "readWrite",
+    });
+    expect(configured.healthy).toBe(true);
+    const listing = await services.localFolders.list({ companyId, folderKey: "content-root", recursive: true });
+    expect(listing.entries.map((entry) => entry.path)).toContain("notes.md");
+    expect(listing.entries.map((entry) => entry.path)).not.toContain(".claude/.credentials.json");
+    await expect(services.localFolders.readText({
+      companyId,
+      folderKey: "content-root",
+      relativePath: ".claude/.credentials.json",
+    })).rejects.toMatchObject({ status: 403 });
+  });
+
   it("resolves plugin-managed projects by stable key without overwriting user edits", async () => {
     const { companyId } = await seedCompanyAndAgent();
     const pluginId = randomUUID();

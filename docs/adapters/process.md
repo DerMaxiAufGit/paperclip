@@ -45,6 +45,10 @@ Paperclip applies an `env` wrapper the way `env` does: `env -i` or
 `env -u ANTHROPIC_API_KEY claude` drops a server-env API key, so that run uses
 the sign-in and gets these rules. An endpoint key in the agent env or in a
 wrapper's `NAME=VALUE` is refused even when a wrapper flag clears it.
+A wrapper Paperclip cannot read exactly (an `env -S` string with quotes,
+backslashes, `${VAR}` or `#`, or an `env` flag it does not know) counts as
+clearing the env, so the run counts as using the sign-in even when it sets an
+API key; write it as plain `env NAME=VALUE claude` instead.
 
 ## Example
 

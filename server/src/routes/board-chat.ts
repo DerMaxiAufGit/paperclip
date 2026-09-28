@@ -73,11 +73,14 @@ const MAX_CONCURRENT_BOARD_CHATS = 3;
  * the `claude` CLI on the operator's own Claude sign-in with permissions
  * skipped. In a shared cwd such as /tmp, any OS user could plant a project
  * `.claude/settings.json` (an `ANTHROPIC_BASE_URL` that receives the sign-in's
- * bearer token), a `.mcp.json` or a `CLAUDE.md` for it. So each request runs
- * in its own 0700 dir under the instance root, whose parents the operator
- * owns, and the CLI loads only the operator's user settings and no MCP
- * servers. Sessions are not persisted, so the per-request dirs leave no
- * project entries behind in the operator's Claude config dir.
+ * bearer token), a `.mcp.json` or a `CLAUDE.md` for it. So the CLI runs in a
+ * private 0700 dir under the instance root (see `prepareBoardChatWorkDir`),
+ * and loads only the operator's user settings and no MCP servers.
+ *
+ * `--no-session-persistence` keeps transcripts out of the operator's Claude
+ * config dir, but the CLI still creates `projects/<slug-of-cwd>/` there for
+ * every cwd it runs in. So the dir is one stable dir per company rather than
+ * one per request, which keeps that to one project entry per company.
  */
 const BOARD_CHAT_CLAUDE_ISOLATION_ARGS = [
   "--setting-sources",
@@ -86,11 +89,79 @@ const BOARD_CHAT_CLAUDE_ISOLATION_ARGS = [
   "--no-session-persistence",
 ];
 
-/** A fresh private (0700, from mkdtemp) working dir for one board chat request. */
-async function createBoardChatWorkDir(): Promise<string> {
+/** Company ids are UUIDs; anything that could leave `board-chat/` is refused. */
+const SAFE_BOARD_CHAT_DIR_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+function isSafeBoardChatDirName(companyId: string): boolean {
+  return SAFE_BOARD_CHAT_DIR_NAME.test(companyId);
+}
+
+/**
+ * Refuse `dir` unless it is a real directory (not a symlink) owned by the
+ * user Paperclip runs as, and re-assert mode 0700 on it. The checks and the
+ * chmod act on one descriptor opened without following symlinks, so the dir
+ * cannot be swapped between the check and the chmod.
+ */
+async function assertOwnedPrivateDir(dir: string): Promise<void> {
+  if (process.platform === "win32") {
+    const stat = await fs.promises.lstat(dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Board chat dir ${dir} must be a directory, not a symlink or file`);
+    }
+    return;
+  }
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await fs.promises.open(
+      dir,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+    );
+  } catch (err) {
+    throw new Error(`Board chat dir ${dir} must be a directory, not a symlink or file`, {
+      cause: err,
+    });
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isDirectory()) {
+      throw new Error(`Board chat dir ${dir} must be a directory`);
+    }
+    const currentUserId = process.getuid?.();
+    if (currentUserId !== undefined && stat.uid !== currentUserId) {
+      throw new Error(`Board chat dir ${dir} must be owned by the Paperclip process user`);
+    }
+    await handle.chmod(0o700);
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * The company's private working dir, `<instanceRoot>/board-chat/<companyId>`,
+ * checked (see `assertOwnedPrivateDir`) and emptied, so nothing left in it
+ * (`.claude/`, `.mcp.json`, `CLAUDE.md`, anything) reaches the next run.
+ * Callers must hold the company's board chat slot: emptying would otherwise
+ * delete the files of a run still going in the same dir.
+ */
+async function prepareBoardChatWorkDir(companyId: string): Promise<string> {
+  if (!isSafeBoardChatDirName(companyId)) {
+    throw new Error("Board chat company id is not a safe directory name");
+  }
   const parent = path.join(resolvePaperclipInstanceRoot(), "board-chat");
   await fs.promises.mkdir(parent, { recursive: true, mode: 0o700 });
-  return fs.promises.mkdtemp(path.join(parent, "chat-"));
+  await assertOwnedPrivateDir(parent);
+  const dir = path.join(parent, companyId);
+  try {
+    await fs.promises.mkdir(dir, { mode: 0o700 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  await assertOwnedPrivateDir(dir);
+  // `rm` removes a symlink entry itself, never what it points to.
+  for (const entry of await fs.promises.readdir(dir)) {
+    await fs.promises.rm(path.join(dir, entry), { recursive: true, force: true });
+  }
+  return dir;
 }
 
 /**
@@ -112,6 +183,9 @@ export function boardChatRoutes(
 ) {
   const router = Router();
   let liveBoardChats = 0;
+  // Companies with a board chat running: each company's claude runs in one
+  // shared dir that is emptied before every run, so one run at a time.
+  const liveBoardChatCompanies = new Set<string>();
 
   // The board skill is read from disk once and cached. Resolves to the
   // repo-root `skills/paperclip-board/SKILL.md` whether running from
@@ -184,6 +258,12 @@ export function boardChatRoutes(
     // it scopes issue reads/writes below and is exported to the subprocess.
     assertCompanyAccess(req, companyId);
 
+    // It also names the company's working dir on disk (prepareBoardChatWorkDir).
+    if (!isSafeBoardChatDirName(companyId)) {
+      res.status(400).json({ error: "companyId is not a valid company id" });
+      return;
+    }
+
     // Resolve the API base URL the spawned process should call back into so
     // the board skill can drive the control plane.
     const localAddress = req.socket?.localAddress ?? "127.0.0.1";
@@ -218,6 +298,13 @@ export function boardChatRoutes(
     if (liveBoardChats >= MAX_CONCURRENT_BOARD_CHATS) {
       res.status(429).json({
         error: "Too many concurrent board chats — retry shortly",
+        code: "BOARD_CHAT_BUSY",
+      });
+      return;
+    }
+    if (liveBoardChatCompanies.has(companyId)) {
+      res.status(429).json({
+        error: "A board chat for this company is already running — retry shortly",
         code: "BOARD_CHAT_BUSY",
       });
       return;
@@ -310,38 +397,39 @@ export function boardChatRoutes(
       ...BOARD_CHAT_CLAUDE_ISOLATION_ARGS,
     ];
 
-    let workDir: string;
-    try {
-      workDir = await createBoardChatWorkDir();
-    } catch (err) {
-      console.error("[board/chat/stream workdir error]", err);
+    const writeSseError = (errorMessage: string) => {
       if (res.writable) {
-        res.write(
-          `data: ${JSON.stringify({
-            type: "error",
-            message: "Could not create a private working directory for the board assistant.",
-          })}\n\n`,
-        );
+        res.write(`data: ${JSON.stringify({ type: "error", message: errorMessage })}\n\n`);
         res.end();
       }
-      return;
-    }
-    let workDirRemoved = false;
-    const removeWorkDir = () => {
-      if (workDirRemoved) return;
-      workDirRemoved = true;
-      fs.promises.rm(workDir, { recursive: true, force: true }).catch((err) => {
-        console.error("[board/chat/stream workdir cleanup error]", err);
-      });
     };
 
+    // The busy check above ran before the awaits in between, so check again
+    // and claim the company in one synchronous step: two claude processes
+    // must never share (and empty) one company dir.
+    if (liveBoardChatCompanies.has(companyId)) {
+      writeSseError("A board chat for this company is already running — retry shortly.");
+      return;
+    }
+    liveBoardChatCompanies.add(companyId);
     liveBoardChats += 1;
     let slotReleased = false;
     const releaseSlot = () => {
       if (slotReleased) return;
       slotReleased = true;
       liveBoardChats -= 1;
+      liveBoardChatCompanies.delete(companyId);
     };
+
+    let workDir: string;
+    try {
+      workDir = await prepareBoardChatWorkDir(companyId);
+    } catch (err) {
+      releaseSlot();
+      console.error("[board/chat/stream workdir error]", err);
+      writeSseError("Could not prepare a private working directory for the board assistant.");
+      return;
+    }
 
     const writeStartError = () => {
       if (res.writable) {
@@ -365,7 +453,6 @@ export function boardChatRoutes(
       });
     } catch (err) {
       releaseSlot();
-      removeWorkDir();
       console.error("[board/chat/stream spawn error]", err);
       writeStartError();
       return;
@@ -467,7 +554,6 @@ export function boardChatRoutes(
     proc.on("close", async (exitCode) => {
       clearTimeout(timeout);
       releaseSlot();
-      removeWorkDir();
 
       // Persist the board's reply under the "board-concierge" sentinel so the
       // UI renders it as an assistant bubble (see BoardChat `isUser` check).
@@ -498,7 +584,6 @@ export function boardChatRoutes(
     proc.on("error", (err) => {
       clearTimeout(timeout);
       releaseSlot();
-      removeWorkDir();
       console.error("[board/chat/stream spawn error]", err);
       writeStartError();
     });

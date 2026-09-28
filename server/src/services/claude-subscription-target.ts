@@ -46,7 +46,11 @@ export function claudeSubscriptionTargetIsRemote(
  *   that names `claude`, the `@anthropic-ai/claude-code` package, or a file in
  *   that package (the npm install's `cli.js`). This also counts `npm run
  *   claude` and the like, which errs on the side of gating;
- * - `env [flags] [NAME=VALUE]... <command>` whose command is one of these.
+ * - `env [flags] [NAME=VALUE]... <command>` whose command is one of these,
+ *   through any number of nested `env` wrappers;
+ * - an `env` wrapper this model cannot read exactly (see `unreadable`) when
+ *   any arg after it names `claude` as above, since it may run another
+ *   command than the one read here.
  *
  * A shell (`sh -c "claude …"`), a script, or any other program that starts
  * `claude` itself is not seen: a process agent runs any command as the service
@@ -57,30 +61,45 @@ interface ProcessClaudeInvocation {
   envSteps: EnvWrapperStep[];
   /** The args after the `claude` command, or all args of a package manager or runtime. */
   args: string[];
+  /**
+   * True when an `env` wrapper does something this model does not read
+   * exactly: an `env -S` string that quotes, escapes, expands `${NAME}` or has
+   * a `#` comment, or a flag not known here (which may take the next arg as
+   * its value). The env the binary gets then counts as cleared, and no wrapper
+   * assignment counts toward the lane, since the wrapper may drop the env or
+   * turn a later `NAME=VALUE` into a flag value or a command arg.
+   */
+  unreadable: boolean;
 }
 
 /**
  * One change an `env` wrapper makes to the env it hands on, in order: `clear`
- * for `-i`/`-`/`--ignore-environment` (and any flag not known here),
- * `unset` for `-u NAME`/`--unset NAME`, `set` for a `NAME=VALUE` assignment.
+ * for `-i`/`-`/`--ignore-environment` (and BSD `-L`/`-U`), `unset` for
+ * `-u NAME`/`--unset NAME`, `set` for a `NAME=VALUE` assignment.
  */
 type EnvWrapperStep = { kind: "clear" } | { kind: "unset"; name: string } | { kind: "set"; name: string; value: string };
 
-/** What an `env` flag does: `split` expands `-S`/`--split-string` into args, `none` leaves the env alone. */
+/**
+ * What an `env` flag does: `split` expands `-S`/`--split-string` into args,
+ * `none` leaves the env alone, `unreadable` is a flag not known here.
+ */
 interface EnvFlagSpec {
-  effect: "clear" | "unset" | "split" | "none";
+  effect: "clear" | "unset" | "split" | "none" | "unreadable";
   value: "none" | "required" | "optional";
 }
 
 const CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code";
 const PACKAGE_RUNNERS = new Set(["npx", "pnpx", "bunx", "npm", "pnpm", "yarn", "bun", "node"]);
-/** GNU coreutils and BSD `env` short flags. Any other flag counts as `clear`. */
+/** GNU coreutils and BSD `env` short flags. Any other flag makes the wrapper unreadable. */
 const ENV_SHORT_FLAGS = new Map<string, EnvFlagSpec>([
   ["i", { effect: "clear", value: "none" }],
   ["u", { effect: "unset", value: "required" }],
   ["S", { effect: "split", value: "required" }],
   ["C", { effect: "none", value: "required" }],
   ["v", { effect: "none", value: "none" }],
+  // GNU: -a passes another argv[0] to the command; -0 (GNU and BSD) ends output lines with NUL.
+  ["a", { effect: "none", value: "required" }],
+  ["0", { effect: "none", value: "none" }],
   // BSD: -P searches another PATH for the command; -L/-U load a login class env.
   ["P", { effect: "none", value: "required" }],
   ["L", { effect: "clear", value: "required" }],
@@ -92,14 +111,22 @@ const ENV_LONG_FLAGS = new Map<string, EnvFlagSpec>([
   ["unset", { effect: "unset", value: "required" }],
   ["split-string", { effect: "split", value: "required" }],
   ["chdir", { effect: "none", value: "required" }],
+  ["argv0", { effect: "none", value: "required" }],
+  ["null", { effect: "none", value: "none" }],
   ["debug", { effect: "none", value: "none" }],
   ["block-signal", { effect: "none", value: "optional" }],
   ["default-signal", { effect: "none", value: "optional" }],
   ["ignore-signal", { effect: "none", value: "optional" }],
   ["list-signal-handling", { effect: "none", value: "none" }],
 ]);
-const CLEAR_ENV_FLAG: EnvFlagSpec = { effect: "clear", value: "none" };
-const MAX_WRAPPER_DEPTH = 4;
+const UNKNOWN_ENV_FLAG: EnvFlagSpec = { effect: "unreadable", value: "none" };
+/** The whitespace GNU `env -S` splits on (not every Unicode space, as `\s` would). */
+const ENV_SPLIT_WHITESPACE = new Set([" ", "\t", "\n", "\v", "\f", "\r"]);
+/** What makes GNU `env -S` quote, escape, expand `${NAME}` or start a comment. */
+const ENV_SPLIT_UNREADABLE = /['"\\$#]/;
+const ENV_SPLIT_ESCAPES: Record<string, string> = { f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
+/** An `env -S` `${NAME}` expansion, which takes its value from an env this model does not have. */
+const ENV_SPLIT_EXPANSION = /\$\{[^}]*\}/g;
 
 function commandBaseName(command: string): string {
   const base = command.trim().split(/[\\/]/).pop() ?? "";
@@ -113,17 +140,68 @@ function namesClaude(token: string): boolean {
   return commandBaseName(value) === "claude";
 }
 
+/** True when an arg names claude (see `namesClaude`), or is a `--flag=value` whose value does. */
+function argNamesClaude(token: string): boolean {
+  if (!token.startsWith("-")) return namesClaude(token);
+  const eq = token.indexOf("=");
+  return eq > 0 && namesClaude(token.slice(eq + 1));
+}
+
 function packageRunnerNamesClaude(args: string[]): boolean {
   for (const token of args) {
     if (token === "--") return false;
-    if (token.startsWith("-")) {
-      const eq = token.indexOf("=");
-      if (eq > 0 && namesClaude(token.slice(eq + 1))) return true;
-      continue;
-    }
-    if (namesClaude(token)) return true;
+    if (argNamesClaude(token)) return true;
   }
   return false;
+}
+
+/**
+ * Split an `env -S` string into args as GNU coreutils `env` does: whitespace
+ * separates; single and double quotes group and are removed; a backslash
+ * escapes (`\_` separates outside quotes and is a space inside double quotes,
+ * `\c` ends the string); a `#` that starts an arg ends the string. `${NAME}`
+ * stays as written. Input `env` refuses (an unknown escape, an unterminated
+ * quote) is read leniently. Only a string without any of these features
+ * (`ENV_SPLIT_UNREADABLE`) is read as exact.
+ */
+function splitEnvString(value: string): string[] {
+  const args: string[] = [];
+  let current: string | null = null;
+  let quote: "'" | '"' | null = null;
+  const end = () => {
+    if (current !== null) args.push(current);
+    current = null;
+  };
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (quote === "'") {
+      const next = value[index + 1];
+      if (char === "'") quote = null;
+      else if (char === "\\" && (next === "\\" || next === "'")) current = `${current ?? ""}${value[++index]}`;
+      else current = `${current ?? ""}${char}`;
+      continue;
+    }
+    if (char === "\\") {
+      const next = value[++index];
+      if (next === undefined || next === "c") break;
+      if (next === "_" && quote === null) end();
+      else current = `${current ?? ""}${next === "_" ? " " : ENV_SPLIT_ESCAPES[next] ?? next}`;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') quote = null;
+      else current = `${current ?? ""}${char}`;
+      continue;
+    }
+    if (ENV_SPLIT_WHITESPACE.has(char)) end();
+    else if (char === "#" && current === null) break;
+    else if (char === "'" || char === '"') {
+      quote = char;
+      current = current ?? "";
+    } else current = `${current ?? ""}${char}`;
+  }
+  end();
+  return args;
 }
 
 /** A long flag by its exact name or a unique prefix of one, as getopt reads it; null when unknown or ambiguous. */
@@ -134,79 +212,124 @@ function envLongFlag(name: string): EnvFlagSpec | null {
   return matches.length === 1 ? ENV_LONG_FLAGS.get(matches[0]!)! : null;
 }
 
-function applyEnvFlag(spec: EnvFlagSpec, value: string | undefined, rest: string[], steps: EnvWrapperStep[]): void {
-  if (spec.effect === "clear") steps.push({ kind: "clear" });
-  else if (spec.effect === "unset" && value !== undefined) steps.push({ kind: "unset", name: value });
-  else if (spec.effect === "split") rest.unshift(...(value ?? "").split(/\s+/).filter(Boolean));
+/** Reading a chain of `env` wrappers, each from the args the one before hands on. */
+interface EnvWrapperParse {
+  /** The args not read yet; `-S` puts the args of its string in front. */
+  rest: string[];
+  /** Every arg read so far, flag values and split strings included, in order. */
+  read: string[];
+  steps: EnvWrapperStep[];
+  unreadable: boolean;
+}
+
+function nextEnvArg(parse: EnvWrapperParse): string | undefined {
+  const arg = parse.rest.shift();
+  if (arg !== undefined) parse.read.push(arg);
+  return arg;
+}
+
+function applyEnvFlag(spec: EnvFlagSpec, value: string | undefined, parse: EnvWrapperParse): void {
+  if (spec.effect === "clear") parse.steps.push({ kind: "clear" });
+  else if (spec.effect === "unset" && value !== undefined) parse.steps.push({ kind: "unset", name: value });
+  else if (spec.effect === "unreadable") parse.unreadable = true;
+  else if (spec.effect === "split") {
+    const text = value ?? "";
+    if (ENV_SPLIT_UNREADABLE.test(text)) parse.unreadable = true;
+    parse.rest.unshift(...splitEnvString(text));
+  }
 }
 
 /**
  * Read one `env` flag token (`-i`, `-iu NAME`, `-uNAME`, `--unset=NAME`,
- * `--uns NAME`, …), taking its value from `rest` when it is the next arg. A
- * flag not known here may change the env in a way not modelled, so it counts
- * as clearing it: a credential it might remove then does not count.
+ * `--uns NAME`, …), taking its value from the next arg when it needs one. A
+ * flag not known here may change the env, or take a value, in a way not
+ * modelled, so it makes the wrapper unreadable.
  */
-function readEnvFlag(token: string, rest: string[], steps: EnvWrapperStep[]): void {
+function readEnvFlag(token: string, parse: EnvWrapperParse): void {
   if (token === "-") {
-    steps.push({ kind: "clear" });
+    parse.steps.push({ kind: "clear" });
     return;
   }
   if (token.startsWith("--")) {
     const [name, inlineValue] = token.slice(2).split(/=(.*)/s, 2) as [string, string | undefined];
-    const spec = envLongFlag(name) ?? CLEAR_ENV_FLAG;
-    const value = inlineValue ?? (spec.value === "required" ? rest.shift() : undefined);
-    applyEnvFlag(spec, value, rest, steps);
+    const spec = envLongFlag(name) ?? UNKNOWN_ENV_FLAG;
+    const value = inlineValue ?? (spec.value === "required" ? nextEnvArg(parse) : undefined);
+    applyEnvFlag(spec, value, parse);
     return;
   }
   for (let index = 1; index < token.length; index += 1) {
-    const spec = ENV_SHORT_FLAGS.get(token[index]!) ?? CLEAR_ENV_FLAG;
+    const spec = ENV_SHORT_FLAGS.get(token[index]!) ?? UNKNOWN_ENV_FLAG;
     if (spec.value === "none") {
-      applyEnvFlag(spec, undefined, rest, steps);
+      applyEnvFlag(spec, undefined, parse);
       continue;
     }
     const attached = token.slice(index + 1);
-    applyEnvFlag(spec, attached || rest.shift(), rest, steps);
+    applyEnvFlag(spec, attached || nextEnvArg(parse), parse);
     return;
   }
 }
 
-function resolveInvocation(command: string, args: string[], depth: number): ProcessClaudeInvocation | null {
-  const base = commandBaseName(command);
-  if (base === "claude") return { envSteps: [], args };
-  if (PACKAGE_RUNNERS.has(base)) {
-    return packageRunnerNamesClaude(args) ? { envSteps: [], args } : null;
-  }
-  if (base !== "env" || depth >= MAX_WRAPPER_DEPTH) return null;
-  const steps: EnvWrapperStep[] = [];
-  let inner: string | undefined;
-  const rest = [...args];
-  while (rest.length > 0) {
-    const token = rest.shift()!;
+/** Read one `env` wrapper's flags and assignments; returns the command it runs, if any. */
+function readEnvWrapper(parse: EnvWrapperParse): string | undefined {
+  for (let token = nextEnvArg(parse); token !== undefined; token = nextEnvArg(parse)) {
     // `env` still reads assignments after `--`. Flags read after an assignment
     // or `--` (where `env` would run them as the command) err toward gating.
     if (token === "--") continue;
     if (token.startsWith("-")) {
-      readEnvFlag(token, rest, steps);
+      readEnvFlag(token, parse);
       continue;
     }
+    // `env` takes any arg with a `=` as an assignment, `=VALUE` included.
     const eq = token.indexOf("=");
-    if (eq > 0) {
-      steps.push({ kind: "set", name: token.slice(0, eq), value: token.slice(eq + 1) });
+    if (eq >= 0) {
+      parse.steps.push({ kind: "set", name: token.slice(0, eq), value: token.slice(eq + 1) });
       continue;
     }
-    inner = token;
-    break;
+    return token;
   }
-  if (!inner) return null;
-  const invocation = resolveInvocation(inner, rest, depth + 1);
-  if (!invocation) return null;
-  return { envSteps: [...steps, ...invocation.envSteps], args: invocation.args };
+  return undefined;
+}
+
+/**
+ * An unreadable `env` chain whose command, as read here, is not claude counts
+ * as a claude run when any arg after `env` names claude (as a package runner
+ * arg would, flag values and split strings included). Every arg before that
+ * one with a `=` then counts as an assignment, for the endpoint check.
+ */
+function unreadableClaudeInvocation(parse: EnvWrapperParse): ProcessClaudeInvocation | null {
+  if (!parse.unreadable) return null;
+  const args = [...parse.read, ...parse.rest];
+  const index = args.findIndex(argNamesClaude);
+  if (index < 0) return null;
+  const assignments = args
+    .slice(0, index)
+    .filter((arg) => !arg.startsWith("-") && arg.includes("="))
+    .map((arg): EnvWrapperStep => {
+      const eq = arg.indexOf("=");
+      return { kind: "set", name: arg.slice(0, eq), value: arg.slice(eq + 1) };
+    });
+  return { envSteps: [...parse.steps, ...assignments], args: args.slice(index + 1), unreadable: true };
+}
+
+function resolveInvocation(command: string, args: string[]): ProcessClaudeInvocation | null {
+  const parse: EnvWrapperParse = { rest: [...args], read: [], steps: [], unreadable: false };
+  let base = commandBaseName(command);
+  // Each wrapper reads at least its command from `rest`, so this ends.
+  while (base === "env") {
+    const inner = readEnvWrapper(parse);
+    if (inner === undefined) return unreadableClaudeInvocation(parse);
+    base = commandBaseName(inner);
+  }
+  const invocation = { envSteps: parse.steps, args: parse.rest, unreadable: parse.unreadable };
+  if (base === "claude") return invocation;
+  if (PACKAGE_RUNNERS.has(base) && packageRunnerNamesClaude(parse.rest)) return invocation;
+  return unreadableClaudeInvocation(parse);
 }
 
 function resolveProcessClaudeInvocation(config: Record<string, unknown>): ProcessClaudeInvocation | null {
   const command = asString(config.command, "").trim();
   if (!command) return null;
-  return resolveInvocation(command, asStringArray(config.args), 0);
+  return resolveInvocation(command, asStringArray(config.args));
 }
 
 /** True when a `process` agent's command starts the `claude` binary directly (see above). */
@@ -232,22 +355,36 @@ interface ProcessClaudeGate {
   lane: ClaudeSubscriptionGateInput;
   /** The agent env plus every wrapper assignment, whatever the flags drop, for the endpoint check. */
   endpointConfig: Record<string, unknown>;
+  /** The `env` wrappers were not read exactly, so the lane counts them as clearing the env. */
+  unreadable: boolean;
 }
+
+/** Appended to an endpoint refusal when the lane counts an unreadable `env` wrapper as clearing the env. */
+const UNREADABLE_ENV_WRAPPER_NOTE =
+  "Paperclip cannot fully read the env wrapper in this command (an env -S string with quotes, backslashes, " +
+  "${…} or #, or an env flag it does not know), so the run counts as using this server's Claude sign-in.";
 
 /**
  * Apply a process agent's `env` wrappers, in order, to the agent env (which
  * the process adapter hands the child) and the host env (which the child
  * inherits): `clear` drops both, `unset` drops the key from both, `set` adds
- * to the agent env, where it wins over the host env as in the launch env.
+ * to the agent env, where it wins over the host env as in the launch env. An
+ * unreadable wrapper chain leaves the binary an empty env for the lane, and
+ * its assignment names lose any `${NAME}` for the endpoint check.
  */
 function resolveProcessClaudeGate(config: Record<string, unknown>, hostEnv?: NodeJS.ProcessEnv): ProcessClaudeGate | null {
   const invocation = resolveProcessClaudeInvocation(config);
   if (!invocation) return null;
+  const { args, unreadable } = invocation;
   const agentEnv = parseObject(config.env);
   let env: Record<string, unknown> = { ...agentEnv };
   let host: NodeJS.ProcessEnv | undefined;
   const assignments: Record<string, string> = {};
   for (const step of invocation.envSteps) {
+    if (step.kind === "set") {
+      assignments[unreadable ? step.name.replace(ENV_SPLIT_EXPANSION, "") : step.name] = step.value;
+    }
+    if (unreadable) continue;
     if (step.kind === "clear") {
       env = {};
       host = {};
@@ -256,12 +393,14 @@ function resolveProcessClaudeGate(config: Record<string, unknown>, hostEnv?: Nod
       host = withoutEnvKey(host ?? hostEnv ?? process.env, step.name);
     } else {
       env[step.name] = step.value;
-      assignments[step.name] = step.value;
     }
   }
   return {
-    lane: { config: { env, args: invocation.args }, ...(host ? { hostEnv: host } : {}) },
-    endpointConfig: { env: { ...agentEnv, ...assignments }, args: invocation.args },
+    lane: unreadable
+      ? { config: { env: {}, args }, hostEnv: {} }
+      : { config: { env, args }, ...(host ? { hostEnv: host } : {}) },
+    endpointConfig: { env: { ...agentEnv, ...assignments }, args },
+    unreadable,
   };
 }
 
@@ -271,11 +410,13 @@ function resolveProcessClaudeGate(config: Record<string, unknown>, hostEnv?: Nod
  * A `process` agent whose command starts `claude` becomes a claude_local CLI
  * config with its claude args and the env the binary gets: the agent env after
  * its `env` wrappers, as `env` applies them (`-i`, `-u NAME`, then
- * `NAME=VALUE`; an unknown flag counts as `-i`), plus `hostEnv` (the host env
- * the child inherits, default `process.env`) with the same keys dropped when a
- * wrapper clears or unsets any. Its own `engine` or `managedAiConnection` keys
- * mean nothing to the process adapter, so they are dropped and cannot move the
- * run off the lane.
+ * `NAME=VALUE`), plus `hostEnv` (the host env the child inherits, default
+ * `process.env`) with the same keys dropped when a wrapper clears or unsets
+ * any. A wrapper chain this model cannot read exactly (an `env -S` string with
+ * quotes, escapes, `${NAME}` or `#`, or an unknown flag) gets an empty env and
+ * host env, so it counts as the subscription lane. Its own `engine` or
+ * `managedAiConnection` keys mean nothing to the process adapter, so they are
+ * dropped and cannot move the run off the lane.
  */
 export function claudeSubscriptionGateInput(
   adapterType: string | null | undefined,
@@ -294,7 +435,8 @@ export function claudeSubscriptionGateInput(
  * from api.anthropic.com (`resolveClaudeSubscriptionEndpointViolation`), or
  * null when it may spawn. The endpoint check reads the agent env plus every
  * `env` wrapper assignment, so a key that a wrapper flag clears or unsets
- * still refuses. The run fails with `adapter_engine_unavailable`, as a
+ * still refuses, and so does one in an unreadable `env -S` string (read
+ * without its quotes). The run fails with `adapter_engine_unavailable`, as a
  * claude_local run does.
  */
 export function resolveProcessClaudeSubscriptionRefusal(
@@ -310,5 +452,8 @@ export function resolveProcessClaudeSubscriptionRefusal(
   });
   if (!onLane) return null;
   const violation = resolveClaudeSubscriptionEndpointViolation(gate.endpointConfig);
-  return violation ? buildClaudeSubscriptionHarnessRefusal(violation) : null;
+  if (!violation) return null;
+  return buildClaudeSubscriptionHarnessRefusal(
+    gate.unreadable ? `${violation} ${UNREADABLE_ENV_WRAPPER_NOTE}` : violation,
+  );
 }

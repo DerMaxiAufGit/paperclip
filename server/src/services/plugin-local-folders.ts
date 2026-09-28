@@ -2,6 +2,12 @@ import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import {
+  createClaudeSignInPathMatcher,
+  isClaudeSignInPathSegments,
+  overlapsClaudeConfigDir,
+  type ClaudeSignInPathMatcher,
+} from "@paperclipai/adapter-utils/claude-config-credential-excludes";
 import type {
   PluginLocalFolderDeclaration,
   PluginLocalFolderEntry,
@@ -25,6 +31,43 @@ export interface PluginLocalFolderSettingsJson {
 }
 
 const LOCAL_FOLDER_KEY_PATTERN = /^[a-z0-9][a-z0-9._:-]*$/;
+
+// Fork policy (doc/plans/2026-09-24-claude-cli-only-auth.md): Paperclip never
+// hands a Claude sign-in to anyone, plugins included. A Claude config dir, or a
+// folder that holds one, is never a plugin local folder, and a local folder
+// never reads, lists, writes or deletes a Claude sign-in file.
+const CLAUDE_CONFIG_FOLDER_MESSAGE =
+  "A Claude config folder, or a folder that holds one, cannot be a plugin local folder: Paperclip never hands out the Claude sign-in.";
+
+/** Refuses a folder that is, lies inside, or holds a Claude config dir. */
+export function assertPluginLocalFolderOutsideClaudeConfig(folderPath: string | null | undefined) {
+  if (typeof folderPath !== "string" || !folderPath.trim()) return;
+  if (overlapsClaudeConfigDir(path.resolve(folderPath))) {
+    throw forbidden(CLAUDE_CONFIG_FOLDER_MESSAGE);
+  }
+}
+
+function isClaudeSignInLocalFolderPath(
+  rootRealPath: string,
+  candidates: readonly string[],
+  isSignInPath: ClaudeSignInPathMatcher = createClaudeSignInPathMatcher(),
+) {
+  return candidates.some(
+    (candidate) =>
+      isSignInPath(candidate) ||
+      isClaudeSignInPathSegments(path.relative(rootRealPath, candidate).split(path.sep)),
+  );
+}
+
+function assertNotClaudeSignInLocalFolderPath(
+  rootRealPath: string,
+  candidates: readonly string[],
+  isSignInPath?: ClaudeSignInPathMatcher,
+) {
+  if (isClaudeSignInLocalFolderPath(rootRealPath, candidates, isSignInPath)) {
+    throw forbidden("Local folder path is a Claude sign-in file, which Paperclip never hands out");
+  }
+}
 
 function problem(
   code: PluginLocalFolderProblem["code"],
@@ -192,6 +235,8 @@ export async function inspectPluginLocalFolder(input: {
     if (!stat.isDirectory()) {
       problems.push(problem("not_directory", "Configured local folder path is not a directory.", configuredPath));
       markRequiredPathsMissing();
+    } else if (overlapsClaudeConfigDir(configuredPath)) {
+      problems.push(problem("not_readable", CLAUDE_CONFIG_FOLDER_MESSAGE, configuredPath));
     } else {
       realPath = await fs.realpath(configuredPath);
       try {
@@ -323,6 +368,7 @@ export async function preparePluginLocalFolder(input: {
   if (!config?.path || access !== "readWrite" || !path.isAbsolute(config.path)) return;
 
   const configuredPath = path.resolve(config.path);
+  if (overlapsClaudeConfigDir(configuredPath)) return;
   try {
     const stat = await fs.stat(configuredPath);
     if (!stat.isDirectory()) return;
@@ -407,6 +453,7 @@ export async function resolvePluginLocalFolderPath(
 
 export async function readPluginLocalFolderText(rootPath: string, relativePath: string) {
   const resolved = await resolvePluginLocalFolderPath(rootPath, relativePath, { mustExist: true });
+  assertNotClaudeSignInLocalFolderPath(await fs.realpath(rootPath), [resolved.absolutePath, resolved.realPath]);
   const stat = await fs.stat(resolved.realPath);
   if (!stat.isFile()) {
     throw badRequest("Local folder read target must be a file");
@@ -431,6 +478,7 @@ export async function listPluginLocalFolderEntries(
   const maxEntries = normalizeMaxEntries(options.maxEntries);
   const entries: PluginLocalFolderEntry[] = [];
   let truncated = false;
+  const isSignInPath = createClaudeSignInPathMatcher();
 
   const visit = async (directoryRealPath: string, directoryRelativePath: string | null) => {
     if (truncated) return;
@@ -448,6 +496,11 @@ export async function listPluginLocalFolderEntries(
       try {
         resolvedChild = await resolvePluginLocalFolderPath(rootRealPath, childRelativePath, { mustExist: true });
       } catch {
+        continue;
+      }
+      if (
+        isClaudeSignInLocalFolderPath(rootRealPath, [resolvedChild.absolutePath, resolvedChild.realPath], isSignInPath)
+      ) {
         continue;
       }
 
@@ -487,12 +540,19 @@ export async function writePluginLocalFolderTextAtomic(
 ) {
   const rootRealPath = await fs.realpath(rootPath);
   const normalized = normalizeRelativePath(relativePath);
+  const isSignInPath = createClaudeSignInPathMatcher();
+  assertNotClaudeSignInLocalFolderPath(rootRealPath, [path.resolve(rootRealPath, normalized)], isSignInPath);
   const parentRelativePath = path.dirname(normalized);
   if (parentRelativePath !== ".") {
     await ensureDirectoryInsideRoot(rootRealPath, parentRelativePath);
   }
   const resolved = await resolvePluginLocalFolderPath(rootRealPath, normalized);
-  await assertPathInsideRoot(rootRealPath, path.dirname(resolved.absolutePath));
+  const parentRealPath = await assertPathInsideRoot(rootRealPath, path.dirname(resolved.absolutePath));
+  assertNotClaudeSignInLocalFolderPath(
+    rootRealPath,
+    [resolved.realPath, path.join(parentRealPath, path.basename(resolved.absolutePath))],
+    isSignInPath,
+  );
   const tempPath = path.join(
     path.dirname(resolved.absolutePath),
     `.paperclip-${path.basename(resolved.absolutePath)}-${process.pid}-${randomUUID()}.tmp`,
@@ -567,6 +627,7 @@ export async function deletePluginLocalFolderFile(
   }
 
   if (resolved.exists) {
+    assertNotClaudeSignInLocalFolderPath(rootRealPath, [resolved.absolutePath, resolved.realPath]);
     const stat = await fs.lstat(resolved.absolutePath);
     if (stat.isDirectory()) {
       throw badRequest("Local folder delete target must be a file");

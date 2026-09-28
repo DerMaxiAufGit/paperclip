@@ -4,6 +4,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import {
   assertConfiguredLocalFolder,
+  assertPluginLocalFolderOutsideClaudeConfig,
   assertWritableConfiguredLocalFolder,
   inspectPluginLocalFolder,
   listPluginLocalFolderEntries,
@@ -277,6 +278,121 @@ describe("plugin local folders", () => {
       expect(await fs.readdir(outside)).toEqual([]);
     } finally {
       openSpy.mockRestore();
+    }
+  });
+
+  it("never reads, lists, writes or deletes a Claude sign-in file inside a local folder", async () => {
+    const root = await makeRoot();
+    await fs.mkdir(path.join(root, ".claude", "backups"), { recursive: true });
+    await fs.mkdir(path.join(root, "home"), { recursive: true });
+    const signInFiles = [
+      ".claude/.credentials.json",
+      ".claude/credentials.json",
+      ".claude/backups/credentials.json",
+      "home/.claude.json",
+    ];
+    for (const filePath of signInFiles) {
+      await fs.writeFile(path.join(root, filePath), '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x"}}', "utf8");
+    }
+    await fs.writeFile(path.join(root, ".claude", "settings.json"), "{}", "utf8");
+    await fs.writeFile(path.join(root, "notes.md"), "# Notes\n", "utf8");
+    await fs.symlink(path.join(root, ".claude", ".credentials.json"), path.join(root, "linked.json"));
+
+    for (const filePath of [...signInFiles, "linked.json"]) {
+      await expect(readPluginLocalFolderText(root, filePath), filePath).rejects.toMatchObject({ status: 403 });
+    }
+    await expect(readPluginLocalFolderText(root, ".claude/settings.json")).resolves.toBe("{}");
+    await expect(readPluginLocalFolderText(root, "notes.md")).resolves.toBe("# Notes\n");
+
+    const listing = await listPluginLocalFolderEntries(root, { recursive: true, maxEntries: 100 });
+    const listedPaths = listing.entries.map((entry) => entry.path);
+    expect(listedPaths).toEqual(expect.arrayContaining([".claude/settings.json", "notes.md"]));
+    for (const filePath of [...signInFiles, "linked.json"]) expect(listedPaths).not.toContain(filePath);
+
+    await expect(writePluginLocalFolderTextAtomic(root, ".claude/.credentials.json", "planted")).rejects.toMatchObject({
+      status: 403,
+    });
+    await expect(fs.readFile(path.join(root, ".claude", ".credentials.json"), "utf8")).resolves.toContain("sk-ant-oat01-x");
+
+    for (const filePath of signInFiles) {
+      await expect(deletePluginLocalFolderFile(root, filePath, "content-root"), filePath).rejects.toMatchObject({
+        status: 403,
+      });
+      await expect(fs.stat(path.join(root, filePath)), filePath).resolves.toBeTruthy();
+    }
+    await deletePluginLocalFolderFile(root, "notes.md", "content-root");
+    await expect(fs.stat(path.join(root, "notes.md"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("never reads or lists the sign-in files of the server's CLAUDE_CONFIG_DIR inside a local folder", async () => {
+    const root = await makeRoot();
+    const configDir = path.join(root, "claude-config");
+    await fs.mkdir(configDir);
+    await fs.writeFile(path.join(configDir, ".credentials.json"), "{}", "utf8");
+    await fs.writeFile(path.join(configDir, "settings.json"), "{}", "utf8");
+    await fs.writeFile(path.join(root, "page.md"), "# Page\n", "utf8");
+    await fs.symlink(path.join(configDir, ".credentials.json"), path.join(root, "notes.json"));
+
+    vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
+    try {
+      for (const filePath of ["claude-config/.credentials.json", "notes.json"]) {
+        await expect(readPluginLocalFolderText(root, filePath), filePath).rejects.toMatchObject({ status: 403 });
+      }
+      await expect(readPluginLocalFolderText(root, "page.md")).resolves.toBe("# Page\n");
+      const listing = await listPluginLocalFolderEntries(root, { recursive: true, maxEntries: 100 });
+      const listedPaths = listing.entries.map((entry) => entry.path);
+      expect(listedPaths).toEqual(expect.arrayContaining(["page.md", "claude-config/settings.json"]));
+      expect(listedPaths).not.toContain("claude-config/.credentials.json");
+      expect(listedPaths).not.toContain("notes.json");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("refuses a Claude config dir, a folder inside one, or a folder that holds one", async () => {
+    const root = await makeRoot();
+    const configDir = path.join(root, "claude-config");
+    await fs.mkdir(path.join(configDir, "wiki"), { recursive: true });
+    const namedConfigDir = path.join(root, "other", ".claude");
+    await fs.mkdir(namedConfigDir, { recursive: true });
+    const plainFolder = path.join(root, "plain");
+    await fs.mkdir(plainFolder);
+
+    vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
+    try {
+      for (const folder of [configDir, path.join(configDir, "wiki"), root, namedConfigDir]) {
+        expect(() => assertPluginLocalFolderOutsideClaudeConfig(folder), folder).toThrow(
+          expect.objectContaining({ status: 403 }),
+        );
+        await preparePluginLocalFolder({
+          folderKey: "content-root",
+          storedConfig: { path: folder, access: "readWrite", requiredDirectories: ["raw"] },
+        });
+        const status = await inspectPluginLocalFolder({
+          folderKey: "content-root",
+          storedConfig: { path: folder, access: "readWrite", requiredDirectories: ["raw"] },
+        });
+        expect(status.healthy, folder).toBe(false);
+        expect(status.readable, folder).toBe(false);
+        expect(status.writable, folder).toBe(false);
+        expect(status.problems.some((item) => item.code === "not_readable" && item.message.includes("Claude")), folder)
+          .toBe(true);
+        expect(() => assertConfiguredLocalFolder(status)).toThrow();
+        expect(() => assertWritableConfiguredLocalFolder(status)).toThrow();
+        // Neither the probe file nor the required directory was written there.
+        const names = await fs.readdir(folder);
+        expect(names.filter((name) => name === "raw" || name.startsWith(".paperclip-local-folder-probe")), folder)
+          .toEqual([]);
+      }
+
+      expect(() => assertPluginLocalFolderOutsideClaudeConfig(plainFolder)).not.toThrow();
+      const plain = await inspectPluginLocalFolder({
+        folderKey: "content-root",
+        storedConfig: { path: plainFolder, access: "readWrite" },
+      });
+      expect(plain.healthy).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 });

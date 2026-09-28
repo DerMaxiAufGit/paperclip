@@ -204,13 +204,33 @@ concurrency cap.
   environment Test route (check `claude_subscription_not_allowed`, no probe),
   and in the auth-signal route (status `absent`, reason
   `subscription_not_allowed`, which the sign-in panel shows as the owner-only
-  message without sign-in steps). Board chat runs only on `local_trusted` and
+  message without sign-in steps). When the Test route does run a
+  subscription-lane probe for a caller that is not the board (an agent key
+  with `agents:create`), the server fixes the probe
+  (`claudeSubscriptionProbeConfigForActor` in
+  `server/src/services/claude-subscription-probe.ts`): the caller's
+  `extraArgs`/`args` are replaced by `--setting-sources user
+  --strict-mcp-config --no-session-persistence`, permissions are not skipped,
+  `--chrome` is off, it runs one turn, and the adapter's default hello timeout
+  applies. So project settings and `.mcp.json` in the caller-chosen `cwd` are
+  not loaded. The board keeps the full probe, and an agent's API-key probe is
+  unchanged. Board chat runs only on `local_trusted` and
   only for the board; an agent key gets 403 before the `claude` CLI is
-  spawned. Board chat runs `claude` in a fresh 0700 folder per request under
-  `<instanceRoot>/board-chat/`, deleted afterwards, with `--setting-sources
-  user --strict-mcp-config --no-session-persistence`, so anything planted in
-  a shared folder such as /tmp (`.claude/settings.json`, `.mcp.json`,
-  `CLAUDE.md`) no longer reaches it. With no API credential, it refuses with
+  spawned. Board chat runs `claude` in one stable 0700 folder per company,
+  `<instanceRoot>/board-chat/<companyId>`, with `--setting-sources user
+  --strict-mcp-config --no-session-persistence`, so anything planted in a
+  shared folder such as /tmp (`.claude/settings.json`, `.mcp.json`,
+  `CLAUDE.md`) no longer reaches it. On every use the folder (and its
+  `board-chat/` parent) is checked to be a real directory, not a symlink,
+  owned by the Paperclip process user, is set back to 0700, and is emptied
+  before the run; it is not deleted afterwards. The reason: claude 2.1.x
+  creates `<CLAUDE_CONFIG_DIR>/projects/<slug-of-cwd>/` (memory/, sessions/,
+  backups/) even with `--no-session-persistence`, so a new folder per request
+  left one project dir per message in the operator's Claude config dir. Only
+  one board chat per company runs at a time: a second request gets 429
+  `BOARD_CHAT_BUSY`, or an SSE error when it passed the first check while the
+  other was starting. A `companyId` that is not a safe path segment gets 400.
+  With no API credential, it refuses with
   403 `CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED` when the server env fails
   `resolveClaudeSubscriptionEndpointViolation`; the Conference Room shows the
   `error` text of any 4xx. The heartbeat treats a run as remote, and so
@@ -232,13 +252,21 @@ concurrency cap.
   `.exe`/`.cmd`/`.bat`/`.ps1`); `npx`, `pnpx`, `bunx`, `npm`, `pnpm`, `yarn`,
   `bun` or `node` with an argument before `--` (or a `--flag=value` value)
   naming `claude`, `@anthropic-ai/claude-code`, or a file in that package; and
-  `env [flags] [NAME=VALUE]...` in front of either. The gates apply the `env`
-  wrappers in order, as `env` does, to the agent env and the server env:
-  `-i`/`-`/`--ignore-environment` drop both, `-u NAME` (also `--unset[=]NAME`,
-  abbreviations, `-iu NAME`) drops NAME from both, then the `NAME=VALUE`
-  assignments apply; an unknown `env` flag counts as `-i`. The endpoint check
-  before spawn reads the agent env plus every assignment, so a redirect key
-  that a wrapper flag clears or unsets still refuses. `env -- NAME=VALUE
+  `env [flags] [NAME=VALUE]...` in front of either, with nested `env` wrappers
+  read at any depth. The gates apply the `env` wrappers in order, as `env`
+  does, to the agent env and the server env: `-i`/`-`/`--ignore-environment`
+  drop both, `-u NAME` (also `--unset[=]NAME`, abbreviations, `-iu NAME`)
+  drops NAME from both, then the `NAME=VALUE` assignments apply.
+  `-a`/`--argv0 ARG` and `-0`/`--null` are known flags that leave the env
+  alone, and an arg `=VALUE` is an assignment. An `env` chain Paperclip cannot
+  read exactly (an unknown or ambiguous flag, or an `env -S` string with
+  quotes, backslashes, `${VAR}` or `#`) counts as clearing the env and the
+  host env, so it lands on the subscription lane, and no wrapper assignment
+  counts as an API key. Such a chain counts as a claude run when any later arg
+  names `claude` or `@anthropic-ai/claude-code`. The endpoint check before
+  spawn reads the agent env plus every assignment, so a redirect key that a
+  wrapper flag clears or unsets still refuses; it reads `-S` assignments
+  without their quotes, with `${NAME}` removed from names. `env -- NAME=VALUE
   claude` counts too. The process config's `engine` and `managedAiConnection`
   keys are ignored.
 - **Trigger-source gate.** Even for the owner,
@@ -566,7 +594,29 @@ concurrency cap.
   sign-in files as `denied_secret`: `.credentials.json` and `credentials.json`
   inside any `.claude` folder, and `.claude.json` at any depth
   (`workspace-file-resources.ts`). The names are shared with the staging
-  excludes.
+  excludes. It also denies sign-in files by where they really live, so a
+  workspace root that is itself a Claude config dir (`~/.claude`) or holds the
+  server's `CLAUDE_CONFIG_DIR` under any name is covered: a credential file
+  directly in any `.claude` dir or anywhere inside the resolved or real
+  `CLAUDE_CONFIG_DIR` or `~/.claude`, any `.claude.json`, and the real target
+  of a sign-in file that is a link to a file with another name. This covers
+  content, resolve, download (and so native-runner file reads), availability,
+  and list/search/recent/changed. Helpers: `createClaudeSignInPathMatcher`,
+  `isClaudeSignInPath` and `isClaudeSignInPathSegments` in
+  `claude-config-credential-excludes.ts`.
+- **Plugin local folders.** A Claude config dir (the server's
+  `CLAUDE_CONFIG_DIR` or `~/.claude`, a folder inside one, a folder that holds
+  one such as the home dir, or any folder named `.claude`) is never a plugin
+  local folder. `localFolders.configure` and the board's
+  `PUT /plugins/:pluginId/companies/:companyId/local-folders/:folderKey`
+  refuse it with 403 before creating or storing anything. A folder like that
+  stored earlier reports a `not_readable` problem, so its status is unhealthy
+  and list/readText/writeTextAtomic/deleteFile refuse it. In any local
+  folder, readText refuses a Claude sign-in file, list leaves it out, and
+  writeTextAtomic and deleteFile refuse one (`overlapsClaudeConfigDir` in
+  `claude-config-credential-excludes.ts`,
+  `assertPluginLocalFolderOutsideClaudeConfig` in
+  `plugin-local-folders.ts`).
 - **Follow-up migration.** `0286_remove_claude_subscription_tokens_from_env.sql`
   removes, from issue assignee overrides and `hire_agent` approval payloads
   (both missed by 0285) and again from agent, environment, project, routine and
@@ -604,7 +654,13 @@ concurrency cap.
   args that blanks `ANTHROPIC_API_KEY` and sets `ANTHROPIC_BASE_URL` can still
   move an API-key agent onto the owner's sign-in without the gates. Closing
   that means refusing `--settings` files or reading them at launch, the same
-  product decision as for the endpoint check below.
+  product decision as for the endpoint check below. The same limit applies to
+  an agent's environment Test probe that the classifier counts as API-key
+  (agent or server env plus inline `--settings`): it keeps the caller's args,
+  `cwd` and project settings, so a `--settings <file>` in the extra args, or a
+  project `.claude/settings.json` in the chosen `cwd`, that blanks the key and
+  sets `ANTHROPIC_BASE_URL` can still move that probe onto the sign-in without
+  the fixed probe flags.
 - Third-party harnesses count only an Anthropic key in the agent or server env.
   A key kept in the harness's own store (`~/.hermes/.env` or `config.yaml`,
   OpenCode `auth.json`/`opencode.json`, Pi `auth.json`) no longer counts, which
@@ -676,11 +732,18 @@ concurrency cap.
   (`sh -c "claude …"`), a script, a copy or symlink of the binary under
   another name, or any program that starts `claude` itself gets neither the
   gates nor the endpoint check. The check also errs toward gating: `npm run
-  claude` or `node tool.js claude` counts as a Claude run. An `env -S` string
-  is split on whitespace only (GNU quoting, escapes and `${VAR}` expansion are
-  not modelled), and a flag read after an assignment or after `--` (where real
-  `env` would try to run it as the command) is still treated as a flag, which
-  also leans toward gating.
+  claude` or `node tool.js claude` counts as a Claude run. `env -S` strings
+  are split like GNU `env` (space, tab, newline, VT, FF, CR; quotes; escapes;
+  `#` comments), but `${VAR}` is not expanded, so a `${VAR}` that expands to a
+  whole assignment, an `env` flag or the command name is not seen, which is
+  the same class of gap as `sh -c`. Any quoted, escaped, expanded or commented
+  `-S` string, or an unknown `env` flag, over-gates: an API key assigned inside
+  it or after it does not count, so such an agent is treated as
+  subscription-lane, and a custom endpoint is refused. Input that GNU `env`
+  refuses to run (an unknown escape, an unterminated quote) is read leniently.
+  A flag read after an assignment or after `--` (where real `env` would try to
+  run it as the command) is still treated as a flag, which also leans toward
+  gating.
 - Encrypted secrets under other keys can still hold a subscription token
   stored before this branch; the runtime drops the value at launch, but it stays
   stored until the owner deletes it.
@@ -714,10 +777,31 @@ concurrency cap.
   MCP servers (`--strict-mcp-config`), and it still loads the service user's
   `~/.claude/settings.json` (`--setting-sources user`), whose `env` block the
   endpoint check does not read.
-- The workspace file browser denies a server `CLAUDE_CONFIG_DIR` inside a
-  workspace root only partly when that folder is not named `.claude`: its
-  `.claude.json` is denied, but its `.credentials.json` and
-  `credentials.json` are not.
+- Machines that ran the round-4 board chat (one fresh folder per request)
+  already have one `~/.claude/projects/<…-board-chat-chat-XXXXXX>` dir per
+  board chat message. Paperclip does not touch the operator's Claude config
+  dir, so the operator can delete those by hand. Round-4
+  `<instanceRoot>/board-chat/chat-*` folders left behind by a crash are not
+  removed automatically either. The per-company lock and the global limit of
+  three board chats are per router instance, and the global counter is checked
+  before the database calls and raised later, so a burst can briefly run more
+  than three.
+- An agent key with `agents:create` can still make the server spend one fixed
+  "Respond with hello." turn on the owner's subscription through the
+  environment Test route. The trigger-source gate does not apply there,
+  because the route sees the calling agent, not the wake that started its run.
+  The probe returns only fixed pass/fail checks, never model output. A
+  `CLAUDE.md` in the caller-chosen `cwd` is still loaded.
+- The workspace file browser and plugin local folders deny only what
+  Paperclip itself serves over its API and to plugins. A local agent running
+  as the same OS user can still read the sign-in files directly (see the
+  service-user item above). Outside the server's `CLAUDE_CONFIG_DIR` and
+  `~/.claude`, the location rule denies a credential file only when it sits
+  directly in a `.claude` dir, so a workspace under an unrelated `.claude`
+  ancestor (such as Claude Code's `<repo>/.claude/worktrees/*`) keeps its
+  deeper `credentials.json` files; inside the root, a credential file at any
+  depth under a `.claude` segment is still denied. Claude Code's
+  `.claude.json` backups (`.claude.json.backup.*`) are not denied.
 - Left out of the endpoint check on purpose:
   - Proxies (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`,
     `CLAUDE_CODE_PROXY_*`, `CLAUDE_CODE_HTTP(S)_PROXY`): while certificate

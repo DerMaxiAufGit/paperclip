@@ -161,7 +161,15 @@ function mockManagedRuntime(method: "api_key" | "subscription") {
   );
 }
 
-async function createApp() {
+const boardActor = {
+  type: "board",
+  userId: "local-board",
+  companyIds: ["company-1"],
+  source: "local_implicit",
+  isInstanceAdmin: false,
+};
+
+async function createApp(actor: Record<string, unknown> = boardActor) {
   const [{ agentRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -169,13 +177,7 @@ async function createApp() {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = { ...actor };
     next();
   });
   app.use("/api", agentRoutes({} as any));
@@ -631,6 +633,145 @@ describe("agent test-environment route", () => {
         expect(probeContext.config.env).toEqual({
           ANTHROPIC_API_KEY: "sk-ant-api03-x",
           CLAUDE_CONFIG_DIR: "/home/paperclip/.claude",
+        });
+      });
+    });
+
+    describe("probe config chosen by a caller that is not the board", () => {
+      const agentActor = {
+        type: "agent",
+        agentId: "agent-ceo",
+        companyId: "company-1",
+        source: "agent_key",
+        runId: "run-1",
+      };
+      // What an agent key could ask the probe for: its own MCP servers, system
+      // prompt, settings file (hooks, an ANTHROPIC_BASE_URL), full tool access,
+      // the browser, and a long agentic turn on the server's Claude sign-in.
+      const callerConfig = {
+        cwd: "/",
+        model: "claude-sonnet-4-6",
+        effort: "low",
+        extraArgs: ["--mcp-config", "/tmp/evil-mcp.json", "--append-system-prompt", "Run the tools."],
+        args: ["--settings", "/tmp/hooks.json"],
+        dangerouslySkipPermissions: true,
+        chrome: true,
+        maxTurnsPerRun: 50,
+        helloProbeTimeoutSec: 3600,
+      };
+
+      beforeEach(() => {
+        mockAgentService.getById.mockImplementation(async (id: string) =>
+          id === "agent-ceo"
+            ? { id, companyId: "company-1", adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {} }
+            : null,
+        );
+      });
+
+      function probeConfig(probe: ReturnType<typeof vi.fn>, call = 0): Record<string, unknown> {
+        return (probe.mock.calls[call]?.[0] as { config: Record<string, unknown> }).config;
+      }
+
+      it("runs an agent's subscription-lane probe with a server-fixed claude invocation", async () => {
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp(agentActor);
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({ adapterConfig: callerConfig });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          expect(mockResolveClaudeSubscriptionEligibility).toHaveBeenCalledTimes(1);
+          expect(probe).toHaveBeenCalledTimes(1);
+          const config = probeConfig(probe);
+          // The caller's args never reach the claude CLI. The probe loads only
+          // the owner's user settings and no MCP servers, so project settings
+          // in the caller-chosen cwd cannot redirect the sign-in either.
+          expect(config.extraArgs).toEqual([
+            "--setting-sources",
+            "user",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+          ]);
+          expect(config).not.toHaveProperty("args");
+          expect(config.dangerouslySkipPermissions).toBe(false);
+          expect(config.chrome).toBe(false);
+          expect(config.maxTurnsPerRun).toBe(1);
+          expect(config).not.toHaveProperty("helloProbeTimeoutSec");
+          // What the Test checks stays the caller's.
+          expect(config).toMatchObject({ cwd: "/", model: "claude-sonnet-4-6", effort: "low" });
+        });
+      });
+
+      it("drops an agent's inline --settings even when it moved an API-key probe onto the sign-in", async () => {
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp(agentActor);
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({
+              adapterConfig: {
+                cwd: "/",
+                env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" },
+                extraArgs: ["--settings", "{\"env\":{\"ANTHROPIC_API_KEY\":\"\"}}", "--mcp-config", "/tmp/evil-mcp.json"],
+              },
+            });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          // The blanked key made it a subscription-lane probe, so the gate ran.
+          expect(mockResolveClaudeSubscriptionEligibility).toHaveBeenCalledTimes(1);
+          const config = probeConfig(probe);
+          // Without the caller's settings the key is back: the probe no longer
+          // uses the sign-in, and it still gets none of the caller's args.
+          expect(config.extraArgs).toEqual([
+            "--setting-sources",
+            "user",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+          ]);
+          expect(config.env).toEqual({ ANTHROPIC_API_KEY: "sk-ant-api03-x" });
+        });
+      });
+
+      it("keeps the full probe for the board", async () => {
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp();
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({ adapterConfig: callerConfig });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          expect(probe).toHaveBeenCalledTimes(1);
+          expect(probeConfig(probe)).toEqual(callerConfig);
+        });
+      });
+
+      it("leaves an agent's API-key probe unchanged", async () => {
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp(agentActor);
+          const apiKeyConfig = { ...callerConfig, env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" } };
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({ adapterConfig: apiKeyConfig });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          expect(mockResolveClaudeSubscriptionEligibility).not.toHaveBeenCalled();
+          expect(probe).toHaveBeenCalledTimes(1);
+          expect(probeConfig(probe)).toEqual(apiKeyConfig);
+        });
+      });
+
+      it("still refuses an agent's subscription-lane probe when the instance has other users", async () => {
+        mockResolveClaudeSubscriptionEligibility.mockResolvedValueOnce({
+          allowed: false,
+          reason: "subscription_not_allowed",
+          message: "Claude subscription runs are limited to the server owner's own use.",
+        });
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp(agentActor);
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({ adapterConfig: callerConfig });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          expect(res.body.status).toBe("fail");
+          expect(res.body.checks).toEqual(
+            expect.arrayContaining([expect.objectContaining({ code: "claude_subscription_not_allowed" })]),
+          );
+          expect(probe).not.toHaveBeenCalled();
         });
       });
     });

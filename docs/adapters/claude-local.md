@@ -57,8 +57,17 @@ Paperclip never reads, stores, forwards, or injects a Claude sign-in:
   `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`) of the
   server's `settings.json`.
 - The workspace file browser on a task refuses to show Claude sign-in files:
-  `.credentials.json` and `credentials.json` inside any `.claude` folder, and
-  `.claude.json` in any folder (`denied_secret`).
+  `.credentials.json` and `credentials.json` inside any `.claude` folder or
+  anywhere inside the server's `CLAUDE_CONFIG_DIR` or `~/.claude`, and
+  `.claude.json` in any folder (`denied_secret`). This also holds when the
+  workspace folder is itself a Claude config folder or contains the server's
+  `CLAUDE_CONFIG_DIR` under another name, and for a link that points to one of
+  these files. The files do not appear in lists or search either.
+- A plugin local folder can never be a Claude config folder: the server's
+  `CLAUDE_CONFIG_DIR` or `~/.claude`, a folder inside one, a folder that
+  contains one (such as your home folder), or any folder named `.claude`.
+  Saving such a folder is refused (403). In any other local folder, plugins
+  cannot read, list, write or delete a Claude sign-in file.
 - Paperclip does not show Claude plan usage. See
   [Claude usage on the Costs page](#claude-usage-on-the-costs-page).
 - Two database migrations delete the Claude subscription credentials that
@@ -109,7 +118,10 @@ there." The run fails with `configuration_incomplete` (reason
 `subscription_not_allowed`) and links to the agent's runtime settings. The
 Environment Test reports the same message as `claude_subscription_not_allowed`
 and does not run the `claude` probe. The sign-in status panel shows the same
-message and no sign-in steps.
+message and no sign-in steps. Where the lane is allowed and an agent API key
+(not the board) runs the Environment Test on it, the server fixes how the probe
+runs: it ignores the extra args, loads only the service user's own settings and
+no MCP servers, does not skip permissions, and runs one turn.
 
 Paperclip decides whether a run is on the subscription lane only from the
 agent env and the server env. It does not read the `claude` CLI's own
@@ -206,8 +218,10 @@ key.
 
 Board chat (the Conference Room) spawns the `claude` CLI directly. It is
 available only in `local_trusted` mode and only to the board; an agent API key
-gets 403 before the CLI is spawned. Each request runs in a fresh private
-folder under the instance root, deleted afterwards. The CLI loads only the
+gets 403 before the CLI is spawned. Each company's board chat runs in one
+private folder under the instance root (`board-chat/<companyId>`), which is
+emptied before every request. One board chat per company runs at a time; a
+second request gets 429 `BOARD_CHAT_BUSY`. The CLI loads only the
 service user's own settings: no project settings, no `CLAUDE.md` from the
 folder, and no MCP servers (also not the ones in your user settings), and it
 keeps no session. Its env is the Paperclip server's own env, so without an API

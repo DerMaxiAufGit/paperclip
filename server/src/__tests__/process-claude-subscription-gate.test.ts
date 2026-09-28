@@ -57,6 +57,13 @@ describe("isProcessClaudeCommand", () => {
     expect(isProcessClaudeCommand({ command: "env", args: ["--uns", "FOO", "claude"] })).toBe(true);
     expect(isProcessClaudeCommand({ command: "env", args: ["-iuFOO", "claude"] })).toBe(true);
     expect(isProcessClaudeCommand({ command: "env", args: ["-P", "/opt/bin", "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["-a", "x", "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["--argv0", "x", "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["=x", "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: [...Array(6).fill("env"), "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["--frobnicate", "value", "claude", "-p"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["-X", "v", "npx", "@anthropic-ai/claude-code"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["-S", "FOO='a b' claude -p"] })).toBe(true);
     expect(isProcessClaudeCommand({ command: "yarn", args: ["claude", "-p"] })).toBe(true);
     expect(
       isProcessClaudeCommand({ command: "node", args: ["/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js", "-p"] }),
@@ -71,6 +78,8 @@ describe("isProcessClaudeCommand", () => {
     expect(isProcessClaudeCommand({ command: "pnpm", args: ["test"] })).toBe(false);
     expect(isProcessClaudeCommand({ command: "node", args: ["server.js"] })).toBe(false);
     expect(isProcessClaudeCommand({ command: "env", args: ["FOO=bar", "node", "claude.js"] })).toBe(false);
+    expect(isProcessClaudeCommand({ command: "env", args: ["--frobnicate", "v", "node", "server.js"] })).toBe(false);
+    expect(isProcessClaudeCommand({ command: "env", args: ["-S", "FOO='a b' node server.js"] })).toBe(false);
     expect(isProcessClaudeCommand({ command: "" })).toBe(false);
     expect(isProcessClaudeCommand({})).toBe(false);
   });
@@ -182,7 +191,25 @@ describe("env wrapper in front of a process claude command", () => {
   });
 
   it("keeps the API key for env flags that leave the env alone, and for plain assignments", () => {
-    for (const flags of [[], ["FOO=bar"], ["-C", "/tmp"], ["--chdir=/tmp"], ["-v"], ["-u", "OTHER"], ["--", "FOO=bar"]]) {
+    for (const flags of [
+      [],
+      ["FOO=bar"],
+      ["=bar"],
+      ["-C", "/tmp"],
+      ["--chdir=/tmp"],
+      ["-v"],
+      ["-u", "OTHER"],
+      ["--", "FOO=bar"],
+      ["-a", "x"],
+      ["-ax"],
+      ["-va", "x"],
+      ["--argv0", "x"],
+      ["--argv0=x"],
+      ["--arg", "x"],
+      ["-0"],
+      ["--null"],
+      ["-S", "-C /tmp FOO=bar"],
+    ]) {
       const command = { command: "env", args: [...flags, "claude", "-p"] };
       expect(lane({ ...command, env: { ANTHROPIC_API_KEY: apiKey } })).toBe("api");
       expect(lane(command, { ANTHROPIC_API_KEY: apiKey })).toBe("api");
@@ -210,6 +237,97 @@ describe("env wrapper in front of a process claude command", () => {
     expect(lane({ command: "env", args: [`ANTHROPIC_API_KEY=${apiKey}`, "env", "-u", "ANTHROPIC_API_KEY", "claude"] })).toBe(
       "subscription",
     );
+  });
+
+  it.each([
+    ["empty single quotes", ["-S", "ANTHROPIC_API_KEY=''"]],
+    ["empty double quotes", ["-S", 'ANTHROPIC_API_KEY=""']],
+    ["an unset ${VAR}", ["-S", "ANTHROPIC_API_KEY=${UNSET_X}"]],
+    ["a quoted -u name", ["-S", "-u 'ANTHROPIC_API_KEY'"]],
+    ["a \\_ separator", ["-S", "ANTHROPIC_API_KEY=\\_"]],
+    ["a # comment", ["-S", "FOO=bar # ANTHROPIC_API_KEY=sk-ant-api03-comment"]],
+    ["a --split-string= value", ["--split-string=ANTHROPIC_API_KEY=''"]],
+  ])("counts an env -S string with %s as clearing the env, whatever it assigns", (_label, flags) => {
+    const command = { command: "env", args: [...flags, "claude", "-p"] };
+    expect(isProcessClaudeCommand(command)).toBe(true);
+    expect(lane({ ...command, env: { ANTHROPIC_API_KEY: apiKey } })).toBe("subscription");
+    expect(lane(command, { ANTHROPIC_API_KEY: apiKey })).toBe("subscription");
+    const refusal = resolveProcessClaudeSubscriptionRefusal(
+      { ...command, env: { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_BASE_URL: evil } },
+      {},
+    );
+    expect(refusal?.errorCode).toBe("adapter_engine_unavailable");
+    expect(refusal?.errorMessage).toContain("ANTHROPIC_BASE_URL");
+    expect(refusal?.errorMessage).toContain("cannot fully read the env wrapper");
+  });
+
+  it("does not count an API key that an unreadable env -S string, or an arg after it, assigns", () => {
+    expect(lane({ command: "env", args: ["-S", `ANTHROPIC_API_KEY='${apiKey}' claude -p`] })).toBe("subscription");
+    expect(lane({ command: "env", args: ["-S", "FOO='a b'", `ANTHROPIC_API_KEY=${apiKey}`, "claude"] })).toBe(
+      "subscription",
+    );
+    expect(lane({ command: "env", args: ["-S", "'FOO=a'", "env", `ANTHROPIC_API_KEY=${apiKey}`, "claude"] })).toBe(
+      "subscription",
+    );
+  });
+
+  it.each([
+    ["a quoted name", "'ANTHROPIC_BASE_URL'=https://evil.example"],
+    ["a partly quoted name", 'ANTHROPIC_"BASE_URL"=https://evil.example'],
+    ["a quoted value", 'ANTHROPIC_BASE_URL="https://evil.example"'],
+    ["a ${VAR} value", "ANTHROPIC_BASE_URL=${EVIL_URL}"],
+    ["a ${VAR} in the name", "ANTHROPIC_BASE_URL${EMPTY}=https://evil.example"],
+    ["a quoted exposure key", "'NODE_EXTRA_CA_CERTS'=/tmp/ca.pem"],
+  ])("refuses an endpoint key that an unreadable env -S string assigns with %s", (_label, assignment) => {
+    const config = { command: "env", args: ["-S", `${assignment} claude -p`] };
+    const refusal = resolveProcessClaudeSubscriptionRefusal(config, {});
+    expect(refusal?.errorCode).toBe("adapter_engine_unavailable");
+    expect(refusal?.errorMessage).toMatch(/ANTHROPIC_BASE_URL|NODE_EXTRA_CA_CERTS/);
+  });
+
+  it("splits a plain env -S string only on the whitespace env splits on", () => {
+    expect(lane({ command: "env", args: ["-S", `ANTHROPIC_API_KEY=${apiKey} claude -p`] })).toBe("api");
+    expect(
+      resolveProcessClaudeSubscriptionRefusal(
+        { command: "env", args: ["-S", `ANTHROPIC_API_KEY=${apiKey}\tclaude -p`], env: { ANTHROPIC_BASE_URL: evil } },
+        {},
+      ),
+    ).toBeNull();
+    // A no-break space is part of the arg for env, so FOO holds the whole string and no key is set.
+    const noBreak = { command: "env", args: ["-S", `FOO=a ANTHROPIC_API_KEY=${apiKey}`, "claude", "-p"] };
+    expect(lane(noBreak)).toBe("subscription");
+    expect(
+      resolveProcessClaudeSubscriptionRefusal({ ...noBreak, env: { ANTHROPIC_BASE_URL: evil } }, {})?.errorCode,
+    ).toBe("adapter_engine_unavailable");
+  });
+
+  it("counts an env with an unknown flag as a claude run with a cleared env when a later arg names claude", () => {
+    for (const flags of [["--frobnicate", "value"], ["-X", "value"], ["-X"], ["--i", "value"]]) {
+      const command = { command: "env", args: [...flags, `ANTHROPIC_API_KEY=${apiKey}`, "claude", "-p"] };
+      expect(isProcessClaudeCommand(command)).toBe(true);
+      expect(lane(command)).toBe("subscription");
+      const keyed = { ...command, env: { ANTHROPIC_API_KEY: apiKey } };
+      expect(lane(keyed, { ANTHROPIC_API_KEY: apiKey })).toBe("subscription");
+      const refusal = resolveProcessClaudeSubscriptionRefusal(
+        { command: "env", args: [...flags, `ANTHROPIC_BASE_URL=${evil}`, "claude", "-p"] },
+        {},
+      );
+      expect(refusal?.errorCode).toBe("adapter_engine_unavailable");
+      expect(refusal?.errorMessage).toContain("ANTHROPIC_BASE_URL");
+    }
+  });
+
+  it("reads env wrappers nested past four levels", () => {
+    const nested = ["env", "env", "env", "env", "env"];
+    const unset = { command: "env", args: [...nested, "-u", "ANTHROPIC_API_KEY", "claude"] };
+    expect(lane({ ...unset, env: { ANTHROPIC_API_KEY: apiKey } })).toBe("subscription");
+    expect(lane({ command: "env", args: [...nested, `ANTHROPIC_API_KEY=${apiKey}`, "claude"] })).toBe("api");
+    expect(
+      resolveProcessClaudeSubscriptionRefusal(
+        { command: "env", args: [...nested, `ANTHROPIC_BASE_URL=${evil}`, "claude"] },
+        {},
+      )?.errorCode,
+    ).toBe("adapter_engine_unavailable");
   });
 
   it("still refuses an endpoint key that the wrapper clears or unsets", () => {
@@ -294,6 +412,7 @@ describe("process adapter running claude", () => {
   it.each([
     ["-u ANTHROPIC_API_KEY", ["-u", "ANTHROPIC_API_KEY"]],
     ["-i", ["-i", "PATH=/usr/bin:/bin"]],
+    ["-S ANTHROPIC_API_KEY=''", ["-S", "ANTHROPIC_API_KEY=''"]],
   ])("refuses a claude command whose env %s drops the agent's API key, before spawning", async (_label, flags) => {
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
@@ -306,6 +425,20 @@ describe("process adapter running claude", () => {
     });
     expect(result.errorCode).toBe("adapter_engine_unavailable");
     expect(result.errorMessage).toContain("ANTHROPIC_BASE_URL");
+    expect(await spawned()).toBe(false);
+  });
+
+  it("refuses a subscription-lane claude command behind env -a, before spawning", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+    vi.stubEnv("CLAUDE_CODE_USE_BEDROCK", "");
+    const result = await run({
+      command: "env",
+      args: ["-a", "x", claudePath, "-p", "hi"],
+      cwd: root,
+      env: { ANTHROPIC_BASE_URL: "https://evil.example" },
+    });
+    expect(result.errorCode).toBe("adapter_engine_unavailable");
     expect(await spawned()).toBe(false);
   });
 
@@ -491,6 +624,14 @@ describeEmbeddedPostgres("heartbeat Claude subscription gates for process agents
       {
         command: "env",
         args: ["-u", "ANTHROPIC_API_KEY", "claude", "-p", "hi"],
+        env: { ANTHROPIC_API_KEY: "sk-ant-api03-fixture" },
+      },
+    ],
+    [
+      "claude behind env -S that blanks the agent's API key in quotes",
+      {
+        command: "env",
+        args: ["-S", "ANTHROPIC_API_KEY='' claude -p hi"],
         env: { ANTHROPIC_API_KEY: "sk-ant-api03-fixture" },
       },
     ],
