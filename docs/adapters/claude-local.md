@@ -56,6 +56,9 @@ Paperclip never reads, stores, forwards, or injects a Claude sign-in:
   drops the `env` block and credential helpers (`apiKeyHelper`,
   `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`) of the
   server's `settings.json`.
+- The workspace file browser on a task refuses to show Claude sign-in files:
+  `.credentials.json` and `credentials.json` inside any `.claude` folder, and
+  `.claude.json` in any folder (`denied_secret`).
 - Paperclip does not show Claude plan usage. See
   [Claude usage on the Costs page](#claude-usage-on-the-costs-page).
 - Two database migrations delete the Claude subscription credentials that
@@ -181,6 +184,11 @@ an agent with a live task bridge key), chat messages from linked chat users
 conversation that a linked user started. A new chat endpoint for an agent on
 the subscription lane starts with unlinked people turned off.
 
+An internet-facing gateway agent (`hermes_gateway`, `openclaw_gateway`, or
+`http`) that uses a standard agent API key counts as an agent of the owner, so
+an outside chat message it handles can wake a subscription-lane agent through
+delegation. Give such a gateway a `task_bridge` key.
+
 **Endpoint.** The `claude` CLI sends the server's sign-in to whatever endpoint
 its env names. A subscription-lane run therefore fails before it starts
 (`adapter_engine_unavailable`; the Environment Test reports the same and runs
@@ -192,12 +200,22 @@ key that lets another program read the CLI's requests: `NODE_EXTRA_CA_CERTS`,
 `BUN_INSPECT*`, `BUN_OPTIONS`, `LD_PRELOAD`, `LD_AUDIT`,
 `DYLD_INSERT_LIBRARIES`, or `NODE_OPTIONS` with a debugger, code-loading,
 `--env-file` or `--tls-keylog` flag.
-Paperclip does not check the server's own env. To use a custom endpoint, give
-the agent an Anthropic API key.
+Paperclip does not check the server's own env for agent runs (board chat
+does, see below). To use a custom endpoint, give the agent an Anthropic API
+key.
 
-Board chat spawns the `claude` CLI directly. It is available only in
-`local_trusted` mode and only to the board; an agent API key gets 403 before
-the CLI is spawned.
+Board chat (the Conference Room) spawns the `claude` CLI directly. It is
+available only in `local_trusted` mode and only to the board; an agent API key
+gets 403 before the CLI is spawned. Each request runs in a fresh private
+folder under the instance root, deleted afterwards. The CLI loads only the
+service user's own settings: no project settings, no `CLAUDE.md` from the
+folder, and no MCP servers (also not the ones in your user settings), and it
+keeps no session. Its env is the Paperclip server's own env, so without an API
+credential board chat applies the endpoint rules above to the server env: a
+server env that sets, for example, `SSL_CERT_FILE` or `NODE_EXTRA_CA_CERTS`
+gets 403 `CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED`, and the Conference Room shows
+the reason. Remove the key from the server env, or set `ANTHROPIC_API_KEY`
+there.
 
 ## Execution engines
 
@@ -553,7 +571,9 @@ On both engines, a remote sandbox run never forwards the agent's
 `CLAUDE_CONFIG_DIR` path into the sandbox, also when the path is inside the
 workspace. It always uses the managed directory, seeded from the sanitized
 server settings, or, for an Anthropic AI connection, from that connection's
-config directory without its sign-in files. On every remote target (sandbox or
+config directory without its sign-in files and `.claude.json`. The config
+seed is staged without following symbolic links, so a link in it cannot bring
+a host file into the sandbox. On every remote target (sandbox or
 SSH) and both engines, the sign-in files (`.credentials.json`,
 `credentials.json`) of every Claude config directory inside the workspace are
 neither uploaded with the workspace nor synced back. That covers the agent's

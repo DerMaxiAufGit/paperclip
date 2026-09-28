@@ -17,10 +17,15 @@ import {
   CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE,
   CLAUDE_SUBSCRIPTION_OWNER_ONLY_MESSAGE,
 } from "@paperclipai/shared";
+import { isClaudeSubscriptionLaneRun } from "@paperclipai/adapter-claude-local/server";
 import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from "../adapters/index.js";
 import { execute as executeProcess } from "../adapters/process/execute.js";
 import { setClaudeSubscriptionDeploymentMode } from "../services/claude-subscription-policy.js";
-import { claudeSubscriptionGateInput, isProcessClaudeCommand } from "../services/claude-subscription-target.js";
+import {
+  claudeSubscriptionGateInput,
+  isProcessClaudeCommand,
+  resolveProcessClaudeSubscriptionRefusal,
+} from "../services/claude-subscription-target.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -48,6 +53,10 @@ describe("isProcessClaudeCommand", () => {
     expect(isProcessClaudeCommand({ command: "/usr/bin/env", args: ["-i", "/opt/claude/bin/claude"] })).toBe(true);
     expect(isProcessClaudeCommand({ command: "env", args: ["npx", "-y", "@anthropic-ai/claude-code"] })).toBe(true);
     expect(isProcessClaudeCommand({ command: "env", args: ["-S", "FOO=bar claude -p"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["--", "FOO=bar", "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["--uns", "FOO", "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["-iuFOO", "claude"] })).toBe(true);
+    expect(isProcessClaudeCommand({ command: "env", args: ["-P", "/opt/bin", "claude"] })).toBe(true);
     expect(isProcessClaudeCommand({ command: "yarn", args: ["claude", "-p"] })).toBe(true);
     expect(
       isProcessClaudeCommand({ command: "node", args: ["/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js", "-p"] }),
@@ -85,7 +94,7 @@ describe("claudeSubscriptionGateInput", () => {
     expect(gate).toEqual({ config: { env: { FOO: "bar" }, args: ["-p", "hi"] } });
   });
 
-  it("counts env wrapper assignments, and ignores the host env when env may clear it", () => {
+  it("counts env wrapper assignments, and drops what env clears or unsets from the agent and host env", () => {
     expect(
       claudeSubscriptionGateInput("process", {
         command: "env",
@@ -93,9 +102,128 @@ describe("claudeSubscriptionGateInput", () => {
         env: { FOO: "bar" },
       }),
     ).toEqual({ config: { env: { FOO: "bar", ANTHROPIC_BASE_URL: "https://evil.example" }, args: ["-p"] } });
+    const hostEnv = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-api03-host" };
     expect(
-      claudeSubscriptionGateInput("process", { command: "env", args: ["-u", "ANTHROPIC_API_KEY", "claude"] }),
-    ).toEqual({ config: { env: {}, args: [] }, hostEnv: {} });
+      claudeSubscriptionGateInput(
+        "process",
+        { command: "env", args: ["-u", "ANTHROPIC_API_KEY", "claude"], env: { ANTHROPIC_API_KEY: "sk-ant-api03-x", FOO: "bar" } },
+        hostEnv,
+      ),
+    ).toEqual({ config: { env: { FOO: "bar" }, args: [] }, hostEnv: { PATH: "/usr/bin" } });
+    expect(
+      claudeSubscriptionGateInput(
+        "process",
+        { command: "env", args: ["-i", "PATH=/bin", "claude"], env: { FOO: "bar" } },
+        hostEnv,
+      ),
+    ).toEqual({ config: { env: { PATH: "/bin" }, args: [] }, hostEnv: {} });
+  });
+});
+
+describe("env wrapper in front of a process claude command", () => {
+  const apiKey = "sk-ant-api03-real";
+  const evil = "https://evil.example";
+
+  function lane(config: Record<string, unknown>, hostEnv: NodeJS.ProcessEnv = {}) {
+    const gate = claudeSubscriptionGateInput("process", config, hostEnv);
+    expect(gate).not.toBeNull();
+    return isClaudeSubscriptionLaneRun({ config: gate!.config, targetIsRemote: false, hostEnv: gate!.hostEnv ?? hostEnv })
+      ? "subscription"
+      : "api";
+  }
+
+  it("puts a claude command whose env -u drops the agent's API key on the subscription lane and refuses its endpoint", () => {
+    const config = {
+      command: "env",
+      args: ["-u", "ANTHROPIC_API_KEY", "claude", "-p", "hi"],
+      env: { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_BASE_URL: evil },
+    };
+    expect(lane(config)).toBe("subscription");
+    const refusal = resolveProcessClaudeSubscriptionRefusal(config, {});
+    expect(refusal?.errorCode).toBe("adapter_engine_unavailable");
+    expect(refusal?.errorMessage).toContain("ANTHROPIC_BASE_URL");
+  });
+
+  it("puts a claude command whose env -i clears the agent env on the subscription lane and refuses its endpoint", () => {
+    const config = {
+      command: "env",
+      args: ["-i", "PATH=/usr/bin", "claude", "-p", "hi"],
+      env: { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_BASE_URL: evil },
+    };
+    expect(lane(config, { ANTHROPIC_API_KEY: "sk-ant-api03-host" })).toBe("subscription");
+    const refusal = resolveProcessClaudeSubscriptionRefusal(config, { ANTHROPIC_API_KEY: "sk-ant-api03-host" });
+    expect(refusal?.errorCode).toBe("adapter_engine_unavailable");
+    expect(refusal?.errorMessage).toContain("ANTHROPIC_BASE_URL");
+  });
+
+  it.each([
+    ["-u NAME", ["-u", "ANTHROPIC_API_KEY"]],
+    ["--unset NAME", ["--unset", "ANTHROPIC_API_KEY"]],
+    ["--unset=NAME", ["--unset=ANTHROPIC_API_KEY"]],
+    ["an abbreviated --uns NAME", ["--uns", "ANTHROPIC_API_KEY"]],
+    ["-uNAME", ["-uANTHROPIC_API_KEY"]],
+    ["-iu NAME", ["-iu", "ANTHROPIC_API_KEY"]],
+    ["-i", ["-i"]],
+    ["-", ["-"]],
+    ["--ignore-environment", ["--ignore-environment"]],
+    ["an abbreviated --ignore-env", ["--ignore-env"]],
+    ["-S with -i inside", ["-S", "-i FOO=bar"]],
+    ["an unknown long flag", ["--frobnicate"]],
+    ["an unknown short flag", ["-X"]],
+    ["an ambiguous abbreviation", ["--i"]],
+  ])("drops the API key for %s, in the agent env and the host env", (_label, flags) => {
+    const command = { command: "env", args: [...flags, "claude", "-p"] };
+    expect(lane({ ...command, env: { ANTHROPIC_API_KEY: apiKey } })).toBe("subscription");
+    expect(lane(command, { ANTHROPIC_API_KEY: apiKey })).toBe("subscription");
+    expect(
+      resolveProcessClaudeSubscriptionRefusal({ ...command, env: { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_BASE_URL: evil } }, {})
+        ?.errorCode,
+    ).toBe("adapter_engine_unavailable");
+  });
+
+  it("keeps the API key for env flags that leave the env alone, and for plain assignments", () => {
+    for (const flags of [[], ["FOO=bar"], ["-C", "/tmp"], ["--chdir=/tmp"], ["-v"], ["-u", "OTHER"], ["--", "FOO=bar"]]) {
+      const command = { command: "env", args: [...flags, "claude", "-p"] };
+      expect(lane({ ...command, env: { ANTHROPIC_API_KEY: apiKey } })).toBe("api");
+      expect(lane(command, { ANTHROPIC_API_KEY: apiKey })).toBe("api");
+      expect(
+        resolveProcessClaudeSubscriptionRefusal({ ...command, env: { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_BASE_URL: evil } }, {}),
+      ).toBeNull();
+    }
+  });
+
+  it("counts an API key the wrapper assigns itself after -i", () => {
+    const config = {
+      command: "env",
+      args: ["-i", `ANTHROPIC_API_KEY=${apiKey}`, "claude", "-p"],
+      env: { ANTHROPIC_BASE_URL: evil },
+    };
+    expect(lane(config)).toBe("api");
+    expect(resolveProcessClaudeSubscriptionRefusal(config, {})).toBeNull();
+  });
+
+  it("applies nested env wrappers in order", () => {
+    expect(lane({ command: "env", args: ["-u", "ANTHROPIC_API_KEY", "env", `ANTHROPIC_API_KEY=${apiKey}`, "claude"] }, {
+      ANTHROPIC_API_KEY: apiKey,
+    })).toBe("api");
+    expect(lane({ command: "env", args: [`ANTHROPIC_API_KEY=${apiKey}`, "env", "-i", "claude"] })).toBe("subscription");
+    expect(lane({ command: "env", args: [`ANTHROPIC_API_KEY=${apiKey}`, "env", "-u", "ANTHROPIC_API_KEY", "claude"] })).toBe(
+      "subscription",
+    );
+  });
+
+  it("still refuses an endpoint key that the wrapper clears or unsets", () => {
+    for (const flags of [["-i"], ["-u", "ANTHROPIC_BASE_URL"]]) {
+      const refusal = resolveProcessClaudeSubscriptionRefusal(
+        { command: "env", args: [...flags, "claude"], env: { ANTHROPIC_BASE_URL: evil } },
+        {},
+      );
+      expect(refusal?.errorCode).toBe("adapter_engine_unavailable");
+    }
+    expect(
+      resolveProcessClaudeSubscriptionRefusal({ command: "env", args: ["--", `ANTHROPIC_BASE_URL=${evil}`, "claude"] }, {})
+        ?.errorCode,
+    ).toBe("adapter_engine_unavailable");
   });
 });
 
@@ -161,6 +289,39 @@ describe("process adapter running claude", () => {
     });
     expect(result.errorCode).toBe("adapter_engine_unavailable");
     expect(await spawned()).toBe(false);
+  });
+
+  it.each([
+    ["-u ANTHROPIC_API_KEY", ["-u", "ANTHROPIC_API_KEY"]],
+    ["-i", ["-i", "PATH=/usr/bin:/bin"]],
+  ])("refuses a claude command whose env %s drops the agent's API key, before spawning", async (_label, flags) => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+    vi.stubEnv("CLAUDE_CODE_USE_BEDROCK", "");
+    const result = await run({
+      command: "env",
+      args: [...flags, claudePath, "-p", "hi"],
+      cwd: root,
+      env: { ANTHROPIC_API_KEY: "sk-ant-api03-fixture", ANTHROPIC_BASE_URL: "https://evil.example" },
+    });
+    expect(result.errorCode).toBe("adapter_engine_unavailable");
+    expect(result.errorMessage).toContain("ANTHROPIC_BASE_URL");
+    expect(await spawned()).toBe(false);
+  });
+
+  it("runs a claude command whose env -i wrapper assigns the API key itself, custom endpoint included", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+    vi.stubEnv("CLAUDE_CODE_USE_BEDROCK", "");
+    const result = await run({
+      command: "env",
+      args: ["-i", "PATH=/usr/bin:/bin", "ANTHROPIC_API_KEY=sk-ant-api03-fixture", claudePath],
+      cwd: root,
+      env: { ANTHROPIC_BASE_URL: "https://gateway.example" },
+    });
+    expect(result.errorCode).toBeUndefined();
+    expect(result.exitCode).toBe(0);
+    expect(await spawned()).toBe(true);
   });
 
   it("runs a claude command with an API key, custom endpoint included", async () => {
@@ -325,6 +486,14 @@ describeEmbeddedPostgres("heartbeat Claude subscription gates for process agents
     ["claude", { command: "claude", args: ["-p", "hi"] }],
     ["claude with engine=acp", { command: "claude", args: ["-p", "hi"], engine: "acp" }],
     ["npx @anthropic-ai/claude-code", { command: "npx", args: ["-y", "@anthropic-ai/claude-code", "-p", "hi"] }],
+    [
+      "claude behind env -u ANTHROPIC_API_KEY, with the key in the agent env",
+      {
+        command: "env",
+        args: ["-u", "ANTHROPIC_API_KEY", "claude", "-p", "hi"],
+        env: { ANTHROPIC_API_KEY: "sk-ant-api03-fixture" },
+      },
+    ],
   ])("refuses a process agent running %s on an authenticated instance with other users", async (_label, adapterConfig) => {
     setClaudeSubscriptionDeploymentMode("authenticated");
     const f = await fixture({ humanUsers: 2, adapterConfig });

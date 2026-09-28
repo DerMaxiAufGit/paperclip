@@ -994,6 +994,77 @@ describe("claude_local ACP lane", () => {
     expect(Object.keys(meta[0]?.env ?? {}).filter((key) => key.startsWith("XDG_"))).toEqual([]);
   });
 
+  it("stages a managed AI connection's config dir without its sign-in files, .claude.json or followed links", async () => {
+    // Fork policy: whatever dir the seed comes from, the Claude sign-in files
+    // and .claude.json stay on this server, and a planted link cannot pull a
+    // host file into the sandbox.
+    vi.mocked(prepareAdapterExecutionTargetRuntime).mockClear();
+    const root = await makeTempRoot("paperclip-claude-acp-managed-seed-");
+    const localCwd = path.join(root, "worktree");
+    const remoteCwd = path.join(root, "remote-workspace");
+    const hostConfigDir = path.join(root, "service-home", ".claude");
+    const managedConfigDir = path.join(root, "managed-ai-home", "provider");
+    await fs.mkdir(localCwd, { recursive: true });
+    await fs.mkdir(remoteCwd, { recursive: true });
+    await fs.mkdir(hostConfigDir, { recursive: true });
+    await fs.mkdir(managedConfigDir, { recursive: true });
+    await fs.writeFile(path.join(hostConfigDir, ".credentials.json"), "HOSTSIGNIN", "utf8");
+    await fs.writeFile(path.join(managedConfigDir, "settings.json"), JSON.stringify({ theme: "dark" }), "utf8");
+    await fs.writeFile(path.join(managedConfigDir, ".claude.json"), "MANAGEDACCOUNT", "utf8");
+    await fs.writeFile(path.join(managedConfigDir, ".credentials.json"), "MANAGEDSIGNIN", "utf8");
+    await fs.symlink(path.join(hostConfigDir, ".credentials.json"), path.join(managedConfigDir, "notes.md"));
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home");
+    process.env.PAPERCLIP_INSTANCE_ID = "test";
+
+    const meta: AdapterInvocationMeta[] = [];
+    const execute = createClaudeAcpExecutor({
+      createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(options) as never,
+    });
+    const result = await execute(
+      buildContext(localCwd, {
+        config: {
+          engine: "acp",
+          env: { ...ACP_API_KEY_ENV, CLAUDE_CONFIG_DIR: managedConfigDir },
+          managedAiConnection: { provider: "anthropic", method: "api_key", identity: "grant-1" },
+          cwd: localCwd,
+          agentCommand: "node ./fake-acp.js",
+          stateDir: path.join(root, "state"),
+          promptTemplate: "Do the assigned work.",
+        },
+        context: {
+          issueId: "issue-1",
+          paperclipWorkspace: { cwd: localCwd, source: "project_workspace", workspaceId: "workspace-1" },
+        },
+        executionTarget: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "fake-plugin",
+          remoteCwd,
+          runner: createLocalSandboxRunner(),
+        } as never,
+        authToken: "real-run-jwt",
+        onMeta: async (payload: AdapterInvocationMeta) => {
+          meta.push(payload);
+        },
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    const stageArgs = vi.mocked(prepareAdapterExecutionTargetRuntime).mock.calls[0]![0];
+    const seedAsset = stageArgs.assets?.find((asset) => asset.key === "config-seed");
+    expect(seedAsset).toMatchObject({ localDir: managedConfigDir, followSymlinks: false });
+    expect(seedAsset?.exclude).toEqual(expect.arrayContaining([".credentials.json", "credentials.json", ".claude.json"]));
+    const remappedConfigDir = String(meta[0]?.env?.CLAUDE_CONFIG_DIR ?? "");
+    expect(remappedConfigDir).toContain(".paperclip-runtime");
+    await expect(fs.readFile(path.join(remappedConfigDir, "settings.json"), "utf8")).resolves.toContain("dark");
+    const entries = await fs.readdir(remappedConfigDir);
+    expect(entries).not.toContain(".claude.json");
+    expect(entries).not.toContain(".credentials.json");
+    if (entries.includes("notes.md")) {
+      expect((await fs.lstat(path.join(remappedConfigDir, "notes.md"))).isSymbolicLink()).toBe(true);
+    }
+  });
+
   it("test_claude_acp_seam_registers_workspace_sync_back", async () => {
     const root = await makeTempRoot("paperclip-claude-acp-syncback-");
     const localCwd = path.join(root, "worktree");

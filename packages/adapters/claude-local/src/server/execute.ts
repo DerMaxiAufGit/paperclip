@@ -76,6 +76,7 @@ import {
   isClaudeModelNotFoundError,
 } from "./parse.js";
 import {
+  claudeConfigSeedAsset,
   materializeRemoteClaudeConfig,
   prepareClaudeConfigSeed,
   resolveManagedClaudeRuntimeStateDir,
@@ -95,7 +96,6 @@ import { prepareClaudePromptBundle } from "./prompt-cache.js";
 import { buildClaudeExecutionPermissionArgs, claudeSandboxPermissionEnv } from "./permissions.js";
 import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import {
-  CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
   claudeConfigCredentialWorkspaceExcludes,
   createClaudeAcpExecutor,
   resolveClaudeExecutionEngineForRun,
@@ -616,16 +616,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               localDir: localMcpConfigDir,
               followSymlinks: true,
             },
-            ...(claudeConfigSeedDir
-              ? [{
-                key: "config-seed",
-                localDir: claudeConfigSeedDir,
-                followSymlinks: true,
-                // The managed seed holds no sign-in; a managed AI connection's
-                // config dir is staged without its sign-in files.
-                exclude: [...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES],
-              }]
-              : []),
+            // The managed seed holds no sign-in; a managed AI connection's
+            // config dir is staged without its sign-in files and .claude.json,
+            // never following a link.
+            ...(claudeConfigSeedDir ? [claudeConfigSeedAsset(claudeConfigSeedDir)] : []),
           ],
         });
       })()

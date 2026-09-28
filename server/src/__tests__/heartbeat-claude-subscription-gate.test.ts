@@ -19,7 +19,11 @@ import {
 } from "@paperclipai/shared";
 import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from "../adapters/index.js";
 import { setClaudeSubscriptionDeploymentMode } from "../services/claude-subscription-policy.js";
-import { heartbeatService, runnerClaudeAcpxHasApiKey } from "../services/heartbeat.js";
+import {
+  heartbeatService,
+  resolveExecutionRunAdapterConfig,
+  runnerClaudeAcpxHasApiKey,
+} from "../services/heartbeat.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -34,6 +38,35 @@ describe("Paperclip Runner Claude ACPX lane API key", () => {
     // Only ANTHROPIC_API_KEY crosses the runner's ACPX allowlist.
     expect(runnerClaudeAcpxHasApiKey({ ANTHROPIC_AUTH_TOKEN: "gateway" })).toBe(false);
     expect(runnerClaudeAcpxHasApiKey({ ANTHROPIC_API_KEY: { type: "secret_ref" } })).toBe(false);
+  });
+});
+
+describe("stored managed AI connection marker", () => {
+  it("drops a managedAiConnection stored in the agent's adapter config", async () => {
+    // Only prepareManagedAiRuntime marks a run as a managed AI connection. A
+    // stored marker would make claude_local trust the agent's CLAUDE_CONFIG_DIR
+    // as the managed credential home and stage it into a sandbox.
+    const passConfig = vi.fn(async (_companyId: string, config: Record<string, unknown>) => ({
+      config: { ...config },
+      secretKeys: new Set<string>(),
+      manifest: [],
+    }));
+    const { resolvedConfig } = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      adapterType: "claude_local",
+      executionRunConfig: {
+        env: { CLAUDE_CONFIG_DIR: "/home/owner/.claude" },
+        managedAiConnection: { provider: "anthropic", method: "api_key", identity: "forged" },
+      },
+      projectEnv: null,
+      secretsSvc: {
+        resolveAdapterConfigForRuntime: passConfig,
+        resolveEnvBindings: vi.fn(async () => ({ env: {}, secretKeys: new Set<string>(), manifest: [] })),
+      } as any,
+    });
+    expect(resolvedConfig).not.toHaveProperty("managedAiConnection");
+    expect(resolvedConfig.env).toEqual({ CLAUDE_CONFIG_DIR: "/home/owner/.claude" });
   });
 });
 

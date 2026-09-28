@@ -919,6 +919,94 @@ describe("claude execute", () => {
     }
   }, 10_000);
 
+  it("stages a managed AI connection's config dir into a sandbox without sign-in files, .claude.json or followed links", async () => {
+    // Fork policy: whatever dir the seed comes from, the Claude sign-in files
+    // and .claude.json stay on this server, and a planted link cannot pull a
+    // host file into the sandbox.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-managed-seed-"));
+    const localWorkspace = path.join(root, "workspace");
+    const remoteWorkspace = path.join(root, "sandbox-home");
+    const binDir = path.join(root, "bin");
+    const commandPath = path.join(binDir, "claude");
+    const capturePath = path.join(remoteWorkspace, "capture.json");
+    const hostConfigDir = path.join(root, "service-home", ".claude");
+    const managedConfigDir = path.join(root, "managed-ai-home", "provider");
+    const previousHome = process.env.HOME;
+    const previousPath = process.env.PATH;
+
+    await fs.mkdir(localWorkspace, { recursive: true });
+    await fs.mkdir(remoteWorkspace, { recursive: true });
+    await fs.mkdir(binDir, { recursive: true });
+    await fs.mkdir(hostConfigDir, { recursive: true });
+    await fs.mkdir(managedConfigDir, { recursive: true });
+    await fs.writeFile(path.join(hostConfigDir, ".credentials.json"), "HOSTSIGNIN", "utf8");
+    await fs.writeFile(path.join(managedConfigDir, "settings.json"), JSON.stringify({ theme: "test" }), "utf8");
+    await fs.writeFile(path.join(managedConfigDir, ".claude.json"), "MANAGEDACCOUNT", "utf8");
+    await fs.writeFile(path.join(managedConfigDir, ".credentials.json"), "MANAGEDSIGNIN", "utf8");
+    await fs.symlink(path.join(hostConfigDir, ".credentials.json"), path.join(managedConfigDir, "notes.md"));
+    await writeFakeClaudeCommand(commandPath);
+
+    process.env.HOME = root;
+    process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+
+    try {
+      const result = await execute({
+        runId: "run-sandbox-managed-seed",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: { engine: "cli" },
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          engine: "cli",
+          command: commandPath,
+          cwd: localWorkspace,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            ANTHROPIC_API_KEY: "sk-ant-test-sandbox",
+            CLAUDE_CONFIG_DIR: managedConfigDir,
+          },
+          managedAiConnection: { provider: "anthropic", method: "api_key", identity: "grant-1" },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        executionTarget: {
+          kind: "remote",
+          transport: "sandbox",
+          providerKey: "e2b",
+          environmentId: "env-1",
+          leaseId: "lease-1",
+          remoteCwd: remoteWorkspace,
+          timeoutMs: 30_000,
+          runner: createLocalSandboxRunner(),
+        },
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      const remoteConfigDir = path.join(remoteWorkspace, ".paperclip-runtime", "claude", "config");
+      expect(capture.claudeConfigDir).toBe(remoteConfigDir);
+      expect(capture.claudeConfigEntries).toContain("settings.json");
+      expect(capture.claudeConfigEntries).not.toContain(".claude.json");
+      expect(capture.claudeConfigEntries).not.toContain(".credentials.json");
+      if (capture.claudeConfigEntries?.includes("notes.md")) {
+        const staged = await fs.lstat(path.join(remoteConfigDir, "notes.md")).catch(() => null);
+        if (staged) expect(staged.isSymbolicLink()).toBe(true);
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("omits --effort for sandbox-managed runs when the installed Claude CLI does not advertise it", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-sandbox-effort-"));
     const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root, {

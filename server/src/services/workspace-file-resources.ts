@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import {
+  CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
+  CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+} from "@paperclipai/adapter-utils/claude-config-credential-excludes";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issues, projects, projectWorkspaces } from "@paperclipai/db";
 import type {
@@ -309,6 +313,23 @@ function normalizeWorkspaceRelativePath(input: string): NormalizedPath {
   };
 }
 
+/**
+ * Fork policy (doc/plans/2026-09-24-claude-cli-only-auth.md): Paperclip never
+ * reads or hands out a Claude sign-in. A workspace root that contains the
+ * service user's home would otherwise serve `~/.claude/.credentials.json` or
+ * `~/.claude.json`. Same file names as the remote staging excludes: a
+ * credential file anywhere inside a `.claude` dir, and `.claude.json` at any
+ * depth. Takes lower-cased segments.
+ */
+function isClaudeSignInFile(lowerSegments: readonly string[]): boolean {
+  const fileName = lowerSegments.at(-1) ?? "";
+  if (fileName === CLAUDE_GLOBAL_CONFIG_FILE_NAME) return true;
+  return (
+    (CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES as readonly string[]).includes(fileName) &&
+    lowerSegments.slice(0, -1).includes(".claude")
+  );
+}
+
 function denyReasonForPathSegments(segments: string[]): string | null {
   const lowerSegments = segments.map((segment) => segment.toLowerCase());
   if (lowerSegments.some((segment) => DENIED_SEGMENTS.has(segment))) return "denied_path_segment";
@@ -322,6 +343,7 @@ function denyReasonForPathSegments(segments: string[]): string | null {
   if (lowerSegments.includes(".aws") || lowerSegments.includes(".ssh")) return "denied_secret";
   if (lowerSegments.length >= 2 && lowerSegments.at(-2) === ".docker" && fileName === "config.json") return "denied_secret";
   if (lowerSegments.length >= 2 && lowerSegments.at(-2) === ".kube" && fileName === "config") return "denied_secret";
+  if (isClaudeSignInFile(lowerSegments)) return "denied_secret";
 
   return null;
 }

@@ -1898,6 +1898,10 @@ export async function resolveExecutionRunAdapterConfig(input: {
     for (const key of input.trustedEnvSecretKeys ?? []) secretKeys.add(key);
   }
   dropResolvedClaudeSubscriptionTokens(resolvedConfig);
+  // Only prepareManagedAiRuntime marks a run as a managed AI connection. A
+  // stored marker would make claude_local stage the agent's CLAUDE_CONFIG_DIR
+  // into a sandbox as the managed credential home (fork policy).
+  delete resolvedConfig.managedAiConnection;
   // Pre-dispatch credential gate for codex_local: a managed Codex home with no
   // usable auth.json and an empty OPENAI_API_KEY would dispatch a run that
   // immediately fails with "no Codex credentials provisioned" (adapter_failed),

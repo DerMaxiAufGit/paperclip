@@ -1014,6 +1014,60 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(svg.body.content.data).toContain("<svg");
   });
 
+  it("denies Claude sign-in files, so a workspace that holds the service user's home never serves them", async () => {
+    const { projectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, executionRoot });
+    await fs.mkdir(path.join(projectRoot, ".claude"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "home", "svc", ".claude", "backups"), { recursive: true });
+    const signInFiles = [
+      ".claude/.credentials.json",
+      ".claude/credentials.json",
+      "home/svc/.claude/.credentials.json",
+      "home/svc/.claude/backups/credentials.json",
+      ".claude.json",
+      "home/svc/.claude.json",
+    ];
+    for (const filePath of signInFiles) {
+      await fs.writeFile(path.join(projectRoot, filePath), '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x"}}\n', "utf8");
+    }
+    await fs.writeFile(path.join(projectRoot, ".claude", "notes.md"), "# notes\n", "utf8");
+    await fs.writeFile(path.join(projectRoot, "credentials.json"), "{}\n", "utf8");
+    await fs.symlink(path.join(projectRoot, ".claude", ".credentials.json"), path.join(projectRoot, "linked-sign-in.json"));
+
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    for (const filePath of [...signInFiles, "linked-sign-in.json"]) {
+      const res = await request(app)
+        .get(`/api/issues/${graph.issueId}/file-resources/content`)
+        .query({ workspace: "project", path: filePath });
+      expect(res.status, filePath).toBe(403);
+      expect(res.body.details, filePath).toEqual({ code: "denied_secret" });
+      expect(JSON.stringify(res.body)).not.toContain("sk-ant-oat01-x");
+    }
+
+    const listed = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/list`)
+      .query({ workspace: "project", q: "json", limit: 100 });
+    expect(listed.status).toBe(200);
+    const listedPaths = listed.body.items.map((item: { relativePath: string }) => item.relativePath);
+    expect(listedPaths).toContain("credentials.json");
+    for (const filePath of signInFiles) expect(listedPaths).not.toContain(filePath);
+
+    // Only the sign-in files are denied: the rest of a .claude dir, and a
+    // credentials.json outside one, stay readable.
+    const notes = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/content`)
+      .query({ workspace: "project", path: ".claude/notes.md" });
+    expect(notes.status).toBe(200);
+    expect(notes.body.content.data).toContain("# notes");
+  });
+
   it("rejects remote workspaces without fetching provider resources", async () => {
     const { projectRoot } = await makeWorkspace();
     const graph = await seedGraph(db, {

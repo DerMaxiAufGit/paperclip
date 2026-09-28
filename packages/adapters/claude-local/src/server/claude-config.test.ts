@@ -5,9 +5,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 
 // A shared handle so the managed-config test can force the runtime preparation
-// step to throw an error that carries untrusted markers.
-const { prepareAdapterExecutionTargetRuntime } = vi.hoisted(() => ({
+// step to throw an error that carries untrusted markers, and the staging tests
+// can capture the assets it stages.
+const { prepareAdapterExecutionTargetRuntime, runAdapterExecutionTargetShellCommand } = vi.hoisted(() => ({
   prepareAdapterExecutionTargetRuntime: vi.fn(),
+  runAdapterExecutionTargetShellCommand: vi.fn(async () => ({
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout: "",
+    stderr: "",
+    pid: null,
+    startedAt: new Date(0).toISOString(),
+  })),
 }));
 
 vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
@@ -19,10 +29,17 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     adapterExecutionTargetUsesManagedHome: () => true,
     maybeRunSandboxInstallCommand: async () => null,
     prepareAdapterExecutionTargetRuntime,
+    runAdapterExecutionTargetShellCommand,
   };
 });
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { AdapterManagedRuntimeAsset } from "@paperclipai/adapter-utils/execution-target";
+import { createTarballFromDirectory } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 import { prepareClaudeConfigSeed, prepareSandboxClaudeProbeRuntime } from "./claude-config.js";
+
+const execFileAsync = promisify(execFile);
 
 describe("prepareClaudeConfigSeed", () => {
   const cleanupDirs: string[] = [];
@@ -242,5 +259,202 @@ describe("prepareSandboxClaudeProbeRuntime managed-config diagnostics", () => {
       errorClass: "Error",
     });
     warnSpy.mockRestore();
+  });
+});
+
+describe("prepareSandboxClaudeProbeRuntime config-seed staging", () => {
+  const cleanupDirs: string[] = [];
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const sandboxTarget: AdapterExecutionTarget = {
+    kind: "remote",
+    transport: "sandbox",
+    providerKey: "daytona",
+    remoteCwd: "/home/daytona/paperclip-workspace",
+    runner: {
+      execute: async () => ({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        pid: null,
+        startedAt: new Date().toISOString(),
+      }),
+    },
+  };
+
+  afterEach(async () => {
+    vi.clearAllMocks();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  async function makeRoot(prefix: string): Promise<string> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+    cleanupDirs.push(root);
+    for (const key of ["CLAUDE_CONFIG_DIR", "PAPERCLIP_HOME", "PAPERCLIP_INSTANCE_ID"]) {
+      if (!(key in savedEnv)) savedEnv[key] = process.env[key];
+    }
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home");
+    process.env.PAPERCLIP_INSTANCE_ID = "test-instance";
+    return root;
+  }
+
+  // A Claude config dir as the service user's ~/.claude looks: a sign-in, the
+  // global state file, and settings, plus a sign-in copy one level down.
+  async function writeSignedInClaudeConfigDir(dir: string): Promise<void> {
+    await fs.mkdir(path.join(dir, "backup"), { recursive: true });
+    await fs.writeFile(path.join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-HOSTSIGNIN" } }));
+    await fs.writeFile(path.join(dir, "credentials.json"), JSON.stringify({ token: "sk-ant-ort01-HOSTREFRESH" }));
+    await fs.writeFile(path.join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "owner@example.test" }, primaryApiKey: "sk-ant-api03-HOSTCONSOLE" }));
+    await fs.writeFile(path.join(dir, "backup", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-HOSTBACKUP" } }));
+    await fs.writeFile(path.join(dir, "settings.json"), JSON.stringify({ theme: "dark" }));
+  }
+
+  // Stage every asset the probe hands to the runtime preparation through the
+  // real tarball builder, then unpack it, so the test sees exactly what would
+  // reach the sandbox.
+  function captureStagedAssets(root: string): {
+    assets: AdapterManagedRuntimeAsset[];
+    stagedDirs: Record<string, string>;
+    archives: Record<string, Buffer>;
+  } {
+    const captured = {
+      assets: [] as AdapterManagedRuntimeAsset[],
+      stagedDirs: {} as Record<string, string>,
+      archives: {} as Record<string, Buffer>,
+    };
+    prepareAdapterExecutionTargetRuntime.mockImplementation(
+      async (input: { assets?: AdapterManagedRuntimeAsset[] }) => {
+        for (const asset of input.assets ?? []) {
+          captured.assets.push(asset);
+          const archivePath = path.join(root, `${asset.key}.tar`);
+          await createTarballFromDirectory({
+            localDir: asset.localDir,
+            archivePath,
+            exclude: asset.exclude,
+            followSymlinks: asset.followSymlinks,
+          });
+          captured.archives[asset.key] = await fs.readFile(archivePath);
+          const stagedDir = path.join(root, "staged", asset.key);
+          await fs.mkdir(stagedDir, { recursive: true });
+          await execFileAsync("tar", ["-xf", archivePath, "-C", stagedDir]);
+          captured.stagedDirs[asset.key] = stagedDir;
+        }
+        return {
+          target: sandboxTarget,
+          workspaceRemoteDir: "/home/daytona/paperclip-workspace",
+          runtimeRootDir: "/home/daytona/paperclip-workspace/.paperclip-runtime/claude",
+          assetDirs: { "config-seed": "/home/daytona/paperclip-workspace/.paperclip-runtime/claude/config-seed" },
+          additionalSourceDirs: {},
+          additionalSourceFailures: [],
+          workspaceSyncSnapshot: null,
+          restoreWorkspace: async () => {},
+        };
+      },
+    );
+    return captured;
+  }
+
+  async function listRelative(dir: string, relative = ""): Promise<string[]> {
+    const entries = await fs.readdir(path.join(dir, relative), { withFileTypes: true });
+    const out: string[] = [];
+    for (const entry of entries) {
+      const next = relative ? `${relative}/${entry.name}` : entry.name;
+      out.push(next);
+      if (entry.isDirectory()) out.push(...(await listRelative(dir, next)));
+    }
+    return out.sort();
+  }
+
+  function probeInput(env: Record<string, string>, managedAiConnection?: boolean) {
+    return {
+      ...(managedAiConnection === undefined ? {} : { managedAiConnection }),
+      runId: "run-seed",
+      target: sandboxTarget,
+      cwd: "/home/daytona/paperclip-workspace",
+      companyId: "company-1",
+      env,
+      installCommand: "install-claude",
+      detectCommand: "claude",
+      targetIsRemote: true,
+      targetIsSandbox: true,
+      helloProbeTimeoutSec: 30,
+    };
+  }
+
+  it("never stages the Claude sign-in or .claude.json of a CLAUDE_CONFIG_DIR used as a managed AI connection's seed", async () => {
+    // A managed AI connection's config dir is staged as the seed as-is. When it
+    // names a signed-in Claude config dir (for example the service user's
+    // ~/.claude), its sign-in files and global state file stay on this server.
+    const root = await makeRoot("paperclip-claude-seed-managed-");
+    const configDir = path.join(root, "service-home", ".claude");
+    await writeSignedInClaudeConfigDir(configDir);
+    const captured = captureStagedAssets(root);
+
+    const checks = await prepareSandboxClaudeProbeRuntime(
+      probeInput({ ANTHROPIC_API_KEY: "sk-ant-api03-remote", CLAUDE_CONFIG_DIR: configDir }, true),
+    );
+
+    expect(checks.some((check) => check.code === "claude_managed_config_dir_failed")).toBe(false);
+    const seedAsset = captured.assets.find((asset) => asset.key === "config-seed");
+    expect(seedAsset).toBeDefined();
+    expect(seedAsset?.exclude).toEqual(expect.arrayContaining([".credentials.json", "credentials.json", ".claude.json"]));
+    const staged = await listRelative(captured.stagedDirs["config-seed"]!);
+    expect(staged).toEqual(["backup", "settings.json"]);
+    const archiveText = captured.archives["config-seed"]!.toString("latin1");
+    for (const marker of ["HOSTSIGNIN", "HOSTREFRESH", "HOSTCONSOLE", "HOSTBACKUP", "owner@example.test"]) {
+      expect(archiveText).not.toContain(marker);
+    }
+  });
+
+  it("stages the config seed without following a symbolic link planted in it", async () => {
+    // The seed is a Paperclip-managed dir of regular files. A link planted in it
+    // must not pull the target's content (a host sign-in) into the sandbox.
+    const root = await makeRoot("paperclip-claude-seed-symlink-");
+    const hostConfigDir = path.join(root, "service-home", ".claude");
+    await writeSignedInClaudeConfigDir(hostConfigDir);
+    const seedDir = path.join(root, "managed-ai-home", "provider");
+    await fs.mkdir(seedDir, { recursive: true });
+    await fs.symlink(path.join(hostConfigDir, ".credentials.json"), path.join(seedDir, "notes.md"));
+    await fs.symlink(hostConfigDir, path.join(seedDir, "linked-config"));
+    const captured = captureStagedAssets(root);
+
+    await prepareSandboxClaudeProbeRuntime(
+      probeInput({ ANTHROPIC_API_KEY: "sk-ant-api03-remote", CLAUDE_CONFIG_DIR: seedDir }, true),
+    );
+
+    const seedAsset = captured.assets.find((asset) => asset.key === "config-seed");
+    expect(seedAsset?.followSymlinks).toBe(false);
+    const archiveText = captured.archives["config-seed"]!.toString("latin1");
+    for (const marker of ["HOSTSIGNIN", "HOSTREFRESH", "HOSTCONSOLE", "HOSTBACKUP", "theme"]) {
+      expect(archiveText).not.toContain(marker);
+    }
+    const stagedLink = await fs.lstat(path.join(captured.stagedDirs["config-seed"]!, "notes.md"));
+    expect(stagedLink.isSymbolicLink()).toBe(true);
+  });
+
+  it("stages the sanitized managed seed with the same sign-in excludes and no link following", async () => {
+    const root = await makeRoot("paperclip-claude-seed-default-");
+    const sourceDir = path.join(root, "service-home", ".claude");
+    await writeSignedInClaudeConfigDir(sourceDir);
+    process.env.CLAUDE_CONFIG_DIR = sourceDir;
+    const captured = captureStagedAssets(root);
+
+    const checks = await prepareSandboxClaudeProbeRuntime(probeInput({ ANTHROPIC_API_KEY: "sk-ant-api03-remote" }));
+
+    expect(checks.some((check) => check.code === "claude_managed_config_dir")).toBe(true);
+    const seedAsset = captured.assets.find((asset) => asset.key === "config-seed");
+    expect(seedAsset).toMatchObject({ followSymlinks: false });
+    expect(seedAsset?.exclude).toEqual(expect.arrayContaining([".credentials.json", "credentials.json", ".claude.json"]));
+    expect(await listRelative(captured.stagedDirs["config-seed"]!)).toEqual(["settings.json"]);
   });
 });

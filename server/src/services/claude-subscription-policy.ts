@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import {
   activityLog,
   agentApiKeys,
@@ -239,21 +239,48 @@ function readString(value: unknown): string | null {
 }
 
 /**
+ * How long before its created_at a task bridge key already counts as held,
+ * where a key is bounded by its creation. A key's created_at comes from the
+ * database clock, while a routine run's triggered_at and a routine revision's
+ * created_at come from the server clock, so a skew between the two must not
+ * make a bridge action look older than the key. Five minutes is the usual clock
+ * skew tolerance (Kerberos uses the same); an agent's routine written within
+ * five minutes before it got a task bridge key is refused like a later one.
+ */
+const TASK_BRIDGE_KEY_CLOCK_SKEW_MS = 5 * 60_000;
+
+/**
  * Whether any of the agents held a task bridge key that was not revoked at the
  * time given with it. A wake, or an activity row, names the agent, not the key
  * it used, so every agent action at such a time may have come from the bridge.
+ *
+ * With `fromCreation`, a key also counts only from its creation (less
+ * TASK_BRIDGE_KEY_CLOCK_SKEW_MS): an action before the key existed cannot have
+ * used it, and a key's scope cannot change after it is created, so its
+ * created_at is when the agent started holding a task bridge key. The routine
+ * checks need this, since they test old times (when a routine, revision or
+ * trigger was written, or a run started); without it, a routine an agent wrote
+ * months before the owner gave it a task bridge key would be refused forever.
+ * The wake rule does not use it: a wake is recent when its run starts, so the
+ * bound could only matter for a wake requested moments before the key was
+ * created, where clock skew makes it unreliable, and there it fails closed.
  */
 async function agentsHeldTaskBridgeKey(
   db: Db,
   companyId: string,
   checks: Array<{ agentId: string | null; at: Date }>,
+  options: { fromCreation: boolean },
 ): Promise<boolean> {
   const valid = checks.filter((check): check is { agentId: string; at: Date } =>
     typeof check.agentId === "string" && UUID_RE.test(check.agentId),
   );
   if (valid.length === 0) return false;
   const bridgeKeys = await db
-    .select({ agentId: agentApiKeys.agentId, revokedAt: agentApiKeys.revokedAt })
+    .select({
+      agentId: agentApiKeys.agentId,
+      createdAt: agentApiKeys.createdAt,
+      revokedAt: agentApiKeys.revokedAt,
+    })
     .from(agentApiKeys)
     .where(
       and(
@@ -263,11 +290,19 @@ async function agentsHeldTaskBridgeKey(
       ),
     );
   return valid.some((check) =>
-    bridgeKeys.some((key) => key.agentId === check.agentId && (!key.revokedAt || key.revokedAt > check.at)),
+    bridgeKeys.some(
+      (key) =>
+        key.agentId === check.agentId &&
+        (!key.revokedAt || key.revokedAt > check.at) &&
+        (!options.fromCreation || key.createdAt.getTime() - TASK_BRIDGE_KEY_CLOCK_SKEW_MS <= check.at.getTime()),
+    ),
   );
 }
 
-/** Whether any agent of the company held a task bridge key that was not revoked at `at`. */
+/**
+ * Whether any agent of the company held a task bridge key at `at`: created by
+ * then (less TASK_BRIDGE_KEY_CLOCK_SKEW_MS) and not revoked.
+ */
 async function companyHeldTaskBridgeKey(db: Db, companyId: string, at: Date): Promise<boolean> {
   const rows = await db
     .select({ id: agentApiKeys.id })
@@ -276,6 +311,7 @@ async function companyHeldTaskBridgeKey(db: Db, companyId: string, at: Date): Pr
       and(
         eq(agentApiKeys.companyId, companyId),
         sql`${agentApiKeys.scopeConfig}->>'kind' = ${TASK_BRIDGE_KEY_SCOPE_KIND}`,
+        lte(agentApiKeys.createdAt, new Date(at.getTime() + TASK_BRIDGE_KEY_CLOCK_SKEW_MS)),
         or(isNull(agentApiKeys.revokedAt), gt(agentApiKeys.revokedAt, at)),
       ),
     )
@@ -303,6 +339,12 @@ async function companyHeldTaskBridgeKey(db: Db, companyId: string, at: Date): Pr
  * - an agent that held a live task bridge key created the routine, edited it
  *   (any revision), or created the trigger that fired it, for every run no
  *   user started, including scheduled runs after the owner reassigned it.
+ * "Held a live task bridge key" is checked at the time of the run, activity
+ * row, routine, revision or trigger, counting a key from its creation, so an
+ * agent's routine from before it got the key stays the owner's. Every later
+ * edit of a routine or its triggers (update, trigger create, update, delete,
+ * secret rotation) appends a revision, so a bridge edit of an older routine is
+ * still seen.
  */
 async function routineRunMayComeFromTaskBridge(
   db: Db,
@@ -346,7 +388,7 @@ async function routineRunMayComeFromTaskBridge(
       .filter((row) => row.actorType === "agent")
       .map((row) => ({ agentId: row.agentId ?? row.actorId, at: row.createdAt })),
   ];
-  if (await agentsHeldTaskBridgeKey(db, companyId, triggerAgents)) return true;
+  if (await agentsHeldTaskBridgeKey(db, companyId, triggerAgents, { fromCreation: true })) return true;
   if (userStarted) return false;
 
   const startedBySomeone = triggerAgents.length > 0;
@@ -382,7 +424,9 @@ async function routineRunMayComeFromTaskBridge(
           .where(and(eq(routineTriggers.companyId, companyId), eq(routineTriggers.id, routineRun.triggerId)))
       : Promise.resolve([]),
   ]);
-  return agentsHeldTaskBridgeKey(db, companyId, [...routineAuthors, ...revisionAuthors, ...triggerAuthors]);
+  return agentsHeldTaskBridgeKey(db, companyId, [...routineAuthors, ...revisionAuthors, ...triggerAuthors], {
+    fromCreation: true,
+  });
 }
 
 interface WakeRequestFacts {
@@ -732,7 +776,9 @@ export async function resolveClaudeSubscriptionTriggerViolation(
   const agentWakes = wakes
     .filter((wake) => wake.requestedByActorType === "agent")
     .map((wake) => ({ agentId: wake.requestedByActorId, at: wake.requestedAt }));
-  if (await agentsHeldTaskBridgeKey(db, input.run.companyId, agentWakes)) return violation("task_bridge");
+  if (await agentsHeldTaskBridgeKey(db, input.run.companyId, agentWakes, { fromCreation: false })) {
+    return violation("task_bridge");
+  }
 
   // The origin of the run's task. A plugin's task, an email conversation, a
   // chat conversation an unlinked person started, a task a routine's public

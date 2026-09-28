@@ -41,6 +41,11 @@ Such an agent follows the Claude subscription rules of the
 [`claude_local` adapter](/adapters/claude-local): the server owner only, only
 wakes the owner drives, and only the `api.anthropic.com` endpoint.
 
+Paperclip applies an `env` wrapper the way `env` does: `env -i` or
+`env -u ANTHROPIC_API_KEY claude` drops a server-env API key, so that run uses
+the sign-in and gets these rules. An endpoint key in the agent env or in a
+wrapper's `NAME=VALUE` is refused even when a wrapper flag clears it.
+
 ## Example
 
 An agent that runs a Python script:

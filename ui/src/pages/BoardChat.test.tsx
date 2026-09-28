@@ -25,6 +25,9 @@ const mockIssuesApi = vi.hoisted(() => ({
   listFeedbackVotes: vi.fn(),
 }));
 const mockDialogState = vi.hoisted(() => ({ onboardingOpen: false }));
+const mockComposer = vi.hoisted(() => ({
+  props: null as null | { onChange: (value: string) => void; onSubmit: () => void },
+}));
 
 vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
 vi.mock("../api/goals", () => ({ goalsApi: mockGoalsApi }));
@@ -53,7 +56,8 @@ vi.mock("../components/MarkdownBody", () => ({
   MarkdownBody: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 vi.mock("../components/ChatComposer", () => ({
-  ChatComposer: forwardRef((_props, ref) => {
+  ChatComposer: forwardRef((props, ref) => {
+    mockComposer.props = props as typeof mockComposer.props;
     useImperativeHandle(ref, () => ({ focus: vi.fn() }));
     return <div data-testid="chat-composer" />;
   }),
@@ -226,6 +230,57 @@ describe("BoardChat staged typing intro", () => {
     // Fast-forwarded: no dots, welcome immediately, no timer needed.
     expect(hasTypingDots(container)).toBe(false);
     expect(hasWelcome(container)).toBe(true);
+  });
+
+  async function sendThroughComposer(text: string) {
+    await act(async () => {
+      mockComposer.props!.onChange(text);
+    });
+    await act(async () => {
+      mockComposer.props!.onSubmit();
+    });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    }
+  }
+
+  it("shows the server's reason when the board chat stream is refused", async () => {
+    // A 4xx carries an `error` the owner can act on, such as a refused Claude
+    // endpoint in the server env (fork policy, CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED).
+    const refusal = "The Claude sign-in only goes to api.anthropic.com: SSL_CERT_FILE is set in the Paperclip server env.";
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 403,
+      body: null,
+      json: async () => ({ error: refusal, code: "CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    mockIssuesApi.listComments.mockResolvedValue([USER_COMMENT]);
+    await render();
+
+    await sendThroughComposer("Hello");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(refusal);
+  });
+
+  it("keeps the generic notice for a server error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      body: null,
+      json: async () => ({ error: "Internal server error" }),
+    })));
+    mockIssuesApi.listComments.mockResolvedValue([USER_COMMENT]);
+    await render();
+
+    await sendThroughComposer("Hello");
+
+    const alert = container.querySelector('[role="alert"]')?.textContent ?? "";
+    expect(alert).toContain("The board assistant is unavailable right now");
+    expect(alert).not.toContain("Internal server error");
   });
 
   it("holds the dots while the onboarding wizard overlay is open (PAP-134)", async () => {

@@ -3111,7 +3111,13 @@ export function agentRoutes(
         responsibleUserId: responsibleUserForAiRequest(req),
       });
       if (aiBinding && req.body.testCredentials && Object.keys(req.body.testCredentials).length) throw unprocessable("A managed connection test cannot override its credentials");
-      const inputAdapterConfig = aiBinding ? { ...req.body.adapterConfig, env: stripAiAuthBindings(req.body.adapterConfig?.env) } : (req.body?.adapterConfig ?? {}) as Record<string, unknown>;
+      // Only prepareManagedAiRuntime (below) marks a config as a managed AI
+      // connection. A caller-supplied marker would make the adapter trust the
+      // caller's CLAUDE_CONFIG_DIR as the managed credential home and stage it
+      // into a sandbox, so it is dropped here.
+      const requestAdapterConfig: Record<string, unknown> = { ...parseObject(req.body?.adapterConfig) };
+      delete requestAdapterConfig.managedAiConnection;
+      const inputAdapterConfig = aiBinding ? { ...requestAdapterConfig, env: stripAiAuthBindings(requestAdapterConfig.env) } : requestAdapterConfig;
       const savedAgentId = typeof req.body.agentId === "string" ? req.body.agentId : null;
       const savedAgent = savedAgentId
         ? await getAccessibleResource(req, res, svc.getById(savedAgentId), "Agent not found")

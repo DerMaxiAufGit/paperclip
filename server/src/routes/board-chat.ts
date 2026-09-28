@@ -1,11 +1,16 @@
 import { Router } from "express";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  isClaudeSubscriptionLaneRun,
+  resolveClaudeSubscriptionEndpointViolation,
+} from "@paperclipai/adapter-claude-local/server";
 import type { Db } from "@paperclipai/db";
 import type { DeploymentMode } from "@paperclipai/shared";
 import { isClaudeSubscriptionTokenEnvEntry } from "@paperclipai/shared";
+import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { instanceSettingsService, issueService } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
@@ -62,6 +67,44 @@ export function isConciergeReply(comment: {
 
 /** Max simultaneous `claude` subprocesses across all board-chat requests. */
 const MAX_CONCURRENT_BOARD_CHATS = 3;
+
+/**
+ * Fork policy (doc/plans/2026-09-24-claude-cli-only-auth.md): the relay runs
+ * the `claude` CLI on the operator's own Claude sign-in with permissions
+ * skipped. In a shared cwd such as /tmp, any OS user could plant a project
+ * `.claude/settings.json` (an `ANTHROPIC_BASE_URL` that receives the sign-in's
+ * bearer token), a `.mcp.json` or a `CLAUDE.md` for it. So each request runs
+ * in its own 0700 dir under the instance root, whose parents the operator
+ * owns, and the CLI loads only the operator's user settings and no MCP
+ * servers. Sessions are not persisted, so the per-request dirs leave no
+ * project entries behind in the operator's Claude config dir.
+ */
+const BOARD_CHAT_CLAUDE_ISOLATION_ARGS = [
+  "--setting-sources",
+  "user",
+  "--strict-mcp-config",
+  "--no-session-persistence",
+];
+
+/** A fresh private (0700, from mkdtemp) working dir for one board chat request. */
+async function createBoardChatWorkDir(): Promise<string> {
+  const parent = path.join(resolvePaperclipInstanceRoot(), "board-chat");
+  await fs.promises.mkdir(parent, { recursive: true, mode: 0o700 });
+  return fs.promises.mkdtemp(path.join(parent, "chat-"));
+}
+
+/**
+ * The claude-local subscription endpoint check, run on the relay's whole child
+ * env: without an API credential the CLI sends the operator's sign-in to
+ * whatever endpoint that env names. The only keys the relay adds are
+ * `PAPERCLIP_*`, so a finding always comes from the server's own env.
+ */
+function boardChatEndpointViolation(childEnv: NodeJS.ProcessEnv): string | null {
+  const config = { env: childEnv };
+  if (!isClaudeSubscriptionLaneRun({ config, targetIsRemote: false, hostEnv: {} })) return null;
+  const violation = resolveClaudeSubscriptionEndpointViolation(config);
+  return violation ? violation.replaceAll("the agent env", "the Paperclip server env") : null;
+}
 
 export function boardChatRoutes(
   db: Db,
@@ -140,6 +183,35 @@ export function boardChatRoutes(
     // The body-supplied companyId must belong to the authenticated actor —
     // it scopes issue reads/writes below and is exported to the subprocess.
     assertCompanyAccess(req, companyId);
+
+    // Resolve the API base URL the spawned process should call back into so
+    // the board skill can drive the control plane.
+    const localAddress = req.socket?.localAddress ?? "127.0.0.1";
+    const serverAddr =
+      localAddress === "::" || localAddress === "::1" ? "127.0.0.1" : localAddress;
+    const serverPort = req.socket?.localPort ?? 3100;
+    const apiUrl = `http://${serverAddr}:${serverPort}`;
+
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      PAPERCLIP_API_URL: apiUrl,
+      PAPERCLIP_COMPANY_ID: companyId,
+    };
+    // Paperclip never forwards a Claude subscription credential: the `claude`
+    // binary uses the sign-in of the user Paperclip runs as.
+    for (const [key, value] of Object.entries(childEnv)) {
+      if (isClaudeSubscriptionTokenEnvEntry(key, value)) delete childEnv[key];
+    }
+    // That sign-in only ever goes to api.anthropic.com. Refuse before anything
+    // is persisted or spawned.
+    const endpointViolation = boardChatEndpointViolation(childEnv);
+    if (endpointViolation) {
+      res.status(403).json({
+        error: endpointViolation,
+        code: "CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED",
+      });
+      return;
+    }
 
     // Back-pressure: each request holds a subprocess + SSE stream for up to
     // 2 minutes; cap simultaneous spawns instead of forking without bound.
@@ -221,14 +293,6 @@ export function boardChatRoutes(
     res.flushHeaders();
     res.write(`data: ${JSON.stringify({ type: "start", issueId: resolvedIssueId })}\n\n`);
 
-    // Resolve the API base URL the spawned process should call back into so
-    // the board skill can drive the control plane.
-    const localAddress = req.socket?.localAddress ?? "127.0.0.1";
-    const serverAddr =
-      localAddress === "::" || localAddress === "::1" ? "127.0.0.1" : localAddress;
-    const serverPort = req.socket?.localPort ?? 3100;
-    const apiUrl = `http://${serverAddr}:${serverPort}`;
-
     const args = [
       "-p",
       "-",
@@ -243,7 +307,33 @@ export function boardChatRoutes(
       "--model",
       "sonnet",
       "--dangerously-skip-permissions",
+      ...BOARD_CHAT_CLAUDE_ISOLATION_ARGS,
     ];
+
+    let workDir: string;
+    try {
+      workDir = await createBoardChatWorkDir();
+    } catch (err) {
+      console.error("[board/chat/stream workdir error]", err);
+      if (res.writable) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: "error",
+            message: "Could not create a private working directory for the board assistant.",
+          })}\n\n`,
+        );
+        res.end();
+      }
+      return;
+    }
+    let workDirRemoved = false;
+    const removeWorkDir = () => {
+      if (workDirRemoved) return;
+      workDirRemoved = true;
+      fs.promises.rm(workDir, { recursive: true, force: true }).catch((err) => {
+        console.error("[board/chat/stream workdir cleanup error]", err);
+      });
+    };
 
     liveBoardChats += 1;
     let slotReleased = false;
@@ -253,21 +343,33 @@ export function boardChatRoutes(
       liveBoardChats -= 1;
     };
 
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      PAPERCLIP_API_URL: apiUrl,
-      PAPERCLIP_COMPANY_ID: companyId,
+    const writeStartError = () => {
+      if (res.writable) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: "error",
+            message:
+              "Could not start the board assistant. Is the `claude` CLI installed and on PATH?",
+          })}\n\n`,
+        );
+        res.end();
+      }
     };
-    // Paperclip never forwards a Claude subscription credential: the `claude`
-    // binary uses the sign-in of the user Paperclip runs as.
-    for (const [key, value] of Object.entries(childEnv)) {
-      if (isClaudeSubscriptionTokenEnvEntry(key, value)) delete childEnv[key];
+
+    let proc: ChildProcessWithoutNullStreams;
+    try {
+      proc = spawn("claude", args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        cwd: workDir,
+        env: childEnv,
+      });
+    } catch (err) {
+      releaseSlot();
+      removeWorkDir();
+      console.error("[board/chat/stream spawn error]", err);
+      writeStartError();
+      return;
     }
-    const proc = spawn("claude", args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: "/tmp",
-      env: childEnv,
-    });
 
     let fullResponse = "";
     let streamedViaDelta = false;
@@ -365,6 +467,7 @@ export function boardChatRoutes(
     proc.on("close", async (exitCode) => {
       clearTimeout(timeout);
       releaseSlot();
+      removeWorkDir();
 
       // Persist the board's reply under the "board-concierge" sentinel so the
       // UI renders it as an assistant bubble (see BoardChat `isUser` check).
@@ -395,17 +498,9 @@ export function boardChatRoutes(
     proc.on("error", (err) => {
       clearTimeout(timeout);
       releaseSlot();
+      removeWorkDir();
       console.error("[board/chat/stream spawn error]", err);
-      if (res.writable) {
-        res.write(
-          `data: ${JSON.stringify({
-            type: "error",
-            message:
-              "Could not start the board assistant. Is the `claude` CLI installed and on PATH?",
-          })}\n\n`,
-        );
-        res.end();
-      }
+      writeStartError();
     });
 
     // Feed the prompt to the CLI via stdin.

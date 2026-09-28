@@ -1,7 +1,10 @@
 import express from "express";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockGetExperimental = vi.hoisted(() => vi.fn());
 const mockIssueService = vi.hoisted(() => ({
@@ -17,7 +20,12 @@ vi.mock("../services/index.js", () => ({
   issueService: () => mockIssueService,
 }));
 
-vi.mock("node:child_process", () => ({ spawn: mockSpawn }));
+// Only `spawn` is replaced: the claude-local endpoint check the route imports
+// pulls in modules that use the rest of node:child_process.
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  spawn: mockSpawn,
+}));
 
 // assertBoard stays real: the route must refuse non-board actors itself.
 vi.mock("../routes/authz.js", async (importOriginal) => ({
@@ -27,6 +35,64 @@ vi.mock("../routes/authz.js", async (importOriginal) => ({
 }));
 
 const boardActor = { type: "board", userId: "local-board", source: "local_implicit" };
+
+// Env that moves the claude CLI off the owner's sign-in or away from
+// api.anthropic.com. Cleared so the spawn tests do not depend on the machine
+// that runs them; a test sets what it needs.
+const CLAUDE_ROUTING_ENV_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_API_BASE_URL",
+  "ANTHROPIC_UNIX_SOCKET",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_OPTIONS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "LD_PRELOAD",
+  "LD_AUDIT",
+  "BUN_OPTIONS",
+];
+
+const TEST_INSTANCE_ID = "board-chat-test";
+let paperclipHome: string;
+
+beforeEach(() => {
+  paperclipHome = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-board-chat-home-"));
+  vi.stubEnv("PAPERCLIP_HOME", paperclipHome);
+  vi.stubEnv("PAPERCLIP_INSTANCE_ID", TEST_INSTANCE_ID);
+  for (const key of CLAUDE_ROUTING_ENV_KEYS) vi.stubEnv(key, undefined);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  fs.rmSync(paperclipHome, { recursive: true, force: true });
+});
+
+function makeFakeProc() {
+  const proc = new EventEmitter() as any;
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  proc.stdin = { write: vi.fn(), end: vi.fn() };
+  proc.exitCode = null;
+  proc.killed = false;
+  proc.kill = vi.fn(() => {
+    proc.killed = true;
+  });
+  return proc;
+}
+
+function mockStandingIssue() {
+  mockIssueService.list.mockResolvedValue([
+    { id: "issue-1", title: "Board Operations", status: "todo" },
+  ]);
+  mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
+  mockIssueService.listComments.mockResolvedValue([]);
+}
 
 async function createApp(
   deploymentMode: "local_trusted" | "authenticated" = "local_trusted",
@@ -119,26 +185,9 @@ describe("POST /api/board/chat/stream feature flag guard (PAP-137)", () => {
 });
 
 describe("board-chat client disconnect", () => {
-  function makeFakeProc() {
-    const proc = new EventEmitter() as any;
-    proc.stdout = new EventEmitter();
-    proc.stderr = new EventEmitter();
-    proc.stdin = { write: vi.fn(), end: vi.fn() };
-    proc.exitCode = null;
-    proc.killed = false;
-    proc.kill = vi.fn(() => {
-      proc.killed = true;
-    });
-    return proc;
-  }
-
   it("kills the spawned subprocess when the client disconnects mid-stream", async () => {
     mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
-    mockIssueService.list.mockResolvedValue([
-      { id: "issue-1", title: "Board Operations", status: "todo" },
-    ]);
-    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
-    mockIssueService.listComments.mockResolvedValue([]);
+    mockStandingIssue();
     const fakeProc = makeFakeProc();
     mockSpawn.mockReturnValue(fakeProc);
     const app = await createApp();
@@ -163,6 +212,135 @@ describe("board-chat client disconnect", () => {
     fakeProc.exitCode = 143;
     fakeProc.emit("close", 143);
     await pending;
+  });
+});
+
+describe("board-chat claude CLI isolation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
+    mockStandingIssue();
+  });
+
+  function startChat(app: express.Express) {
+    const req = request(app)
+      .post("/api/board/chat/stream")
+      .send({ companyId: "company-1", message: "hello" });
+    return req.then(
+      (res) => res,
+      () => undefined,
+    );
+  }
+
+  it("runs claude in a private per-request dir under the instance root, with user settings only and no MCP servers, and removes the dir afterwards", async () => {
+    const fakeProc = makeFakeProc();
+    let cwdAtSpawn: { isDirectory: boolean; mode: number; entries: string[] } | null = null;
+    mockSpawn.mockImplementation((_command: string, _args: string[], options: { cwd: string }) => {
+      const stat = fs.statSync(options.cwd);
+      cwdAtSpawn = {
+        isDirectory: stat.isDirectory(),
+        mode: stat.mode & 0o777,
+        entries: fs.readdirSync(options.cwd),
+      };
+      return fakeProc;
+    });
+    const app = await createApp();
+
+    const pending = startChat(app);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    const [command, args, options] = mockSpawn.mock.calls[0]!;
+    expect(command).toBe("claude");
+    // A shared dir such as /tmp lets any OS user plant .claude/settings.json,
+    // .mcp.json or CLAUDE.md for a CLI that runs on the owner's sign-in.
+    const instanceRoot = path.join(paperclipHome, "instances", TEST_INSTANCE_ID);
+    const relativeToInstance = path.relative(instanceRoot, options.cwd);
+    expect(options.cwd).not.toBe("/tmp");
+    expect(relativeToInstance).not.toBe("");
+    expect(relativeToInstance.startsWith("..")).toBe(false);
+    expect(path.isAbsolute(relativeToInstance)).toBe(false);
+    expect(cwdAtSpawn).toEqual({ isDirectory: true, mode: 0o700, entries: [] });
+    expect(args[args.indexOf("--setting-sources") + 1]).toBe("user");
+    expect(args).toContain("--strict-mcp-config");
+    expect(options.env.PAPERCLIP_COMPANY_ID).toBe("company-1");
+
+    fakeProc.exitCode = 0;
+    fakeProc.emit("close", 0);
+    await vi.waitFor(() => expect(fs.existsSync(options.cwd)).toBe(false));
+    const res = await pending;
+    expect(res?.status).toBe(200);
+  });
+
+  it("gives each request its own dir and removes it when claude cannot start", async () => {
+    const procs = [makeFakeProc(), makeFakeProc()];
+    mockSpawn.mockReturnValueOnce(procs[0]).mockReturnValueOnce(procs[1]);
+    const app = await createApp();
+
+    const first = startChat(app);
+    const second = startChat(app);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
+    const firstCwd = mockSpawn.mock.calls[0]![2].cwd as string;
+    const secondCwd = mockSpawn.mock.calls[1]![2].cwd as string;
+    expect(firstCwd).not.toBe(secondCwd);
+
+    const spawnError = Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    procs[0].emit("error", spawnError);
+    procs[1].emit("error", spawnError);
+    await vi.waitFor(() => {
+      expect(fs.existsSync(firstCwd)).toBe(false);
+      expect(fs.existsSync(secondCwd)).toBe(false);
+    });
+    await Promise.all([first, second]);
+    consoleError.mockRestore();
+  });
+
+  it("refuses before spawning when the server env would send the owner's sign-in away from api.anthropic.com", async () => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/board/chat/stream")
+      .send({ companyId: "company-1", message: "hello" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED");
+    expect(res.body.error).toContain("api.anthropic.com");
+    expect(res.body.error).toContain("ANTHROPIC_BASE_URL");
+    expect(res.body.error).toContain("Paperclip server env");
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
+  it("refuses before spawning when the server env lets another program read the claude CLI's requests", async () => {
+    vi.stubEnv("NODE_EXTRA_CA_CERTS", "/etc/ssl/proxy-ca.pem");
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/board/chat/stream")
+      .send({ companyId: "company-1", message: "hello" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED");
+    expect(res.body.error).toContain("NODE_EXTRA_CA_CERTS");
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("keeps a custom endpoint when the server env bills an Anthropic API key", async () => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-api03-test");
+    const fakeProc = makeFakeProc();
+    mockSpawn.mockReturnValue(fakeProc);
+    const app = await createApp();
+
+    const pending = startChat(app);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+    expect(mockSpawn.mock.calls[0]![2].env.ANTHROPIC_BASE_URL).toBe("https://proxy.example.test");
+
+    fakeProc.exitCode = 0;
+    fakeProc.emit("close", 0);
+    const res = await pending;
+    expect(res?.status).toBe(200);
   });
 });
 

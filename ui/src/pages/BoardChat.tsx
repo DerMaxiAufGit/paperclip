@@ -53,6 +53,9 @@ const BOARD_CHAT_MARKDOWN_CLASS =
 const boardChatBubbleShell =
   "min-w-0 max-w-(--pct-85) break-words px-3 py-2 text-sm overflow-x-auto overflow-y-visible";
 
+/** A 4xx from the board chat stream route, carrying the server's reason. */
+class BoardChatRefusedError extends Error {}
+
 /** First-letter(s) fallback for an agent with no icon. */
 function agentInitials(name: string): string {
   const parts = name.trim().split(/\s+/);
@@ -560,6 +563,13 @@ export function BoardChat() {
         clearTimeout(fetchTimeout);
 
         if (!res.ok || !res.body) {
+          // A 4xx names a reason the operator can act on (feature off, wrong
+          // deployment mode, a refused Claude endpoint in the server env).
+          if (res.status >= 400 && res.status < 500) {
+            const payload = (await res.json().catch(() => null)) as { error?: unknown } | null;
+            const reason = typeof payload?.error === "string" ? payload.error.trim() : "";
+            if (reason) throw new BoardChatRefusedError(reason);
+          }
           throw new Error("Board chat stream not available");
         }
 
@@ -621,7 +631,9 @@ export function BoardChat() {
         console.error("Board chat error:", err);
         setStatusText("");
         setErrorText(
-          "The board assistant is unavailable right now. Please try again in a moment.",
+          err instanceof BoardChatRefusedError
+            ? err.message
+            : "The board assistant is unavailable right now. Please try again in a moment.",
         );
       } finally {
         setSending(false);

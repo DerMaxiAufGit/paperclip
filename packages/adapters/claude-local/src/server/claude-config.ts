@@ -8,18 +8,52 @@ import type {
   AdapterRuntimeMcpServer,
 } from "@paperclipai/adapter-utils";
 import {
+  CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
+  CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+} from "@paperclipai/adapter-utils/claude-config-credential-excludes";
+import {
   adapterExecutionTargetUsesManagedHome,
   maybeRunSandboxInstallCommand,
   prepareAdapterExecutionTargetRuntime,
   runAdapterExecutionTargetShellCommand,
   type AdapterExecutionTarget,
   type AdapterExecutionTargetShellOptions,
+  type AdapterManagedRuntimeAsset,
 } from "@paperclipai/adapter-utils/execution-target";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { classifyThrownErrorClass, logSandboxProbeDiagnostic } from "./probe-diagnostics.js";
 
 const SEEDED_SHARED_FILES = ["settings.json", "CLAUDE.md"] as const;
+
+/**
+ * Entries a Claude config seed never carries to a remote target: the Claude
+ * sign-in files and `.claude.json` (the signed-in account, possibly a Console
+ * API key). tar matches a plain entry at any depth of the seed.
+ */
+export const CLAUDE_CONFIG_SEED_EXCLUDES: readonly string[] = [
+  ...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
+  CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+];
+
+/**
+ * The `config-seed` runtime asset for a remote target. Fork policy: a remote
+ * target runs only with an API key, so whatever dir the seed comes from (the
+ * sanitized managed snapshot, or a managed AI connection's config dir) its
+ * Claude sign-in files and `.claude.json` stay on this server. The seed is a
+ * Paperclip-managed dir of regular files, so staging never follows a symbolic
+ * link: a link planted in it cannot pull a host file (such as
+ * `~/.claude/.credentials.json`) into the sandbox.
+ * See doc/plans/2026-09-24-claude-cli-only-auth.md.
+ */
+export function claudeConfigSeedAsset(localDir: string): AdapterManagedRuntimeAsset {
+  return {
+    key: "config-seed",
+    localDir,
+    followSymlinks: false,
+    exclude: [...CLAUDE_CONFIG_SEED_EXCLUDES],
+  };
+}
 
 /**
  * Claude Code settings keys that can supply or produce credentials. They are
@@ -326,13 +360,7 @@ export async function prepareSandboxClaudeProbeRuntime(input: {
         workspaceLocalDir: tempWorkspaceDir,
         workspaceRemoteDir: managedRemoteCwd,
         timeoutSec: Math.max(1, input.helloProbeTimeoutSec),
-        assets: [
-          {
-            key: "config-seed",
-            localDir: seedDir,
-            followSymlinks: true,
-          },
-        ],
+        assets: [claudeConfigSeedAsset(seedDir)],
       });
       const runtimeRootDir =
         preparedRuntime.runtimeRootDir ??

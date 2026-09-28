@@ -1604,6 +1604,242 @@ describeEmbeddedPostgres("Claude subscription owner-only and trigger-source gate
     ).resolves.toMatchObject({ kind: "task_bridge" });
   });
 
+  it("counts a task bridge key for routine runs only from when it was created", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const day = 24 * 60 * 60_000;
+    const now = Date.now();
+    const ago = (ms: number) => new Date(now - ms);
+    async function insertAgent(name: string) {
+      const id = randomUUID();
+      await db.insert(agents).values({
+        id,
+        companyId,
+        name,
+        role: "engineer",
+        status: "idle",
+        adapterType: "hermes_gateway",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      return id;
+    }
+    async function insertBridgeKey(agentIdForKey: string, createdAt: Date, revokedAt: Date | null = null) {
+      await db.insert(agentApiKeys).values({
+        agentId: agentIdForKey,
+        companyId,
+        name: "bridge",
+        keyHash: `hash-${randomUUID()}`,
+        scopeConfig: { kind: "task_bridge", projectId: randomUUID() } as never,
+        createdAt,
+        revokedAt,
+      });
+    }
+    // The owner gave the agent a task bridge key ten days ago; another agent
+    // held one from 100 to 50 days ago.
+    const bridgeAgentId = await insertAgent("Hermes bridge");
+    const bridgeKeyCreatedAt = ago(10 * day);
+    await insertBridgeKey(bridgeAgentId, bridgeKeyCreatedAt);
+    const formerBridgeAgentId = await insertAgent("Former bridge");
+    await insertBridgeKey(formerBridgeAgentId, ago(100 * day), ago(50 * day));
+
+    async function insertRoutine(input: { createdByAgentId?: string; createdAt: Date }) {
+      const id = randomUUID();
+      await db.insert(routines).values({
+        id,
+        companyId,
+        title: "Routine",
+        assigneeAgentId: agentId,
+        createdByAgentId: input.createdByAgentId ?? null,
+        createdByUserId: input.createdByAgentId ? null : "owner",
+        createdAt: input.createdAt,
+      });
+      return id;
+    }
+    let revisionNumber = 1;
+    async function insertRevision(routineId: string, createdByAgentId: string, createdAt: Date) {
+      await db.insert(routineRevisions).values({
+        companyId,
+        routineId,
+        revisionNumber: revisionNumber++,
+        title: "Routine",
+        snapshot: {} as never,
+        createdByAgentId,
+        createdAt,
+      });
+    }
+    async function routineDispatch(input: {
+      routineId: string;
+      source: "manual" | "schedule" | "api";
+      triggeredAt?: Date;
+      triggerId?: string;
+      createdByAgentId?: string;
+      trigger?: { agentId: string; at: Date };
+    }) {
+      const routineRunId = randomUUID();
+      await db.insert(routineRuns).values({
+        id: routineRunId,
+        companyId,
+        routineId: input.routineId,
+        triggerId: input.triggerId ?? null,
+        source: input.source,
+        triggeredAt: input.triggeredAt ?? new Date(),
+      });
+      const issueId = randomUUID();
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: `Routine ${input.source}`,
+        status: "todo",
+        assigneeAgentId: agentId,
+        originKind: "routine_execution",
+        originId: input.routineId,
+        originRunId: routineRunId,
+        originFingerprint: randomUUID(),
+        createdByAgentId: input.createdByAgentId ?? null,
+      } as never);
+      if (input.trigger) {
+        await db.insert(activityLog).values({
+          companyId,
+          actorType: "agent",
+          actorId: input.trigger.agentId,
+          agentId: input.trigger.agentId,
+          action: "routine.run_triggered",
+          entityType: "routine_run",
+          entityId: routineRunId,
+          details: { routineId: input.routineId, source: input.source, status: "issue_created" },
+          createdAt: input.trigger.at,
+        });
+      }
+      const runId = randomUUID();
+      await wake({
+        companyId,
+        agentId,
+        runId,
+        requestedByActorType: "system",
+        requestedByActorId: "recovery",
+        payload: { issueId, mutation: "create" },
+      });
+      return resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: runId, companyId, contextSnapshot: { issueId, source: "routine.dispatch" } },
+        issueId,
+      });
+    }
+
+    // A routine the agent created, edited, or scheduled long before it got a
+    // task bridge key keeps running on schedule.
+    const earlyRoutineId = await insertRoutine({ createdByAgentId: bridgeAgentId, createdAt: ago(200 * day) });
+    await insertRevision(earlyRoutineId, bridgeAgentId, ago(200 * day));
+    const earlyTriggerId = randomUUID();
+    await db.insert(routineTriggers).values({
+      id: earlyTriggerId,
+      companyId,
+      routineId: earlyRoutineId,
+      kind: "schedule",
+      cronExpression: "0 * * * *",
+      timezone: "UTC",
+      createdByAgentId: bridgeAgentId,
+      createdAt: ago(200 * day),
+    });
+    await expect(
+      routineDispatch({ routineId: earlyRoutineId, source: "schedule", triggerId: earlyTriggerId }),
+    ).resolves.toBeNull();
+    // So does one another agent authored while it held a key it no longer holds,
+    // before and after that window.
+    await expect(
+      routineDispatch({
+        routineId: await insertRoutine({ createdByAgentId: formerBridgeAgentId, createdAt: ago(200 * day) }),
+        source: "schedule",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      routineDispatch({
+        routineId: await insertRoutine({ createdByAgentId: formerBridgeAgentId, createdAt: ago(20 * day) }),
+        source: "schedule",
+      }),
+    ).resolves.toBeNull();
+    // Runs started before the key existed: a manual run the agent started, an
+    // api run whose trigger row names the agent, and an api run that names no
+    // one (a pipeline stage entry) while some agent now holds a live key.
+    const ownerRoutineId = await insertRoutine({ createdAt: ago(300 * day) });
+    await expect(
+      routineDispatch({
+        routineId: ownerRoutineId,
+        source: "manual",
+        triggeredAt: ago(200 * day),
+        createdByAgentId: bridgeAgentId,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      routineDispatch({
+        routineId: ownerRoutineId,
+        source: "api",
+        triggeredAt: ago(200 * day),
+        trigger: { agentId: bridgeAgentId, at: ago(200 * day) },
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      routineDispatch({ routineId: ownerRoutineId, source: "api", triggeredAt: ago(200 * day) }),
+    ).resolves.toBeNull();
+
+    // Refused: the routine was created, edited or run while the key was live.
+    await expect(
+      routineDispatch({
+        routineId: await insertRoutine({ createdByAgentId: bridgeAgentId, createdAt: ago(day) }),
+        source: "schedule",
+      }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+    await expect(
+      routineDispatch({
+        routineId: await insertRoutine({ createdByAgentId: formerBridgeAgentId, createdAt: ago(75 * day) }),
+        source: "schedule",
+      }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+    const editedRoutineId = await insertRoutine({ createdByAgentId: bridgeAgentId, createdAt: ago(200 * day) });
+    await insertRevision(editedRoutineId, bridgeAgentId, ago(day));
+    await expect(routineDispatch({ routineId: editedRoutineId, source: "schedule" })).resolves.toMatchObject({
+      kind: "task_bridge",
+    });
+    await expect(
+      routineDispatch({ routineId: ownerRoutineId, source: "manual", createdByAgentId: bridgeAgentId }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+    await expect(routineDispatch({ routineId: ownerRoutineId, source: "api" })).resolves.toMatchObject({
+      kind: "task_bridge",
+    });
+    // A key counts from shortly before its created_at, since some of the times
+    // checked against it come from the server clock rather than the database's.
+    await expect(
+      routineDispatch({
+        routineId: await insertRoutine({
+          createdByAgentId: bridgeAgentId,
+          createdAt: new Date(bridgeKeyCreatedAt.getTime() - 60_000),
+        }),
+        source: "schedule",
+      }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+
+    // The wake rule does not bound a key by its creation: an agent-requested
+    // wake is recent when its run starts, so it stays refused.
+    const ownerIssueId = await originIssue({ companyId, agentId, originKind: "manual" });
+    const runId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "assignment",
+      requestedByActorType: "agent",
+      requestedByActorId: bridgeAgentId,
+      payload: { issueId: ownerIssueId, mutation: "update" },
+      runId,
+      requestedAt: ago(11 * day),
+    });
+    await expect(
+      resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: runId, companyId, contextSnapshot: { issueId: ownerIssueId } },
+        issueId: ownerIssueId,
+      }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+  });
+
   it("allows routine runs without a recorded trigger while no task bridge key is live", async () => {
     const { companyId, agentId } = await insertCompany();
     const bridgeAgentId = randomUUID();

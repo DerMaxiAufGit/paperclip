@@ -206,10 +206,17 @@ concurrency cap.
   `subscription_not_allowed`, which the sign-in panel shows as the owner-only
   message without sign-in steps). Board chat runs only on `local_trusted` and
   only for the board; an agent key gets 403 before the `claude` CLI is
-  spawned. The heartbeat treats a run as remote, and so outside both gates,
-  only when its environment driver really gives the adapter a remote execution
-  target: ssh or sandbox, for adapters that support remote managed
-  environments (`claudeSubscriptionTargetIsRemote` in
+  spawned. Board chat runs `claude` in a fresh 0700 folder per request under
+  `<instanceRoot>/board-chat/`, deleted afterwards, with `--setting-sources
+  user --strict-mcp-config --no-session-persistence`, so anything planted in
+  a shared folder such as /tmp (`.claude/settings.json`, `.mcp.json`,
+  `CLAUDE.md`) no longer reaches it. With no API credential, it refuses with
+  403 `CLAUDE_SUBSCRIPTION_ENDPOINT_REFUSED` when the server env fails
+  `resolveClaudeSubscriptionEndpointViolation`; the Conference Room shows the
+  `error` text of any 4xx. The heartbeat treats a run as remote, and so
+  outside both gates, only when its environment driver really gives the
+  adapter a remote execution target: ssh or sandbox, for adapters that
+  support remote managed environments (`claudeSubscriptionTargetIsRemote` in
   `server/src/services/claude-subscription-target.ts`, which mirrors
   `resolveEnvironmentExecutionTarget`). Any other driver, such as a plugin
   environment driver, resolves to no target and runs the adapter on this
@@ -225,10 +232,15 @@ concurrency cap.
   `.exe`/`.cmd`/`.bat`/`.ps1`); `npx`, `pnpx`, `bunx`, `npm`, `pnpm`, `yarn`,
   `bun` or `node` with an argument before `--` (or a `--flag=value` value)
   naming `claude`, `@anthropic-ai/claude-code`, or a file in that package; and
-  `env [flags] [NAME=VALUE]...` in front of either. The gates read the agent
-  env plus the `env` assignments. After an `env` flag such as `-i` or `-u`, a
-  server-env API key does not count. The process config's `engine` and
-  `managedAiConnection` keys are ignored.
+  `env [flags] [NAME=VALUE]...` in front of either. The gates apply the `env`
+  wrappers in order, as `env` does, to the agent env and the server env:
+  `-i`/`-`/`--ignore-environment` drop both, `-u NAME` (also `--unset[=]NAME`,
+  abbreviations, `-iu NAME`) drops NAME from both, then the `NAME=VALUE`
+  assignments apply; an unknown `env` flag counts as `-i`. The endpoint check
+  before spawn reads the agent env plus every assignment, so a redirect key
+  that a wrapper flag clears or unsets still refuses. `env -- NAME=VALUE
+  claude` counts too. The process config's `engine` and `managedAiConnection`
+  keys are ignored.
 - **Trigger-source gate.** Even for the owner,
   `resolveClaudeSubscriptionTriggerViolation` refuses a subscription-lane run
   whose wake came from outside Paperclip (reason
@@ -328,19 +340,29 @@ concurrency cap.
       time (the task's `createdByAgentId` of a manual run, or the agent of the
       `routine.run_triggered` row). The activity row carries the agent but not
       the key (`logActivity` uses `agentApiKeyId` only to find the responsible
-      user), so the rule is the same as the wake rule: the agent held a task
-      bridge key that was not revoked then;
+      user), so the rule is close to the wake rule: the agent held a task
+      bridge key that already existed then (counting from five minutes before
+      its created_at, for clock skew between the database and the server) and
+      was not revoked then;
     - a manual or api run names no user and no agent while some agent of the
-      company held a live task bridge key when the run was triggered. The route
+      company held a live task bridge key when the run was triggered (created
+      by then, less five minutes, and not revoked). The route
       writes `routine.run_triggered` only after the run is queued, so an api
       run can start before its row exists; a pipeline stage entry
       (`runPipelineStageEntryRoutine`, source `api`) writes none. Both fail
       closed in a company with a live task bridge key and pass in one without.
-      A task whose routine run is gone counts as such a run;
+      A task whose routine run is gone counts as such a run. A routine api run
+      triggered before any task bridge key existed stays allowed;
     - an agent that held a live task bridge key created the routine, created
-      any of its revisions, or created the trigger that fired the run. This
-      covers every source, including scheduled runs after the owner reassigned
-      the routine to another agent, because the bridge wrote the routine.
+      any of its revisions, or created the trigger that fired the run, at the
+      time it wrote them. This covers every source, including scheduled runs
+      after the owner reassigned the routine to another agent, because the
+      bridge wrote the routine. A key counts from its created_at (less five
+      minutes) because a key's scope cannot change after it is created. So a
+      routine an agent wrote before the owner gave it a task bridge key stays
+      the owner's. Every later edit of the routine or its triggers (update,
+      trigger create/update/delete, secret rotation, revision restore) appends
+      a revision, so a bridge edit of an older routine is still refused.
 
   Owner-driven wakes stay allowed: assignments and comments by a Paperclip
   user, timers and heartbeats, scheduled routines (unless a task bridge agent
@@ -435,7 +457,9 @@ concurrency cap.
   env and issue overrides. The same rules apply to the `env` of an inline
   `--settings` JSON in `extraArgs`/`args`. Keys match in any case, and an
   unresolved binding under a checked key fails closed. The server's own
-  process env is the operator's and is not checked. The run fails with
+  process env is the operator's and is not checked for claude_local runs;
+  board chat, whose child env is the server env, checks it (see the owner-only
+  bullet). The run fails with
   `adapter_engine_unavailable` before launch; the environment Test reports the
   same message and runs no probe. API-key, gateway (`ANTHROPIC_AUTH_TOKEN`)
   and Bedrock/Vertex/Foundry runs keep custom endpoints. The local Test probe
@@ -506,7 +530,17 @@ concurrency cap.
   config dir inside the workspace (the agent's `CLAUDE_CONFIG_DIR`, the
   server's `CLAUDE_CONFIG_DIR`, `~/.claude`) are excluded from the workspace
   upload and from the sync-back, and the config seed is staged without sign-in
-  files. The SSH transport now honours `workspaceExclude` for its tar upload
+  files. Every `config-seed` asset (the CLI and ACP runs and the sandbox Test
+  probe) goes through `claudeConfigSeedAsset` in `claude-config.ts`: it
+  excludes `.credentials.json`, `credentials.json` and `.claude.json` at any
+  depth and is staged with `followSymlinks: false`, so a link planted in a
+  managed AI connection's config dir cannot pull a host file along (added
+  2026-09-28). Only `prepareManagedAiRuntime` marks a run as a managed AI
+  connection, which is what makes the adapter stage the agent's
+  `CLAUDE_CONFIG_DIR` as the seed: `resolveExecutionRunAdapterConfig` in the
+  heartbeat drops a `managedAiConnection` stored in an agent's adapter config,
+  and the adapter test-environment route drops a caller-supplied one. The SSH
+  transport now honours `workspaceExclude` for its tar upload
   and its restore baseline (matched at any depth, so the restore never reads an
   excluded local file as deleted).
 - **Remote staging never forwards a Claude sign-in, for every adapter.** The
@@ -528,6 +562,11 @@ concurrency cap.
   file) and never copies one created remotely back to the host. Referenced
   projects staged next to the workspace get the same excludes. claude_local
   keeps its own excludes for the agent's explicit `CLAUDE_CONFIG_DIR` on top.
+- **Workspace file browser.** `/issues/:issueId/file-resources/*` denies Claude
+  sign-in files as `denied_secret`: `.credentials.json` and `credentials.json`
+  inside any `.claude` folder, and `.claude.json` at any depth
+  (`workspace-file-resources.ts`). The names are shared with the staging
+  excludes.
 - **Follow-up migration.** `0286_remove_claude_subscription_tokens_from_env.sql`
   removes, from issue assignee overrides and `hire_agent` approval payloads
   (both missed by 0285) and again from agent, environment, project, routine and
@@ -602,8 +641,14 @@ concurrency cap.
 - The task bridge check cannot tell which key an agent used, so it refuses
   every agent-requested wake of an agent that holds a live task bridge key,
   including delegation from that agent's own runs, and every routine run such
-  an agent started, created, edited or scheduled. Delegation by an agent that
-  has no such key is allowed as before, even when a bridge started the chain.
+  an agent started, created, edited or scheduled while it held the key (or
+  within five minutes before its creation). The wake rule does not bound a key
+  by its creation, so a wake the agent requested just before it got the key is
+  still refused. Revocation has no skew allowance: `revokedAt` comes from the
+  server clock and activity rows and wakes from the database clock, so an
+  action within that skew before revocation can count as the owner's.
+  Delegation by an agent that has no such key is allowed as before, even when
+  a bridge started the chain.
   In a company with a live task bridge key, a routine api run whose
   `routine.run_triggered` row is not written yet when the run starts (a race
   with the route), and every pipeline stage entry run, is refused on the
@@ -613,6 +658,12 @@ concurrency cap.
   creator (`on delete set null`), so its routines count as the owner's. A task
   bridge key can also move a pipeline case or reach other upstream routes that
   do not apply its scope; only the routine path is covered.
+- Internet-facing gateway agents (`hermes_gateway`, `openclaw_gateway`,
+  `http`) that use a standard claimed key instead of a `task_bridge` key count
+  as owner delegation, so an outside chat message handled by such a gateway
+  can wake a subscription-lane agent. Use a `task_bridge` key for an
+  internet-facing gateway. Treating gateway adapter types as external would
+  need a product decision.
 - Every local agent runs as the Paperclip service user, and that user owns the
   `claude` sign-in (`~/.claude/.credentials.json` or the OS keychain). An
   agent with shell access (any claude_local, codex_local or other local coding
@@ -625,7 +676,11 @@ concurrency cap.
   (`sh -c "claude …"`), a script, a copy or symlink of the binary under
   another name, or any program that starts `claude` itself gets neither the
   gates nor the endpoint check. The check also errs toward gating: `npm run
-  claude` or `node tool.js claude` counts as a Claude run.
+  claude` or `node tool.js claude` counts as a Claude run. An `env -S` string
+  is split on whitespace only (GNU quoting, escapes and `${VAR}` expansion are
+  not modelled), and a flag read after an assignment or after `--` (where real
+  `env` would try to run it as the command) is still treated as a flag, which
+  also leans toward gating.
 - Encrypted secrets under other keys can still hold a subscription token
   stored before this branch; the runtime drops the value at launch, but it stays
   stored until the owner deletes it.
@@ -652,6 +707,17 @@ concurrency cap.
   either is a product decision. The agent also runs shell commands as the
   service user and can read the sign-in file itself; the endpoint check closes
   only the config-only channel that needs no cooperation from the agent.
+- Board chat checks the server's own process env, unlike claude_local. An
+  owner with, for example, `SSL_CERT_FILE` or `NODE_EXTRA_CA_CERTS` in the
+  server env and no API key loses board chat until they remove it or add
+  `ANTHROPIC_API_KEY`. Board chat also no longer loads the owner's user-level
+  MCP servers (`--strict-mcp-config`), and it still loads the service user's
+  `~/.claude/settings.json` (`--setting-sources user`), whose `env` block the
+  endpoint check does not read.
+- The workspace file browser denies a server `CLAUDE_CONFIG_DIR` inside a
+  workspace root only partly when that folder is not named `.claude`: its
+  `.claude.json` is denied, but its `.credentials.json` and
+  `credentials.json` are not.
 - Left out of the endpoint check on purpose:
   - Proxies (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`,
     `CLAUDE_CODE_PROXY_*`, `CLAUDE_CODE_HTTP(S)_PROXY`): while certificate

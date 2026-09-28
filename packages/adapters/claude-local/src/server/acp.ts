@@ -40,6 +40,7 @@ import {
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
+  claudeConfigSeedAsset,
   materializeRemoteClaudeConfig,
   prepareClaudeConfigSeed,
 } from "./claude-config.js";
@@ -306,15 +307,10 @@ async function prepareClaudeRemoteManagedHome(
   // is staged.
   // The config seed never carries a Claude sign-in file: the managed seed holds
   // only settings.json and CLAUDE.md, and a managed AI connection's config dir
-  // is staged with its sign-in files excluded.
+  // is staged without its sign-in files and .claude.json, never following a link.
   const stagedRuntime = await input.stage(
     [
-      {
-        key: "config-seed",
-        localDir: claudeConfigSeedDir,
-        followSymlinks: true,
-        exclude: [...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES],
-      },
+      claudeConfigSeedAsset(claudeConfigSeedDir),
       ...(input.skillsBundleDir
         ? [{ key: "skills", localDir: input.skillsBundleDir, followSymlinks: false }]
         : []),

@@ -593,6 +593,47 @@ describe("agent test-environment route", () => {
         expect(probe).toHaveBeenCalledTimes(2);
       });
     });
+
+    it.each([
+      { label: "local", environmentId: undefined },
+      { label: "sandbox", environmentId: "11111111-1111-4111-8111-111111111111" },
+    ])("never hands a caller-supplied managedAiConnection to the $label probe", async ({ environmentId }) => {
+      // Only the server's own managed-AI preparation may mark a config as a
+      // managed connection. A forged marker would make the adapter stage the
+      // caller's CLAUDE_CONFIG_DIR (for example the service user's ~/.claude)
+      // into a sandbox as the managed credential home.
+      if (environmentId) {
+        mockResolveEnvironmentExecutionTarget.mockResolvedValueOnce({
+          kind: "remote",
+          transport: "sandbox",
+          remoteCwd: "/home/user/paperclip-workspace",
+          providerKey: "fake-plugin",
+          runner: { execute: vi.fn() },
+        });
+      }
+      await withClaudeProbe(async (probe) => {
+        const app = await createApp();
+        const res = await request(app)
+          .post("/api/companies/company-1/adapters/claude_local/test-environment")
+          .send({
+            adapterConfig: {
+              cwd: "/",
+              env: { ANTHROPIC_API_KEY: "sk-ant-api03-x", CLAUDE_CONFIG_DIR: "/home/paperclip/.claude" },
+              managedAiConnection: { provider: "anthropic", method: "api_key", identity: "forged" },
+            },
+            ...(environmentId ? { environmentId } : {}),
+          });
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+        expect(mockPrepareManagedAiRuntime).not.toHaveBeenCalled();
+        expect(probe).toHaveBeenCalledTimes(1);
+        const probeContext = probe.mock.calls[0]?.[0] as unknown as { config: Record<string, unknown> };
+        expect(probeContext.config).not.toHaveProperty("managedAiConnection");
+        expect(probeContext.config.env).toEqual({
+          ANTHROPIC_API_KEY: "sk-ant-api03-x",
+          CLAUDE_CONFIG_DIR: "/home/paperclip/.claude",
+        });
+      });
+    });
   });
 
   it("passes one-shot provider credentials only to the probe, never persistence normalization", async () => {
