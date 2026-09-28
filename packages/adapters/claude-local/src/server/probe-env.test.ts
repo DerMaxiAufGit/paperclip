@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { isClaudeSubscriptionLaneRun } from "./credential-policy.js";
 import { buildLocalAdapterTestProbeEnv } from "./probe-env.js";
 
 const tempDirs: string[] = [];
@@ -178,6 +179,65 @@ describe("buildLocalAdapterTestProbeEnv", () => {
     });
     for (const key of Object.keys(built.env)) {
       expect(key.toUpperCase()).not.toContain("PROXY");
+    }
+  });
+});
+
+describe("the lane of a local Test probe", () => {
+  // Configs the lane classifier reads differently from the allowlist: flags the
+  // probe child never gets, key-case variants, and inline --settings that take a
+  // credential away or point the sign-in elsewhere.
+  const evilSettings = ["--settings", JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://evil.example" } })];
+  const configs: Array<{ label: string; config: Record<string, unknown>; hostEnv?: NodeJS.ProcessEnv }> = [
+    { label: "no credential", config: { engine: "cli" } },
+    { label: "Vertex only", config: { engine: "cli", env: { CLAUDE_CODE_USE_VERTEX: "1" } } },
+    { label: "Foundry only", config: { engine: "cli", env: { CLAUDE_CODE_USE_FOUNDRY: "true" } } },
+    {
+      label: "Vertex with a --settings endpoint",
+      config: { engine: "cli", env: { CLAUDE_CODE_USE_VERTEX: "1" }, extraArgs: evilSettings },
+    },
+    { label: "Bedrock", config: { engine: "cli", env: { CLAUDE_CODE_USE_BEDROCK: "1" } } },
+    { label: "API key", config: { engine: "cli", env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" } } },
+    { label: "lower-case API key", config: { engine: "cli", env: { anthropic_api_key: "sk-ant-api03-x" } } },
+    { label: "gateway token", config: { engine: "cli", env: { ANTHROPIC_AUTH_TOKEN: "gw-token" } } },
+    { label: "subscription token as API key", config: { engine: "cli", env: { ANTHROPIC_API_KEY: "sk-ant-oat01-x" } } },
+    {
+      label: "API key blanked by --settings",
+      config: {
+        engine: "cli",
+        env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" },
+        extraArgs: ["--settings", JSON.stringify({ env: { ANTHROPIC_API_KEY: "" } })],
+      },
+    },
+    { label: "host API key", config: { engine: "cli" }, hostEnv: { ANTHROPIC_API_KEY: "sk-ant-api03-host" } },
+    { label: "host Vertex flag", config: { engine: "cli" }, hostEnv: { CLAUDE_CODE_USE_VERTEX: "1" } },
+  ];
+
+  it.each(configs)("classifies the probe on the env its child gets: $label", async ({ config, hostEnv }) => {
+    const { dir } = await makeTrustedPathWithClaude();
+    const trustedEnv: NodeJS.ProcessEnv = { PATH: dir, ...hostEnv };
+    const built = await buildLocalAdapterTestProbeEnv({
+      callerEnv: (config.env ?? {}) as Record<string, string>,
+      trustedEnv,
+    });
+    // The child env is the trusted env with the probe env on top.
+    const childConfig = { ...config, env: built.env };
+    expect(isClaudeSubscriptionLaneRun({ config, target: null, hostEnv: trustedEnv, localTestProbe: true })).toBe(
+      isClaudeSubscriptionLaneRun({ config: childConfig, target: null, hostEnv: trustedEnv }),
+    );
+  });
+
+  it("puts a Vertex- or Foundry-only probe on the subscription lane, whose child never gets the flag", async () => {
+    const { dir } = await makeTrustedPathWithClaude();
+    const envs: Record<string, string>[] = [{ CLAUDE_CODE_USE_VERTEX: "1" }, { CLAUDE_CODE_USE_FOUNDRY: "1" }];
+    for (const env of envs) {
+      const config = { engine: "cli", env };
+      const built = await buildLocalAdapterTestProbeEnv({ callerEnv: env, trustedEnv: { PATH: dir } });
+      expect(built.env).not.toHaveProperty("CLAUDE_CODE_USE_VERTEX");
+      expect(built.env).not.toHaveProperty("CLAUDE_CODE_USE_FOUNDRY");
+      // The agent run gets the flag, so it is metered; the probe is not.
+      expect(isClaudeSubscriptionLaneRun({ config, target: null, hostEnv: {} })).toBe(false);
+      expect(isClaudeSubscriptionLaneRun({ config, target: null, hostEnv: {}, localTestProbe: true })).toBe(true);
     }
   });
 });

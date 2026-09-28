@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DirectorySnapshot } from "./workspace-restore-merge.js";
@@ -24,13 +24,56 @@ export const CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES = [".credentials.json", "creden
  */
 export const CLAUDE_GLOBAL_CONFIG_FILE_NAME = ".claude.json";
 
+/**
+ * Name prefixes of the copies Claude Code keeps of `.claude.json`, which hold
+ * the same account data and possible Console API key: rotating backups
+ * (`.claude.json.backup.<ms>`, the legacy `.claude.json.backup`) and copies of
+ * a corrupted file (`.claude.json.corrupted.<ms>`). Matched in any case.
+ */
+export const CLAUDE_GLOBAL_CONFIG_COPY_PREFIXES = [".claude.json.backup", ".claude.json.corrupted"] as const;
+
+/**
+ * Claude Code's backup folder inside a config dir (`<config dir>/backups`,
+ * checked in claude 2.1.283): it keeps timestamped copies of `.claude.json`
+ * there, so the whole folder counts as sign-in data.
+ */
+export const CLAUDE_CONFIG_BACKUPS_DIR_NAME = "backups";
+
+// The legacy backup older claude versions wrote next to `.claude.json`.
+const CLAUDE_GLOBAL_CONFIG_LEGACY_BACKUP_NAME = `${CLAUDE_GLOBAL_CONFIG_FILE_NAME}.backup`;
+
 // Sign-in excludes for a Claude config dir (or home) at any depth of a staged
 // workspace. tar matches a plain entry unanchored, at any depth; the in-process
-// matcher (`shouldExcludePath`) needs the `*/` prefix form for that.
+// matcher (`shouldExcludePath`) needs the `*/` prefix form for that. Both read
+// the entries literally (no wildcards), so a timestamped `.claude.json` copy is
+// covered by its folder (`.claude/backups`) or listed by name.
 export const CLAUDE_SIGN_IN_ANY_DEPTH_WORKSPACE_EXCLUDES: readonly string[] = [
   ...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES.map((name) => `.claude/${name}`),
   CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+  `.claude/${CLAUDE_CONFIG_BACKUPS_DIR_NAME}`,
+  CLAUDE_GLOBAL_CONFIG_LEGACY_BACKUP_NAME,
 ].flatMap((entry) => [entry, `*/${entry}`]);
+
+/** Whether a file name (any case) is `.claude.json` or one of Claude Code's copies of it. */
+export function isClaudeGlobalConfigFileName(fileName: string): boolean {
+  const lower = fileName.toLowerCase();
+  return (
+    lower === CLAUDE_GLOBAL_CONFIG_FILE_NAME ||
+    CLAUDE_GLOBAL_CONFIG_COPY_PREFIXES.some((prefix) => lower.startsWith(prefix))
+  );
+}
+
+// Lower-cased path segments that pass through the backups folder of a `.claude`
+// dir (the folder itself or anything inside it).
+function passesThroughClaudeBackupsDir(lowerSegments: readonly string[]): boolean {
+  return lowerSegments.some(
+    (segment, index) => segment === ".claude" && lowerSegments[index + 1] === CLAUDE_CONFIG_BACKUPS_DIR_NAME,
+  );
+}
+
+// tar reads `*`, `?`, `[` and `\` in an exclude entry as a pattern, which
+// `shouldExcludePath` does not; such a name is not listed literally.
+const TAR_GLOB_METACHARACTERS = /[*?[\\]/;
 
 /**
  * `candidate` relative to `workspaceLocalDir` in posix form: `""` for the
@@ -82,11 +125,12 @@ function pathSpellings(value: string): string[] {
 /**
  * The Claude sign-in excludes the generic remote staging (SSH, sandbox and
  * command runner) merges into every adapter's workspace excludes, for both the
- * upload and the sync-back: the sign-in files of the server's
- * `CLAUDE_CONFIG_DIR` (plus its `.claude.json`) and of `~/.claude` when they
- * live inside the workspace, `~/.claude.json` when the workspace holds the
- * home directory, and the sign-in files of a `.claude` dir and any
- * `.claude.json` at any depth.
+ * upload and the sync-back: the sign-in files and backups folder of the
+ * server's `CLAUDE_CONFIG_DIR` (plus its `.claude.json` and the copies of it
+ * found next to it) and of `~/.claude` when they live inside the workspace,
+ * `~/.claude.json` and its copies when the workspace holds the home directory,
+ * and the sign-in files and backups folder of a `.claude` dir, any
+ * `.claude.json` and any legacy `.claude.json.backup` at any depth.
  */
 export function claudeSignInWorkspaceExcludes(input: {
   workspaceLocalDir: string;
@@ -108,24 +152,76 @@ export function claudeSignInWorkspaceExcludes(input: {
     for (const entry of claudeConfigCredentialWorkspaceExcludes({ workspaceLocalDir, configDirs })) {
       excludes.add(entry);
     }
+    for (const entry of claudeConfigBackupWorkspaceExcludes({ workspaceLocalDir, configDirs })) {
+      excludes.add(entry);
+    }
     for (const dir of globalConfigDirs) {
       const relative = workspaceRelativePosixPath(workspaceLocalDir, dir);
       if (relative === null) continue;
-      excludes.add(relative ? `${relative}/${CLAUDE_GLOBAL_CONFIG_FILE_NAME}` : CLAUDE_GLOBAL_CONFIG_FILE_NAME);
+      for (const name of [
+        CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+        CLAUDE_GLOBAL_CONFIG_LEGACY_BACKUP_NAME,
+        ...claudeGlobalConfigCopyNames(dir),
+      ]) {
+        excludes.add(relative ? `${relative}/${name}` : name);
+      }
     }
   }
   return [...excludes];
 }
 
 /**
+ * Workspace-relative paths of the backup folder (`backups`, which holds copies
+ * of `.claude.json`) of every Claude config dir that lives inside the staged
+ * workspace. Same config dirs as {@link claudeConfigCredentialWorkspaceExcludes}.
+ */
+export function claudeConfigBackupWorkspaceExcludes(input: {
+  workspaceLocalDir: string;
+  configDirs: ReadonlyArray<string | null | undefined>;
+}): string[] {
+  const excludes = new Set<string>();
+  for (const configDir of input.configDirs) {
+    const trimmed = typeof configDir === "string" ? configDir.trim() : "";
+    const relative = workspaceRelativePosixPath(input.workspaceLocalDir, trimmed);
+    if (relative === null) continue;
+    excludes.add(relative ? `${relative}/${CLAUDE_CONFIG_BACKUPS_DIR_NAME}` : CLAUDE_CONFIG_BACKUPS_DIR_NAME);
+  }
+  return [...excludes];
+}
+
+/**
+ * The `.claude.json` copies (`.claude.json.backup*`, `.claude.json.corrupted*`)
+ * that sit directly in `dir`, by their exact names; older claude versions left
+ * timestamped copies next to the global config. tar and `shouldExcludePath`
+ * match exclude entries literally, so a pattern cannot cover them. A name with
+ * a tar glob character is left out (tar would read it as a pattern).
+ */
+export function claudeGlobalConfigCopyNames(dir: string): string[] {
+  try {
+    return readdirSync(dir).filter(
+      (name) =>
+        name.toLowerCase() !== CLAUDE_GLOBAL_CONFIG_FILE_NAME &&
+        isClaudeGlobalConfigFileName(name) &&
+        !TAR_GLOB_METACHARACTERS.test(name),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Whether a workspace-relative path (segments, any case) names a Claude
  * sign-in file by its location: a credential file anywhere inside a `.claude`
- * dir, or `.claude.json` at any depth. Same names as the staging excludes.
+ * dir, `.claude.json` or one of Claude Code's copies of it
+ * (`.claude.json.backup*`, `.claude.json.corrupted*`) at any depth, or the
+ * backups folder of a `.claude` dir and anything in it. Same names as the
+ * staging excludes.
  */
 export function isClaudeSignInPathSegments(segments: readonly string[]): boolean {
   const lowerSegments = segments.map((segment) => segment.toLowerCase());
   const fileName = lowerSegments.at(-1) ?? "";
-  if (fileName === CLAUDE_GLOBAL_CONFIG_FILE_NAME) return true;
+  if (isClaudeGlobalConfigFileName(fileName)) return true;
+  if (passesThroughClaudeBackupsDir(lowerSegments)) return true;
   return (
     (CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES as readonly string[]).includes(fileName) &&
     lowerSegments.slice(0, -1).includes(".claude")
@@ -168,19 +264,23 @@ export type ClaudeSignInPathMatcher = (candidatePath: string) => boolean;
  * be read or listed) that names a Claude sign-in file whatever folder a caller
  * treats as its root: a credential file directly inside any `.claude` dir or
  * anywhere inside the server's `CLAUDE_CONFIG_DIR` or `~/.claude`, any
- * `.claude.json`, and the real target of each of those sign-in files when it is
- * a link to a file of another name. Resolves the config dirs once, so a scan
- * builds one matcher and checks every entry with it. A relative path matches
- * nothing.
+ * `.claude.json` and any of Claude Code's copies of it, the backups folder
+ * (and everything in it) of any `.claude` dir and of those config dirs, and the
+ * real target of each of those sign-in files when it is a link to a file of
+ * another name. Resolves the config dirs once, so a scan builds one matcher
+ * and checks every entry with it. A relative path matches nothing.
  */
 export function createClaudeSignInPathMatcher(input: ClaudeSignInLocationInput = {}): ClaudeSignInPathMatcher {
   const { configDirs, signInFiles } = claudeSignInLocations(input);
+  const backupDirs = configDirs.map((dir) => path.join(dir, CLAUDE_CONFIG_BACKUPS_DIR_NAME));
   return (candidatePath) => {
     if (!candidatePath || !path.isAbsolute(candidatePath)) return false;
     const resolved = path.resolve(candidatePath);
     if (signInFiles.has(resolved)) return true;
     const fileName = path.basename(resolved).toLowerCase();
-    if (fileName === CLAUDE_GLOBAL_CONFIG_FILE_NAME) return true;
+    if (isClaudeGlobalConfigFileName(fileName)) return true;
+    if (passesThroughClaudeBackupsDir(resolved.split(path.sep).map((segment) => segment.toLowerCase()))) return true;
+    if (backupDirs.some((dir) => isSameOrInside(dir, resolved))) return true;
     if (!(CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES as readonly string[]).includes(fileName)) return false;
     if (path.basename(path.dirname(resolved)).toLowerCase() === ".claude") return true;
     return configDirs.some((dir) => isSameOrInside(dir, resolved));

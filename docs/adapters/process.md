@@ -48,7 +48,16 @@ wrapper's `NAME=VALUE` is refused even when a wrapper flag clears it.
 A wrapper Paperclip cannot read exactly (an `env -S` string with quotes,
 backslashes, `${VAR}` or `#`, or an `env` flag it does not know) counts as
 clearing the env, so the run counts as using the sign-in even when it sets an
-API key; write it as plain `env NAME=VALUE claude` instead.
+API key; write it as plain `env NAME=VALUE claude` instead. On the sign-in, such
+a wrapper is refused when it has `${VAR}` in an `env -S` string or assigns a
+name that is not a plain variable name, because Paperclip cannot check which
+variable it sets.
+
+Only `process` and `claude_local` agents may run `claude`. An agent of another
+adapter (for example `codex_local` or `gemini_local`) whose command starts the
+`claude` binary fails before it starts (`configuration_incomplete`, reason
+`claude_command_on_other_adapter`), and its Environment Test reports the same
+without running the command.
 
 ## Example
 

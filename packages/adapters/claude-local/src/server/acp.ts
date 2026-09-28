@@ -48,6 +48,7 @@ import { buildAdapterTestTargetCheck } from "./probe-diagnostics.js";
 import { createWorkspaceRestoreTeardown } from "@paperclipai/adapter-utils/workspace-restore-teardown";
 import {
   CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
+  claudeConfigBackupWorkspaceExcludes,
   claudeConfigCredentialWorkspaceExcludes,
   workspaceRelativePosixPath as workspaceRelativePath,
 } from "@paperclipai/adapter-utils/claude-config-credential-excludes";
@@ -263,14 +264,20 @@ async function prepareClaudeRemoteManagedHome(
     typeof envConfig.CLAUDE_CONFIG_DIR === "string" && envConfig.CLAUDE_CONFIG_DIR.trim().length > 0
       ? envConfig.CLAUDE_CONFIG_DIR.trim()
       : "";
-  const workspaceExclude = claudeConfigCredentialWorkspaceExcludes({
+  // The sign-in files and backups folder (timestamped `.claude.json` copies)
+  // of every Claude config dir inside the workspace.
+  const configDirExcludeInput = {
     workspaceLocalDir: input.workspaceLocalDir,
     configDirs: [
       explicitClaudeConfigDir,
       process.env.CLAUDE_CONFIG_DIR,
       path.join(os.homedir(), ".claude"),
     ],
-  });
+  };
+  const workspaceExclude = [
+    ...claudeConfigCredentialWorkspaceExcludes(configDirExcludeInput),
+    ...claudeConfigBackupWorkspaceExcludes(configDirExcludeInput),
+  ];
   if (explicitClaudeConfigDir && !input.config.managedAiConnection) {
     // User-managed override. Unlike the Claude CLI lane (`claude-local/execute.ts`),
     // which runs the process on the same host and can forward the operator's

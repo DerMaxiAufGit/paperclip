@@ -70,6 +70,12 @@ interface ProcessClaudeInvocation {
    * turn a later `NAME=VALUE` into a flag value or a command arg.
    */
   unreadable: boolean;
+  /**
+   * True when an `env -S` string has a `${NAME}` expansion, which `env` fills
+   * in from an env this model does not have, so the endpoint check cannot see
+   * what it assigns.
+   */
+  expands: boolean;
 }
 
 /**
@@ -127,6 +133,8 @@ const ENV_SPLIT_UNREADABLE = /['"\\$#]/;
 const ENV_SPLIT_ESCAPES: Record<string, string> = { f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
 /** An `env -S` `${NAME}` expansion, which takes its value from an env this model does not have. */
 const ENV_SPLIT_EXPANSION = /\$\{[^}]*\}/g;
+/** A name the endpoint check can read: a shell variable name. */
+const ENV_ASSIGNMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function commandBaseName(command: string): string {
   const base = command.trim().split(/[\\/]/).pop() ?? "";
@@ -220,6 +228,8 @@ interface EnvWrapperParse {
   read: string[];
   steps: EnvWrapperStep[];
   unreadable: boolean;
+  /** An `env -S` string had a `${NAME}` expansion. */
+  expands: boolean;
 }
 
 function nextEnvArg(parse: EnvWrapperParse): string | undefined {
@@ -235,6 +245,7 @@ function applyEnvFlag(spec: EnvFlagSpec, value: string | undefined, parse: EnvWr
   else if (spec.effect === "split") {
     const text = value ?? "";
     if (ENV_SPLIT_UNREADABLE.test(text)) parse.unreadable = true;
+    if (text.includes("${")) parse.expands = true;
     parse.rest.unshift(...splitEnvString(text));
   }
 }
@@ -308,11 +319,16 @@ function unreadableClaudeInvocation(parse: EnvWrapperParse): ProcessClaudeInvoca
       const eq = arg.indexOf("=");
       return { kind: "set", name: arg.slice(0, eq), value: arg.slice(eq + 1) };
     });
-  return { envSteps: [...parse.steps, ...assignments], args: args.slice(index + 1), unreadable: true };
+  return {
+    envSteps: [...parse.steps, ...assignments],
+    args: args.slice(index + 1),
+    unreadable: true,
+    expands: parse.expands,
+  };
 }
 
 function resolveInvocation(command: string, args: string[]): ProcessClaudeInvocation | null {
-  const parse: EnvWrapperParse = { rest: [...args], read: [], steps: [], unreadable: false };
+  const parse: EnvWrapperParse = { rest: [...args], read: [], steps: [], unreadable: false, expands: false };
   let base = commandBaseName(command);
   // Each wrapper reads at least its command from `rest`, so this ends.
   while (base === "env") {
@@ -320,7 +336,7 @@ function resolveInvocation(command: string, args: string[]): ProcessClaudeInvoca
     if (inner === undefined) return unreadableClaudeInvocation(parse);
     base = commandBaseName(inner);
   }
-  const invocation = { envSteps: parse.steps, args: parse.rest, unreadable: parse.unreadable };
+  const invocation = { envSteps: parse.steps, args: parse.rest, unreadable: parse.unreadable, expands: parse.expands };
   if (base === "claude") return invocation;
   if (PACKAGE_RUNNERS.has(base) && packageRunnerNamesClaude(parse.rest)) return invocation;
   return unreadableClaudeInvocation(parse);
@@ -357,6 +373,12 @@ interface ProcessClaudeGate {
   endpointConfig: Record<string, unknown>;
   /** The `env` wrappers were not read exactly, so the lane counts them as clearing the env. */
   unreadable: boolean;
+  /**
+   * An unreadable wrapper chain expands `${NAME}` in an `env -S` string, or
+   * assigns a name that is empty or not a variable name once any `${NAME}` is
+   * dropped, so the endpoint check cannot tell which key it sets.
+   */
+  hiddenAssignment: boolean;
 }
 
 /** Appended to an endpoint refusal when the lane counts an unreadable `env` wrapper as clearing the env. */
@@ -364,13 +386,21 @@ const UNREADABLE_ENV_WRAPPER_NOTE =
   "Paperclip cannot fully read the env wrapper in this command (an env -S string with quotes, backslashes, " +
   "${…} or #, or an env flag it does not know), so the run counts as using this server's Claude sign-in.";
 
+/** The endpoint refusal for an unreadable wrapper chain whose assignments the endpoint check cannot name. */
+const HIDDEN_ENV_ASSIGNMENT_MESSAGE =
+  "A Claude subscription is only sent to api.anthropic.com. This command's env wrapper expands ${…} in an env -S " +
+  "string, or assigns a variable without a plain name, so Paperclip cannot check that it leaves the claude CLI's " +
+  "endpoint alone; remove it from the env wrapper.";
+
 /**
  * Apply a process agent's `env` wrappers, in order, to the agent env (which
  * the process adapter hands the child) and the host env (which the child
  * inherits): `clear` drops both, `unset` drops the key from both, `set` adds
  * to the agent env, where it wins over the host env as in the launch env. An
  * unreadable wrapper chain leaves the binary an empty env for the lane, and
- * its assignment names lose any `${NAME}` for the endpoint check.
+ * its assignment names lose any `${NAME}` for the endpoint check; a `${NAME}`
+ * in an `env -S` string, or a name left empty or invalid, marks the chain as
+ * hiding an assignment, since a claude process agent never needs either.
  */
 function resolveProcessClaudeGate(config: Record<string, unknown>, hostEnv?: NodeJS.ProcessEnv): ProcessClaudeGate | null {
   const invocation = resolveProcessClaudeInvocation(config);
@@ -380,9 +410,12 @@ function resolveProcessClaudeGate(config: Record<string, unknown>, hostEnv?: Nod
   let env: Record<string, unknown> = { ...agentEnv };
   let host: NodeJS.ProcessEnv | undefined;
   const assignments: Record<string, string> = {};
+  let hiddenAssignment = unreadable && invocation.expands;
   for (const step of invocation.envSteps) {
     if (step.kind === "set") {
-      assignments[unreadable ? step.name.replace(ENV_SPLIT_EXPANSION, "") : step.name] = step.value;
+      const name = unreadable ? step.name.replace(ENV_SPLIT_EXPANSION, "") : step.name;
+      if (unreadable && !ENV_ASSIGNMENT_NAME.test(name)) hiddenAssignment = true;
+      assignments[name] = step.value;
     }
     if (unreadable) continue;
     if (step.kind === "clear") {
@@ -401,6 +434,7 @@ function resolveProcessClaudeGate(config: Record<string, unknown>, hostEnv?: Nod
       : { config: { env, args }, ...(host ? { hostEnv: host } : {}) },
     endpointConfig: { env: { ...agentEnv, ...assignments }, args },
     unreadable,
+    hiddenAssignment,
   };
 }
 
@@ -428,6 +462,50 @@ export function claudeSubscriptionGateInput(
   return resolveProcessClaudeGate(config, hostEnv)?.lane ?? null;
 }
 
+/** The configuration-incomplete reason for another adapter whose command runs the `claude` binary. */
+export const CLAUDE_COMMAND_ON_OTHER_ADAPTER_REASON = "claude_command_on_other_adapter" as const;
+
+/**
+ * The config keys another adapter may start its binary from: every local CLI
+ * adapter reads `command`, and hermes_local reads `hermesCommand` first.
+ */
+const OTHER_ADAPTER_COMMAND_KEYS = ["command", "hermesCommand"] as const;
+
+/**
+ * The refusal for an agent of any adapter other than claude_local and
+ * `process` whose configured command starts the `claude` binary, recognized
+ * as for a process agent (see `ProcessClaudeInvocation`), with the adapter's
+ * `extraArgs` and `args` as the args. Such an adapter (codex_local,
+ * kimi_local, gemini_local, a plugin adapter, …) spawns its command with this
+ * server's env and home, so `claude` would use the server's Claude sign-in
+ * with none of the claude_local rules: no subscription lane gates, no
+ * endpoint check, no credential policy. The heartbeat refuses the run before
+ * any workspace or process work. It refuses on every execution target: a
+ * remote target would not reach this server's sign-in, but the claude_local
+ * adapter is the one supported way to run Claude anywhere, so refusing there
+ * costs nothing and does not depend on the target resolution. The message
+ * names the adapter and config key but not the command, which comes from the
+ * resolved config.
+ */
+export function claudeCommandOnOtherAdapterRefusal(
+  adapterType: string | null | undefined,
+  config: Record<string, unknown>,
+): { reason: typeof CLAUDE_COMMAND_ON_OTHER_ADAPTER_REASON; message: string } | null {
+  if (!adapterType || adapterType === "claude_local" || adapterType === "process") return null;
+  const args = [...asStringArray(config.extraArgs), ...asStringArray(config.args)];
+  for (const key of OTHER_ADAPTER_COMMAND_KEYS) {
+    const command = asString(config[key], "").trim();
+    if (!command || !resolveInvocation(command, args)) continue;
+    return {
+      reason: CLAUDE_COMMAND_ON_OTHER_ADAPTER_REASON,
+      message:
+        `${adapterType} is configured to run the claude binary (adapter config "${key}"); ` +
+        "use the claude_local adapter for Claude, or set this agent's command back to its own CLI.",
+    };
+  }
+  return null;
+}
+
 /**
  * The refusal for a `process` agent whose command starts `claude` on the
  * subscription lane (no API credential in the env the binary gets, see
@@ -436,8 +514,10 @@ export function claudeSubscriptionGateInput(
  * null when it may spawn. The endpoint check reads the agent env plus every
  * `env` wrapper assignment, so a key that a wrapper flag clears or unsets
  * still refuses, and so does one in an unreadable `env -S` string (read
- * without its quotes). The run fails with `adapter_engine_unavailable`, as a
- * claude_local run does.
+ * without its quotes). An unreadable chain that expands `${NAME}` in an
+ * `env -S` string, or assigns a name that is empty or not a variable name,
+ * refuses too, since `env` may then set any key. The run fails with
+ * `adapter_engine_unavailable`, as a claude_local run does.
  */
 export function resolveProcessClaudeSubscriptionRefusal(
   config: Record<string, unknown>,
@@ -451,7 +531,9 @@ export function resolveProcessClaudeSubscriptionRefusal(
     hostEnv: gate.lane.hostEnv ?? hostEnv,
   });
   if (!onLane) return null;
-  const violation = resolveClaudeSubscriptionEndpointViolation(gate.endpointConfig);
+  const violation =
+    resolveClaudeSubscriptionEndpointViolation(gate.endpointConfig) ??
+    (gate.hiddenAssignment ? HIDDEN_ENV_ASSIGNMENT_MESSAGE : null);
   if (!violation) return null;
   return buildClaudeSubscriptionHarnessRefusal(
     gate.unreadable ? `${violation} ${UNREADABLE_ENV_WRAPPER_NOTE}` : violation,

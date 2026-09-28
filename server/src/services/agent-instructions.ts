@@ -1,6 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { notFound, unprocessable } from "../errors.js";
+import {
+  createClaudeSignInPathMatcher,
+  isClaudeSignInPathSegments,
+  overlapsClaudeConfigDir,
+  type ClaudeSignInPathMatcher,
+} from "@paperclipai/adapter-utils/claude-config-credential-excludes";
+import { forbidden, notFound, unprocessable } from "../errors.js";
 import { resolveHomeAwarePath, resolvePaperclipInstanceRoot } from "../home-paths.js";
 
 const ENTRY_FILE_DEFAULT = "AGENTS.md";
@@ -156,6 +162,73 @@ async function statIfExists(targetPath: string) {
   return fs.stat(targetPath).catch(() => null);
 }
 
+// Fork policy (doc/plans/2026-09-24-claude-cli-only-auth.md): Paperclip never
+// hands out a Claude sign-in. A Claude config dir, or a folder that holds one,
+// is never set as a new external instructions root, and a bundle never lists,
+// reads, exports, writes or deletes a Claude sign-in file (checked by where the
+// file really lives too, so a root or folder reached through a link counts).
+const CLAUDE_CONFIG_ROOT_MESSAGE =
+  "A Claude config folder, or a folder that holds one, cannot be an instructions bundle root: Paperclip never hands out the Claude sign-in.";
+const CLAUDE_SIGN_IN_FILE_MESSAGE = "Instructions file path is a Claude sign-in file, which Paperclip never hands out";
+
+/**
+ * Refuses a new external bundle root that is, lies inside or holds a Claude
+ * config dir. A root stored earlier (`currentRootPath`) stays usable, with its
+ * sign-in files hidden, so saving an agent does not break on it.
+ */
+function assertInstructionsRootOutsideClaudeConfig(rootPath: string, currentRootPath: string | null) {
+  const resolvedRoot = path.resolve(rootPath);
+  if (currentRootPath && path.resolve(currentRootPath) === resolvedRoot) return;
+  if (overlapsClaudeConfigDir(resolvedRoot)) throw unprocessable(CLAUDE_CONFIG_ROOT_MESSAGE);
+}
+
+// Real path of `targetPath`, or of its nearest existing ancestor with the rest
+// appended, so a path that does not exist yet still shows where it would land.
+async function realPathOfNearestExisting(targetPath: string): Promise<string | null> {
+  let current = path.resolve(targetPath);
+  const rest: string[] = [];
+  for (;;) {
+    const real = await fs.realpath(current).catch(() => null);
+    if (real) return path.join(real, ...rest);
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    rest.unshift(path.basename(current));
+    current = parent;
+  }
+}
+
+async function isClaudeSignInBundlePath(
+  rootPath: string,
+  relativePath: string,
+  isSignInPath: ClaudeSignInPathMatcher,
+): Promise<boolean> {
+  if (isClaudeSignInPathSegments(relativePath.split("/"))) return true;
+  const absolutePath = path.resolve(rootPath, relativePath);
+  const rootRealPath = (await fs.realpath(rootPath).catch(() => null)) ?? path.resolve(rootPath);
+  const realPath = await realPathOfNearestExisting(absolutePath);
+  const candidates = [absolutePath, path.join(rootRealPath, relativePath), ...(realPath ? [realPath] : [])];
+  return candidates.some(
+    (candidate) =>
+      isSignInPath(candidate) || isClaudeSignInPathSegments(path.relative(rootRealPath, candidate).split(path.sep)),
+  );
+}
+
+async function assertNotClaudeSignInBundlePath(
+  rootPath: string,
+  relativePath: string,
+  isSignInPath: ClaudeSignInPathMatcher = createClaudeSignInPathMatcher(),
+) {
+  if (await isClaudeSignInBundlePath(rootPath, relativePath, isSignInPath)) {
+    throw forbidden(CLAUDE_SIGN_IN_FILE_MESSAGE);
+  }
+}
+
+async function isClaudeSignInFile(filePath: string, isSignInPath = createClaudeSignInPathMatcher()) {
+  if (isSignInPath(filePath)) return true;
+  const realPath = await fs.realpath(filePath).catch(() => null);
+  return realPath !== null && isSignInPath(realPath);
+}
+
 function shouldIgnoreInstructionsEntry(entry: { name: string; isDirectory(): boolean; isFile(): boolean }) {
   if (entry.name === "." || entry.name === "..") return true;
   if (entry.isDirectory()) {
@@ -175,6 +248,10 @@ async function listFilesRecursive(
   options?: { rejectSymlinks?: boolean },
 ): Promise<string[]> {
   const output: string[] = [];
+  // Fork policy: Claude sign-in files (and folders of them) are left out. The
+  // walk never follows a link, so an entry really lives under the root's real path.
+  const isSignInPath = createClaudeSignInPathMatcher();
+  const rootRealPath = (await fs.realpath(rootPath).catch(() => null)) ?? path.resolve(rootPath);
 
   async function walk(currentPath: string, relativeDir: string) {
     const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
@@ -184,6 +261,13 @@ async function listFilesRecursive(
       const relativePath = normalizeRelativeFilePath(
         relativeDir ? path.posix.join(relativeDir, entry.name) : entry.name,
       );
+      if (
+        isClaudeSignInPathSegments(relativePath.split("/"))
+        || isSignInPath(absolutePath)
+        || isSignInPath(path.join(rootRealPath, relativePath))
+      ) {
+        continue;
+      }
       if (entry.isSymbolicLink()) {
         if (options?.rejectSymlinks) {
           throw unprocessable(`Instructions bundle may not contain symlinks: ${relativePath}`);
@@ -223,6 +307,8 @@ async function readLegacyInstructions(agent: AgentLike, config: Record<string, u
   if (instructionsFilePath) {
     try {
       const resolvedPath = resolveLegacyInstructionsPath(instructionsFilePath, config);
+      // Fork policy: a legacy instructions file that is a Claude sign-in file is never read.
+      if (await isClaudeSignInFile(path.resolve(resolvedPath))) throw forbidden(CLAUDE_SIGN_IN_FILE_MESSAGE);
       return await fs.readFile(resolvedPath, "utf8");
     } catch {
       // Fall back to promptTemplate below.
@@ -441,9 +527,11 @@ async function writeBundleFiles(
   files: Record<string, string>,
   options?: { overwriteExisting?: boolean },
 ) {
+  const isSignInPath = createClaudeSignInPathMatcher();
   for (const [relativePath, content] of Object.entries(files)) {
     const normalizedPath = normalizeRelativeFilePath(relativePath);
     const absolutePath = resolvePathWithinRoot(rootPath, normalizedPath);
+    await assertNotClaudeSignInBundlePath(rootPath, normalizedPath, isSignInPath);
     const existingStat = await statIfExists(absolutePath);
     if (existingStat?.isFile() && !options?.overwriteExisting) continue;
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
@@ -470,6 +558,7 @@ export function syncInstructionsBundleConfigFromFilePath(
     || resolvedPath === path.join(resolveManagedInstructionsRoot(agent), entryFile)
     ? "managed"
     : "external";
+  if (mode === "external") assertInstructionsRootOutsideClaudeConfig(rootPath, deriveBundleState(agent).rootPath);
   return applyBundleConfig(next, { mode, rootPath, entryFile });
 }
 
@@ -508,12 +597,15 @@ export function agentInstructionsService() {
     }
     if (!state.rootPath) throw notFound("Agent instructions bundle is not configured");
     const absolutePath = resolvePathWithinRoot(state.rootPath, relativePath);
+    const normalizedPath = normalizeRelativeFilePath(relativePath);
+    await assertNotClaudeSignInBundlePath(state.rootPath, normalizedPath);
+    // Read the checked real path, so a link swapped in afterwards is not followed.
+    const readPath = (await fs.realpath(absolutePath).catch(() => null)) ?? absolutePath;
     const [content, stat] = await Promise.all([
-      fs.readFile(absolutePath, "utf8").catch(() => null),
-      fs.stat(absolutePath).catch(() => null),
+      fs.readFile(readPath, "utf8").catch(() => null),
+      fs.stat(readPath).catch(() => null),
     ]);
     if (content === null || !stat?.isFile()) throw notFound("Instructions file not found");
-    const normalizedPath = normalizeRelativeFilePath(relativePath);
     return {
       path: normalizedPath,
       size: stat.size,
@@ -592,6 +684,7 @@ export function agentInstructionsService() {
       if (!path.isAbsolute(resolvedRoot)) {
         throw unprocessable("External instructions bundles require an absolute rootPath");
       }
+      assertInstructionsRootOutsideClaudeConfig(resolvedRoot, state.rootPath);
       nextRootPath = resolvedRoot;
     }
 
@@ -644,6 +737,7 @@ export function agentInstructionsService() {
 
     const prepared = await ensureWritableBundle(agent, options);
     const absolutePath = resolvePathWithinRoot(prepared.state.rootPath!, relativePath);
+    await assertNotClaudeSignInBundlePath(prepared.state.rootPath!, normalizeRelativeFilePath(relativePath));
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, content, "utf8");
     const nextAgent = { ...agent, adapterConfig: prepared.adapterConfig };
@@ -669,6 +763,7 @@ export function agentInstructionsService() {
       throw unprocessable("Cannot delete the bundle entry file");
     }
     const absolutePath = resolvePathWithinRoot(state.rootPath, normalizedPath);
+    await assertNotClaudeSignInBundlePath(state.rootPath, normalizedPath);
     await fs.rm(absolutePath, { force: true });
     const adapterConfig = buildPersistedBundleConfig(derived, state);
     const bundle = await getBundle({ ...agent, adapterConfig });
@@ -715,6 +810,11 @@ export function agentInstructionsService() {
   ): Promise<{ bundle: AgentInstructionsBundle; adapterConfig: Record<string, unknown> }> {
     const rootPath = resolveManagedInstructionsRoot(agent);
     const entryFile = options?.entryFile ? normalizeRelativeFilePath(options.entryFile) : ENTRY_FILE_DEFAULT;
+    // Fork policy: a bundle never writes a Claude sign-in file; refuse one by
+    // name before the managed root is touched (where it lands is checked below).
+    const namesSignInFile = (relativePath: string) =>
+      isClaudeSignInPathSegments(relativePath.replaceAll("\\", "/").split("/"));
+    if (Object.keys(files).some(namesSignInFile)) throw forbidden(CLAUDE_SIGN_IN_FILE_MESSAGE);
 
     if (options?.replaceExisting) {
       await fs.rm(rootPath, { recursive: true, force: true });
@@ -725,8 +825,10 @@ export function agentInstructionsService() {
       normalizeRelativeFilePath(relativePath),
       content,
     ] as const);
+    const isSignInPath = createClaudeSignInPathMatcher();
     for (const [relativePath, content] of normalizedEntries) {
       const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
+      await assertNotClaudeSignInBundlePath(rootPath, relativePath, isSignInPath);
       await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       await fs.writeFile(absolutePath, content, "utf8");
     }

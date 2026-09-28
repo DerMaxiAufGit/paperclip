@@ -136,6 +136,69 @@ describe("claudeSignInWorkspaceExcludes", () => {
     ).toEqual(expect.arrayContaining(["cfg/.credentials.json", "cfg/credentials.json", "cfg/.claude.json"]));
   });
 
+  it("excludes Claude Code's .claude.json backups: a backups folder in any .claude dir and the legacy .claude.json.backup", () => {
+    const workspace = path.join(os.tmpdir(), "paperclip-sign-in-backups-ws");
+    const excludes = claudeSignInWorkspaceExcludes({
+      workspaceLocalDir: workspace,
+      env: {},
+      homeDir: path.join(os.tmpdir(), "paperclip-sign-in-elsewhere"),
+    });
+    for (const relative of [
+      ".claude/backups",
+      ".claude/backups/.claude.json.backup.1790000000000",
+      ".claude/backups/.claude.json.corrupted.1790000000000",
+      "home/agent/.claude/backups/.claude.json.backup.1790000000000",
+      ".claude.json.backup",
+      "home/agent/.claude.json.backup",
+    ]) {
+      expect(shouldExcludePath(relative, excludes), relative).toBe(true);
+    }
+    for (const relative of ["backups/db.sql", "project/backups/notes.md", ".claude/settings.json"]) {
+      expect(shouldExcludePath(relative, excludes), relative).toBe(false);
+    }
+  });
+
+  it("excludes the backups folder of the server's CLAUDE_CONFIG_DIR and the .claude.json copies next to the global config", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-sign-in-backups-"));
+    cleanupDirs.push(rootDir);
+    const workspace = path.join(rootDir, "workspace");
+    const configDir = path.join(workspace, "state", "claude-cfg");
+    const homeDir = path.join(workspace, "home", "agent");
+    await mkdir(configDir, { recursive: true });
+    await mkdir(homeDir, { recursive: true });
+    // Older claude versions kept timestamped copies next to the global config.
+    for (const name of [".claude.json.backup.1780000000000", ".Claude.json.corrupted.1780000000001", "notes.md"]) {
+      await writeFile(path.join(homeDir, name), "{}", "utf8");
+    }
+    await writeFile(path.join(configDir, ".claude.json.backup.1780000000002"), "{}", "utf8");
+    // A glob metacharacter would make tar read the name as a pattern.
+    await writeFile(path.join(homeDir, ".claude.json.backup[1]"), "{}", "utf8");
+
+    const excludes = claudeSignInWorkspaceExcludes({
+      workspaceLocalDir: workspace,
+      env: { CLAUDE_CONFIG_DIR: configDir },
+      homeDir,
+    });
+    expect(excludes).toEqual(expect.arrayContaining([
+      "state/claude-cfg/backups",
+      "home/agent/.claude/backups",
+      "state/claude-cfg/.claude.json.backup",
+      "home/agent/.claude.json.backup",
+      "home/agent/.claude.json.backup.1780000000000",
+      "home/agent/.Claude.json.corrupted.1780000000001",
+      "state/claude-cfg/.claude.json.backup.1780000000002",
+    ]));
+    expect(excludes).not.toContain("home/agent/notes.md");
+    expect(excludes).not.toContain("home/agent/.claude.json.backup[1]");
+    expect(shouldExcludePath("state/claude-cfg/backups/.claude.json.backup.1790000000000", excludes)).toBe(true);
+    expect(shouldExcludePath("state/claude-cfg/settings.json", excludes)).toBe(false);
+
+    // The config dir itself as the workspace: its backups folder at the top.
+    expect(
+      claudeSignInWorkspaceExcludes({ workspaceLocalDir: configDir, env: { CLAUDE_CONFIG_DIR: configDir }, homeDir: "" }),
+    ).toEqual(expect.arrayContaining(["backups", ".claude.json.backup", ".claude.json.backup.1780000000002"]));
+  });
+
   it("merges into the caller's excludes and into a supplied baseline, keeping caller entries first", () => {
     const workspace = path.join(os.tmpdir(), "paperclip-sign-in-ws");
     const merged = withClaudeSignInWorkspaceExcludes(workspace, ["operator.txt", "*/.claude.json"]);
@@ -174,6 +237,31 @@ describe("isClaudeSignInPathSegments", () => {
       "config/credentials.json",
       "src/.credentials.json",
       ".claude.json.d/readme.md",
+    ]) {
+      expect(isClaudeSignInPathSegments(relative.split("/")), relative).toBe(false);
+    }
+  });
+
+  it("matches Claude Code's copies of .claude.json and everything in the backups folder of a .claude dir", () => {
+    for (const relative of [
+      ".claude.json.backup",
+      "home/svc/.claude.json.backup.1790000000000",
+      "home/svc/.CLAUDE.JSON.BACKUP.1790000000000",
+      ".claude.json.corrupted.1790000000000",
+      ".claude/backups",
+      ".claude/backups/.claude.json.backup.1790000000000",
+      "home/svc/.Claude/Backups/anything.json",
+      "home/svc/.claude/backups/nested/copy.json",
+    ]) {
+      expect(isClaudeSignInPathSegments(relative.split("/")), relative).toBe(true);
+    }
+    for (const relative of [
+      "backups/db.sql",
+      "project/backups/notes.md",
+      ".claude/backups-old/notes.md",
+      ".claude/projects/backups/notes.md",
+      "claude.json.backup",
+      ".claude.jsonl",
     ]) {
       expect(isClaudeSignInPathSegments(relative.split("/")), relative).toBe(false);
     }
@@ -237,6 +325,34 @@ describe("isClaudeSignInPath", () => {
         homeDir: elsewhere,
       }),
     ).toBe(false);
+  });
+
+  it("matches Claude Code's .claude.json copies anywhere and the backups folder of any .claude dir or config dir", () => {
+    const root = path.join(os.tmpdir(), "paperclip-sign-in-path-backups");
+    const configDir = path.join(root, "claude-config");
+    const homeDir = path.join(root, "home");
+    const opts = { env: { CLAUDE_CONFIG_DIR: configDir }, homeDir };
+    for (const candidate of [
+      path.join(root, "anywhere", ".claude.json.backup"),
+      path.join(root, "anywhere", ".Claude.json.backup.1790000000000"),
+      path.join(root, "anywhere", ".claude.json.corrupted.1790000000000"),
+      path.join(root, "repo", ".claude", "backups"),
+      path.join(root, "repo", ".claude", "backups", "copy.json"),
+      path.join(configDir, "backups"),
+      path.join(configDir, "backups", "renamed-copy.json"),
+      path.join(homeDir, ".claude", "backups", "nested", "copy.json"),
+    ]) {
+      expect(isClaudeSignInPath(candidate, opts), candidate).toBe(true);
+    }
+    for (const candidate of [
+      path.join(root, "backups", "db.sql"),
+      path.join(root, "repo", ".claude", "projects", "backups", "notes.md"),
+      path.join(configDir, "projects", "backups", "notes.md"),
+      path.join(`${configDir}-other`, "backups", "copy.json"),
+      path.join(root, "anywhere", "claude.json.backup"),
+    ]) {
+      expect(isClaudeSignInPath(candidate, opts), candidate).toBe(false);
+    }
   });
 
   it("follows symbolic links: a config dir reached through a link, and a sign-in file that links elsewhere", async () => {

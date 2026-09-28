@@ -8,8 +8,10 @@ import type {
   AdapterRuntimeMcpServer,
 } from "@paperclipai/adapter-utils";
 import {
+  CLAUDE_CONFIG_BACKUPS_DIR_NAME,
   CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
   CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+  claudeGlobalConfigCopyNames,
 } from "@paperclipai/adapter-utils/claude-config-credential-excludes";
 import {
   adapterExecutionTargetUsesManagedHome,
@@ -28,22 +30,26 @@ const SEEDED_SHARED_FILES = ["settings.json", "CLAUDE.md"] as const;
 
 /**
  * Entries a Claude config seed never carries to a remote target: the Claude
- * sign-in files and `.claude.json` (the signed-in account, possibly a Console
- * API key). tar matches a plain entry at any depth of the seed.
+ * sign-in files, `.claude.json` (the signed-in account, possibly a Console
+ * API key), Claude Code's `backups` folder (timestamped `.claude.json` copies)
+ * and the legacy `.claude.json.backup`. tar matches a plain entry at any depth
+ * of the seed.
  */
 export const CLAUDE_CONFIG_SEED_EXCLUDES: readonly string[] = [
   ...CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
   CLAUDE_GLOBAL_CONFIG_FILE_NAME,
+  CLAUDE_CONFIG_BACKUPS_DIR_NAME,
+  `${CLAUDE_GLOBAL_CONFIG_FILE_NAME}.backup`,
 ];
 
 /**
  * The `config-seed` runtime asset for a remote target. Fork policy: a remote
  * target runs only with an API key, so whatever dir the seed comes from (the
  * sanitized managed snapshot, or a managed AI connection's config dir) its
- * Claude sign-in files and `.claude.json` stay on this server. The seed is a
- * Paperclip-managed dir of regular files, so staging never follows a symbolic
- * link: a link planted in it cannot pull a host file (such as
- * `~/.claude/.credentials.json`) into the sandbox.
+ * Claude sign-in files, `.claude.json` and Claude Code's copies of it stay on
+ * this server. The seed is a Paperclip-managed dir of regular files, so
+ * staging never follows a symbolic link: a link planted in it cannot pull a
+ * host file (such as `~/.claude/.credentials.json`) into the sandbox.
  * See doc/plans/2026-09-24-claude-cli-only-auth.md.
  */
 export function claudeConfigSeedAsset(localDir: string): AdapterManagedRuntimeAsset {
@@ -51,7 +57,9 @@ export function claudeConfigSeedAsset(localDir: string): AdapterManagedRuntimeAs
     key: "config-seed",
     localDir,
     followSymlinks: false,
-    exclude: [...CLAUDE_CONFIG_SEED_EXCLUDES],
+    // Timestamped `.claude.json` copies in the seed root are listed by exact
+    // name: the entries stay literal, like every other staging exclude.
+    exclude: [...new Set([...CLAUDE_CONFIG_SEED_EXCLUDES, ...claudeGlobalConfigCopyNames(localDir)])],
   };
 }
 

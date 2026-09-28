@@ -204,7 +204,9 @@ concurrency cap.
   environment Test route (check `claude_subscription_not_allowed`, no probe),
   and in the auth-signal route (status `absent`, reason
   `subscription_not_allowed`, which the sign-in panel shows as the owner-only
-  message without sign-in steps). When the Test route does run a
+  message without sign-in steps). In the Test route the lane is the probe's
+  lane, decided on the env the probe child gets, not the agent's run lane
+  (see the endpoint bullet). When the Test route does run a
   subscription-lane probe for a caller that is not the board (an agent key
   with `agents:create`), the server fixes the probe
   (`claudeSubscriptionProbeConfigForActor` in
@@ -269,6 +271,21 @@ concurrency cap.
   without their quotes, with `${NAME}` removed from names. `env -- NAME=VALUE
   claude` counts too. The process config's `engine` and `managedAiConnection`
   keys are ignored.
+
+  An agent of any other adapter (codex_local, kimi_local, gemini_local,
+  grok_local, cursor, opencode_local, pi_local, hermes_local through `command`
+  or `hermesCommand`, or a plugin adapter) whose command starts `claude` is
+  refused in the heartbeat on every target, before any workspace or process
+  work (`configuration_incomplete`, reason `claude_command_on_other_adapter`;
+  `claudeCommandOnOtherAdapterRefusal` in `claude-subscription-target.ts`).
+  Such an adapter spawns its command with the server's env and home, so
+  `claude` would use the server's sign-in with none of the claude_local rules.
+  The command is recognised as for a process agent, with the adapter's
+  `extraArgs` and `args` as the args. The environment Test refuses such a
+  config the same way (check `claude_command_on_other_adapter`,
+  `claudeCommandOnOtherAdapterTestCheck` in `claude-subscription-probe.ts`)
+  before the adapter's own Test, which would run the command for a version
+  check or hello probe; so does the Test of a managed AI connection adoption.
 - **Trigger-source gate.** Even for the owner,
   `resolveClaudeSubscriptionTriggerViolation` refuses a subscription-lane run
   whose wake came from outside Paperclip (reason
@@ -490,11 +507,24 @@ concurrency cap.
   bullet). The run fails with
   `adapter_engine_unavailable` before launch; the environment Test reports the
   same message and runs no probe. API-key, gateway (`ANTHROPIC_AUTH_TOKEN`)
-  and Bedrock/Vertex/Foundry runs keep custom endpoints. The local Test probe
-  builder (`probe-env.ts`) drops a caller `ANTHROPIC_BASE_URL` unless the
-  probe child gets an API credential or the URL names api.anthropic.com,
-  because a config-only Vertex or Foundry flag passes the gate but never
-  reaches the probe child.
+  and Bedrock/Vertex/Foundry runs keep custom endpoints.
+
+  The environment Test classifies the local CLI probe on the env its child
+  gets: `pickLocalProbeCallerEnv` and `claudeLocalTestProbeConfig` in
+  `credential-policy.ts` pick the allowlisted part of the adapter env (the
+  probe env builder in `probe-env.ts` uses the same function), and
+  `isClaudeSubscriptionLaneRun({ localTestProbe: true })` classifies on it
+  (route helper `isClaudeSubscriptionLaneTestProbe` in
+  `claude-subscription-probe.ts`). The Vertex and Foundry flags are not in the
+  allowlist, so a Vertex- or Foundry-only agent on the CLI engine is metered
+  for runs, but its Test probe runs on the sign-in. The owner-only gate
+  (`claude_subscription_not_allowed`), the server-fixed probe for non-board
+  callers, and the endpoint check (probe env plus inline `--settings` env,
+  reported as `adapter_engine_unavailable`, no probe) all apply to it, and the
+  Test adds the info check `claude_probe_uses_cli_sign_in`. The probe env
+  drops a caller `ANTHROPIC_BASE_URL` unless the child gets an API credential
+  or the URL names api.anthropic.com. A Test whose engine resolves to ACP is
+  not gated, because it starts no claude CLI.
 
   Paperclip decides the lane from the env the `claude` binary uses. The inline
   `--settings` env in `extraArgs`/`args` is applied over the agent and server
@@ -515,8 +545,12 @@ concurrency cap.
   The process adapter runs the same check before it spawns a command that
   starts `claude` (see the owner-only bullet) on the subscription lane
   (`resolveProcessClaudeSubscriptionRefusal`). It reads the agent env, the
-  `env` wrapper assignments, and inline `--settings` JSON in `args`. The run
-  fails with `adapter_engine_unavailable` and nothing is spawned.
+  `env` wrapper assignments, and inline `--settings` JSON in `args`. An `env`
+  chain it cannot read exactly is also refused when it has a `${VAR}`
+  anywhere in an `env -S` string, or assigns a name that is empty or not a
+  plain variable name once any `${VAR}` is dropped, because `env` may then set
+  any key; a process claude agent never needs either. The run fails with
+  `adapter_engine_unavailable` and nothing is spawned.
 - **Third-party harness guard.** Only the official `claude` binary may use a
   Claude subscription (`packages/adapter-utils/src/claude-subscription-harness-guard.ts`).
   Hermes (provider `anthropic`, or `auto` when `~/.hermes/config.yaml` selects
@@ -560,11 +594,13 @@ concurrency cap.
   upload and from the sync-back, and the config seed is staged without sign-in
   files. Every `config-seed` asset (the CLI and ACP runs and the sandbox Test
   probe) goes through `claudeConfigSeedAsset` in `claude-config.ts`: it
-  excludes `.credentials.json`, `credentials.json` and `.claude.json` at any
-  depth and is staged with `followSymlinks: false`, so a link planted in a
-  managed AI connection's config dir cannot pull a host file along (added
-  2026-09-28). Only `prepareManagedAiRuntime` marks a run as a managed AI
-  connection, which is what makes the adapter stage the agent's
+  excludes `.credentials.json`, `credentials.json`, `.claude.json`, the
+  `backups` folder and the legacy `.claude.json.backup` at any depth, plus
+  the timestamped `.claude.json` copies in the seed root by exact name, and is
+  staged with `followSymlinks: false`, so a link planted in a managed AI
+  connection's config dir cannot pull a host file along (added 2026-09-28).
+  Only `prepareManagedAiRuntime` marks a run as a managed AI connection,
+  which is what makes the adapter stage the agent's
   `CLAUDE_CONFIG_DIR` as the seed: `resolveExecutionRunAdapterConfig` in the
   heartbeat drops a `managedAiConnection` stored in an agent's adapter config,
   and the adapter test-environment route drops a caller-supplied one. The SSH
@@ -581,7 +617,17 @@ concurrency cap.
   `.claude` dir at any depth and any `.claude.json` at any depth, plus, when
   they sit inside the workspace, the sign-in files and `.claude.json` of the
   server's `CLAUDE_CONFIG_DIR`, the sign-in files of `~/.claude`, and
-  `~/.claude.json`. So a codex_local, opencode_local, pi_local, gemini_local,
+  `~/.claude.json`. They also cover Claude Code's copies of `.claude.json`
+  (claude 2.1.283 writes `<config dir>/backups/.claude.json.backup.<ms>` and
+  `.claude.json.corrupted.<ms>`): `.claude/backups` and the legacy
+  `.claude.json.backup` at any depth, the `backups` folder of the server's
+  `CLAUDE_CONFIG_DIR` and `~/.claude` inside the workspace, and the
+  timestamped `.claude.json` copies that exist next to the server's global
+  config (home dir or `CLAUDE_CONFIG_DIR`), listed by exact name. Exclude
+  entries stay literal because the restore baseline (`shouldExcludePath`) does
+  not understand globs: a glob would leave a file out of the upload while
+  keeping it in the baseline, and the restore would then delete it locally.
+  So a codex_local, opencode_local, pi_local, gemini_local,
   grok_local, kimi_local or cursor run on an SSH or sandbox target no longer
   uploads the owner's Claude sign-in when its workspace holds the service
   user's home or the server's `CLAUDE_CONFIG_DIR`. The sync-back never reads
@@ -589,7 +635,8 @@ concurrency cap.
   merged in, so a baseline captured before this change cannot delete the host
   file) and never copies one created remotely back to the host. Referenced
   projects staged next to the workspace get the same excludes. claude_local
-  keeps its own excludes for the agent's explicit `CLAUDE_CONFIG_DIR` on top.
+  keeps its own excludes for the agent's explicit `CLAUDE_CONFIG_DIR` on top:
+  its sign-in files and its `backups` folder, on both engines.
 - **Workspace file browser.** `/issues/:issueId/file-resources/*` denies Claude
   sign-in files as `denied_secret`: `.credentials.json` and `credentials.json`
   inside any `.claude` folder, and `.claude.json` at any depth
@@ -601,7 +648,13 @@ concurrency cap.
   `CLAUDE_CONFIG_DIR` or `~/.claude`, any `.claude.json`, and the real target
   of a sign-in file that is a link to a file with another name. This covers
   content, resolve, download (and so native-runner file reads), availability,
-  and list/search/recent/changed. Helpers: `createClaudeSignInPathMatcher`,
+  and list/search/recent/changed. It also denies Claude Code's copies of
+  `.claude.json` (any file name starting with `.claude.json.backup` or
+  `.claude.json.corrupted`, any case, at any depth) and the `backups` folder,
+  with everything in it, of any `.claude` dir and of the server's
+  `CLAUDE_CONFIG_DIR` / `~/.claude` (checked in claude 2.1.283, which writes
+  `<config dir>/backups/.claude.json.backup.<ms>` and
+  `.claude.json.corrupted.<ms>`). Helpers: `createClaudeSignInPathMatcher`,
   `isClaudeSignInPath` and `isClaudeSignInPathSegments` in
   `claude-config-credential-excludes.ts`.
 - **Plugin local folders.** A Claude config dir (the server's
@@ -612,11 +665,24 @@ concurrency cap.
   refuse it with 403 before creating or storing anything. A folder like that
   stored earlier reports a `not_readable` problem, so its status is unhealthy
   and list/readText/writeTextAtomic/deleteFile refuse it. In any local
-  folder, readText refuses a Claude sign-in file, list leaves it out, and
-  writeTextAtomic and deleteFile refuse one (`overlapsClaudeConfigDir` in
-  `claude-config-credential-excludes.ts`,
+  folder, readText refuses a Claude sign-in file (the same names as the file
+  browser, including the `.claude.json` copies and `backups` folders), list
+  leaves it out, and writeTextAtomic and deleteFile refuse one
+  (`overlapsClaudeConfigDir` in `claude-config-credential-excludes.ts`,
   `assertPluginLocalFolderOutsideClaudeConfig` in
   `plugin-local-folders.ts`).
+- **Agent instructions bundles** (`server/src/services/agent-instructions.ts`).
+  A new external bundle root, or a new legacy `instructionsFilePath` whose
+  folder is, lies inside, or contains a Claude config dir
+  (`overlapsClaudeConfigDir`), is refused with 422 before anything is
+  created. A root that was stored earlier and is unchanged stays usable. The
+  bundle API never lists, reads (403), exports, writes or deletes (403) a
+  Claude sign-in file, including through links (real-path checks). This also
+  applies to company exports and the native-runtime instruction asset (both go
+  through `exportFiles`). The legacy fallback never reads an
+  `instructionsFilePath` that is a sign-in file. `materializeManagedBundle`
+  refuses an imported file named as a sign-in file (403) before replacing the
+  managed root.
 - **Follow-up migration.** `0286_remove_claude_subscription_tokens_from_env.sql`
   removes, from issue assignee overrides and `hire_agent` approval payloads
   (both missed by 0285) and again from agent, environment, project, routine and
@@ -728,18 +794,28 @@ concurrency cap.
   subscription-lane run. Paperclip never reads the sign-in itself; keeping
   agents away from it would need running them as a separate OS user from the
   one that signed in to Claude.
-- Only a direct start of `claude` by a `process` agent is recognized. A shell
-  (`sh -c "claude …"`), a script, a copy or symlink of the binary under
+- Only a direct start of `claude` by a `process` agent is recognized. An
+  agent of any other adapter (codex_local, kimi_local, gemini_local,
+  grok_local, cursor, opencode_local, pi_local, hermes_local through
+  `command`/`hermesCommand`, or a plugin adapter) whose command starts
+  `claude` is refused in the heartbeat with `configuration_incomplete`
+  (reason `claude_command_on_other_adapter`) on every target, recognised the
+  same way as for a process agent, with `extraArgs`/`args` as the args. A
+  shell (`sh -c "claude …"`), a script, a copy or symlink of the binary under
   another name, or any program that starts `claude` itself gets neither the
-  gates nor the endpoint check. The check also errs toward gating: `npm run
+  gates nor the endpoint check, and another adapter's command of that kind is
+  not refused either. The check also errs toward gating: `npm run
   claude` or `node tool.js claude` counts as a Claude run. `env -S` strings
   are split like GNU `env` (space, tab, newline, VT, FF, CR; quotes; escapes;
-  `#` comments), but `${VAR}` is not expanded, so a `${VAR}` that expands to a
-  whole assignment, an `env` flag or the command name is not seen, which is
-  the same class of gap as `sh -c`. Any quoted, escaped, expanded or commented
-  `-S` string, or an unknown `env` flag, over-gates: an API key assigned inside
-  it or after it does not count, so such an agent is treated as
-  subscription-lane, and a custom endpoint is refused. Input that GNU `env`
+  `#` comments), but `${VAR}` is not expanded, so a `${VAR}` that expands to
+  an `env` flag or to the command name is not seen, which is the same class
+  of gap as `sh -c`. An unreadable `env` chain that has a `${VAR}` anywhere in
+  an `env -S` string, or assigns a name that is empty or not a plain variable
+  name, is refused as an endpoint violation on the subscription lane (a
+  process claude agent never needs either). Any quoted, escaped, expanded or
+  commented `-S` string, or an unknown `env` flag, over-gates: an API key
+  assigned inside it or after it does not count, so such an agent is treated
+  as subscription-lane, and a custom endpoint is refused. Input that GNU `env`
   refuses to run (an unknown escape, an unterminated quote) is read leniently.
   A flag read after an assignment or after `--` (where real `env` would try to
   run it as the command) is still treated as a flag, which also leans toward
@@ -792,6 +868,13 @@ concurrency cap.
   because the route sees the calling agent, not the wake that started its run.
   The probe returns only fixed pass/fail checks, never model output. A
   `CLAUDE.md` in the caller-chosen `cwd` is still loaded.
+- A Vertex- or Foundry-only agent's CLI Test checks the `claude` CLI sign-in,
+  not the provider. Forwarding the Vertex/Foundry flags and their provider
+  keys to the probe child would need caller-controlled
+  `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL`,
+  `GOOGLE_APPLICATION_CREDENTIALS` or `ANTHROPIC_FOUNDRY_*` values in the
+  probe allowlist, which could hand the server's Google or Azure credentials
+  to an endpoint the caller picks; that needs a product decision.
 - The workspace file browser and plugin local folders deny only what
   Paperclip itself serves over its API and to plugins. A local agent running
   as the same OS user can still read the sign-in files directly (see the
@@ -800,8 +883,17 @@ concurrency cap.
   directly in a `.claude` dir, so a workspace under an unrelated `.claude`
   ancestor (such as Claude Code's `<repo>/.claude/worktrees/*`) keeps its
   deeper `credentials.json` files; inside the root, a credential file at any
-  depth under a `.claude` segment is still denied. Claude Code's
-  `.claude.json` backups (`.claude.json.backup.*`) are not denied.
+  depth under a `.claude` segment is still denied. The absolute sign-in
+  matcher knows only the server's `CLAUDE_CONFIG_DIR` and `~/.claude`: a
+  sign-in kept in an agent-level `CLAUDE_CONFIG_DIR` that is not named
+  `.claude` and lies inside a workspace root is not denied by the file API.
+- An instructions root stored before the bundle checks inside a Claude config
+  dir (or the home dir) keeps working, with its sign-in files hidden, but its
+  other files (for example `~/.claude/projects` transcripts) are still
+  listed. Adapters read `instructionsFilePath` themselves, outside
+  `agent-instructions.ts`: a legacy `instructionsFilePath` stored before this
+  change that names a sign-in file is still read by the adapter at run time;
+  only new values are refused at save time.
 - Left out of the endpoint check on purpose:
   - Proxies (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`,
     `CLAUDE_CODE_PROXY_*`, `CLAUDE_CODE_HTTP(S)_PROXY`): while certificate
@@ -840,9 +932,12 @@ concurrency cap.
 - Remote staging filters only the working-tree overlay and plain uploads. A
   Claude sign-in file committed to the workspace's git history still travels
   with the git-history clone (sandbox) or bundle (SSH). A durable seed archive
-  persisted before this change is replayed as-is. Claude Code's `.claude.json`
-  backups (`~/.claude/backups/.claude.json.backup.*`, older
-  `~/.claude.json.backup`) and the legacy `.config.json` are not excluded.
+  persisted before this change is replayed as-is. The legacy `.config.json`
+  is not excluded; a timestamped `.claude.json.backup.<ms>` outside a
+  `.claude/backups` folder is excluded only next to the server's own global
+  config (for claude_local, also in the `backups` folder of the agent's own
+  `CLAUDE_CONFIG_DIR`); a copy whose name contains a tar glob character is
+  not excluded.
   Runtime assets (adapter-chosen directories) are not filtered generically. A
   native provider `syncOut` receives the exclude list as-is, and how it
   matches the entries is up to the provider.

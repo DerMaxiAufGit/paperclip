@@ -23,7 +23,11 @@ import {
   resolveClaudeSubscriptionEligibility,
   resolveClaudeSubscriptionTriggerViolation,
 } from "./claude-subscription-policy.js";
-import { claudeSubscriptionGateInput, claudeSubscriptionTargetIsRemote } from "./claude-subscription-target.js";
+import {
+  claudeCommandOnOtherAdapterRefusal,
+  claudeSubscriptionGateInput,
+  claudeSubscriptionTargetIsRemote,
+} from "./claude-subscription-target.js";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
@@ -21426,6 +21430,18 @@ export function heartbeatService(
       // has other users, or when the wake came from outside the owner. A driver
       // that yields no remote target (a plugin driver) runs here, so it counts as local.
       // A process agent whose command starts `claude` gets the same gates.
+      // Any other adapter whose command starts `claude` is refused outright.
+      const claudeCommandRefusal = claudeCommandOnOtherAdapterRefusal(agent.adapterType, resolvedConfig);
+      if (claudeCommandRefusal) {
+        throw new ConfigurationIncompleteFailure(claudeCommandRefusal.message, {
+          configurationIncomplete: {
+            reason: claudeCommandRefusal.reason,
+            agentId: agent.id,
+            actionUrl: `/agents/${agent.id}/runtime`,
+            fingerprint: `claude-command:${agent.id}:${agent.adapterType}`,
+          },
+        });
+      }
       const claudeSubscriptionGate = claudeSubscriptionGateInput(agent.adapterType, resolvedConfig);
       if (claudeSubscriptionGate) {
         await assertClaudeSubscriptionLaneAllowed({

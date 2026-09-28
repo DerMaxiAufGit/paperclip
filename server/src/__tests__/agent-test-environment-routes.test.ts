@@ -388,6 +388,41 @@ describe("agent test-environment route", () => {
     expect(testEnvironmentSpy).not.toHaveBeenCalled();
   });
 
+  // Fork policy: another adapter's Test runs its configured command (version
+  // checks, hello probes) as the service user. With a command that starts
+  // `claude`, that would use the server's Claude sign-in with none of the
+  // claude_local rules, so the route refuses it before the adapter's Test, as
+  // the heartbeat refuses the run.
+  describe("another adapter configured to run claude", () => {
+    it.each([
+      { name: "a bare claude command", adapterConfig: { command: "claude" } },
+      { name: "a claude path", adapterConfig: { command: "/usr/local/bin/Claude.exe" } },
+      { name: "an env wrapper", adapterConfig: { command: "env", extraArgs: ["FOO=1", "claude"] } },
+      { name: "a package runner", adapterConfig: { command: "npx", args: ["@anthropic-ai/claude-code"] } },
+      { name: "a hermesCommand", adapterConfig: { hermesCommand: "claude" } },
+    ])("refuses $name before the adapter's Test runs", async ({ adapterConfig }) => {
+      const app = await createApp();
+      const res = await request(app)
+        .post("/api/companies/company-1/adapters/external_test/test-environment")
+        .send({ adapterConfig });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.status).toBe("fail");
+      expect(res.body.checks).toEqual([
+        expect.objectContaining({ code: "claude_command_on_other_adapter", level: "error" }),
+      ]);
+      expect(testEnvironmentSpy).not.toHaveBeenCalled();
+    });
+
+    it("runs the adapter's Test for its own command", async () => {
+      const app = await createApp();
+      const res = await request(app)
+        .post("/api/companies/company-1/adapters/external_test/test-environment")
+        .send({ adapterConfig: { command: "codex", extraArgs: ["--model", "claude-like-name"] } });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(testEnvironmentSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it.each(["CURSOR_API_KEY", "KIMI_MODEL_API_KEY", "ZAI_API_KEY", "KIMI_API_KEY", "MINIMAX_API_KEY"])("accepts %s as a probe-only credential", async (key) => {
     const app = await createApp();
     const res = await request(app)
@@ -512,6 +547,8 @@ describe("agent test-environment route", () => {
       "ANTHROPIC_API_KEY",
       "ANTHROPIC_AUTH_TOKEN",
       "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CODE_USE_FOUNDRY",
     ] as const;
     let savedHostEnv: Record<string, string | undefined> = {};
     beforeEach(() => {
@@ -593,6 +630,86 @@ describe("agent test-environment route", () => {
         expect(apiKey.status, JSON.stringify(apiKey.body)).toBe(200);
         expect(mockResolveClaudeSubscriptionEligibility).not.toHaveBeenCalled();
         expect(probe).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    // The local Test probe child never gets the adapter env's Vertex or Foundry
+    // flag, so on the CLI engine that probe runs on the server's sign-in even
+    // though the agent's runs are metered. The route gates it like any other
+    // subscription-lane probe.
+    describe.each([
+      { provider: "Vertex", env: { CLAUDE_CODE_USE_VERTEX: "1" } },
+      { provider: "Foundry", env: { CLAUDE_CODE_USE_FOUNDRY: "1" } },
+    ])("a $provider-only CLI probe", ({ env }) => {
+      it("is refused before probing when the instance has other users", async () => {
+        mockResolveClaudeSubscriptionEligibility.mockResolvedValueOnce({
+          allowed: false,
+          reason: "subscription_not_allowed",
+          message: "Claude subscription runs are limited to the server owner's own use.",
+        });
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp();
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({ adapterConfig: { cwd: "/", engine: "cli", env } });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          expect(res.body.status).toBe("fail");
+          expect(res.body.checks).toEqual(
+            expect.arrayContaining([expect.objectContaining({ code: "claude_subscription_not_allowed" })]),
+          );
+          expect(probe).not.toHaveBeenCalled();
+        });
+      });
+
+      it("gets the server-fixed probe for an agent, so its --settings never reach the CLI", async () => {
+        mockAgentService.getById.mockImplementation(async (id: string) =>
+          id === "agent-ceo"
+            ? { id, companyId: "company-1", adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {} }
+            : null,
+        );
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp({
+            type: "agent",
+            agentId: "agent-ceo",
+            companyId: "company-1",
+            source: "agent_key",
+            runId: "run-1",
+          });
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({
+              adapterConfig: {
+                cwd: "/",
+                engine: "cli",
+                env,
+                extraArgs: ["--settings", JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://evil.example" } })],
+              },
+            });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          expect(mockResolveClaudeSubscriptionEligibility).toHaveBeenCalledTimes(1);
+          expect(probe).toHaveBeenCalledTimes(1);
+          const config = (probe.mock.calls[0]?.[0] as { config: Record<string, unknown> }).config;
+          expect(config.extraArgs).toEqual([
+            "--setting-sources",
+            "user",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+          ]);
+          expect(JSON.stringify(config)).not.toContain("evil.example");
+        });
+      });
+
+      it("is not gated on the ACP engine, whose Test runs no claude CLI", async () => {
+        await withClaudeProbe(async (probe) => {
+          const app = await createApp();
+          // With no engine set, a local run with the provider flag uses ACP.
+          const res = await request(app)
+            .post("/api/companies/company-1/adapters/claude_local/test-environment")
+            .send({ adapterConfig: { cwd: "/", env } });
+          expect(res.status, JSON.stringify(res.body)).toBe(200);
+          expect(mockResolveClaudeSubscriptionEligibility).not.toHaveBeenCalled();
+          expect(probe).toHaveBeenCalledTimes(1);
+        });
       });
     });
 

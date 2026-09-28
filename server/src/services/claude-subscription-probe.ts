@@ -1,3 +1,8 @@
+import { isClaudeSubscriptionLaneRun, resolveClaudeExecutionEngine } from "@paperclipai/adapter-claude-local/server";
+import type { AdapterEnvironmentCheck } from "@paperclipai/adapter-utils";
+import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
+import { claudeCommandOnOtherAdapterRefusal } from "./claude-subscription-target.js";
+
 /**
  * The claude_local environment Test runs a real `claude` hello turn. On the
  * Claude subscription lane (`isClaudeSubscriptionLaneRun`) that turn uses the
@@ -27,6 +32,46 @@
  * subscription lane or uses the API credential the settings had blanked,
  * which no longer touches the sign-in. The board keeps the full probe.
  */
+
+/**
+ * True when the claude_local Test for this config runs a local `claude` probe
+ * on the server's Claude sign-in, so the owner-only gate and
+ * `claudeSubscriptionProbeConfigForActor` apply. It follows the adapter's Test:
+ * the ACP engine's Test starts no `claude` CLI, and the CLI probe child gets
+ * only part of the adapter env, so the lane is decided on that part
+ * (`localTestProbe`), never on the agent's full config. A Vertex- or
+ * Foundry-only agent is metered, but its CLI probe runs on the sign-in.
+ */
+export function isClaudeSubscriptionLaneTestProbe(input: {
+  config: Record<string, unknown>;
+  target: AdapterExecutionTarget | null | undefined;
+}): boolean {
+  if (resolveClaudeExecutionEngine(input.config, input.target).engine === "acp") return false;
+  return isClaudeSubscriptionLaneRun({ config: input.config, target: input.target, localTestProbe: true });
+}
+
+/**
+ * The failing environment Test check for an agent of another adapter (not
+ * claude_local or `process`) whose command starts the `claude` binary
+ * (`claudeCommandOnOtherAdapterRefusal`), or null. That adapter's Test runs
+ * its command as the service user (version checks, hello probes), so `claude`
+ * would use the server's Claude sign-in with none of the claude_local rules.
+ * The route returns this check before the adapter's Test runs, as the
+ * heartbeat refuses the run.
+ */
+export function claudeCommandOnOtherAdapterTestCheck(
+  adapterType: string,
+  config: Record<string, unknown>,
+): AdapterEnvironmentCheck | null {
+  const refusal = claudeCommandOnOtherAdapterRefusal(adapterType, config);
+  if (!refusal) return null;
+  return {
+    code: refusal.reason,
+    level: "error",
+    message: refusal.message,
+    hint: "Use the claude_local adapter to run Claude.",
+  };
+}
 
 /** The flags a non-board subscription-lane probe runs with, in place of the caller's args. */
 export const CLAUDE_SUBSCRIPTION_PROBE_ISOLATION_ARGS: readonly string[] = [

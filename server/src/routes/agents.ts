@@ -152,9 +152,13 @@ import {
   isTruthyRuntimeEnvValue,
   resolveWorktreeRunExecutionActivationState,
 } from "../services/instance-settings.js";
-import { isClaudeSubscriptionLaneRun, probeClaudeCliAuth } from "@paperclipai/adapter-claude-local/server";
+import { probeClaudeCliAuth } from "@paperclipai/adapter-claude-local/server";
 import { resolveClaudeSubscriptionEligibility } from "../services/claude-subscription-policy.js";
-import { claudeSubscriptionProbeConfigForActor } from "../services/claude-subscription-probe.js";
+import {
+  claudeCommandOnOtherAdapterTestCheck,
+  claudeSubscriptionProbeConfigForActor,
+  isClaudeSubscriptionLaneTestProbe,
+} from "../services/claude-subscription-probe.js";
 import {
   DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
   DEFAULT_CODEX_LOCAL_MODEL,
@@ -3010,6 +3014,9 @@ export function agentRoutes(
   }
 
   async function testManagedEnvironment(adapterType: string, context: Parameters<ReturnType<typeof requireServerAdapter>["testEnvironment"]>[0], binding: AiConnectionBinding) {
+    // Fork policy: never run another adapter's command that starts `claude`.
+    const claudeCommandCheck = claudeCommandOnOtherAdapterTestCheck(adapterType, context.config);
+    if (claudeCommandCheck) return { adapterType, status: "fail", checks: [claudeCommandCheck], testedAt: new Date().toISOString() } satisfies AdapterEnvironmentTestResult;
     await assertManagedAiProjectAuth(context.config, binding.provider, context.executionTarget);
     const result = await requireServerAdapter(adapterType).testEnvironment(context);
     if (result.status === "fail") return result;
@@ -3287,6 +3294,25 @@ export function agentRoutes(
             effectiveAdapterConfig.apiKey = req.body.testCredentials.API_SERVER_KEY;
           }
         }
+        // Fork policy: another adapter's Test runs its configured command as the
+        // service user, so a command that starts `claude` would use this
+        // server's Claude sign-in with none of the claude_local rules. Refuse it
+        // before the adapter's Test, as the heartbeat refuses the run.
+        const claudeCommandCheck = claudeCommandOnOtherAdapterTestCheck(type, effectiveAdapterConfig);
+        if (claudeCommandCheck) {
+          releaseStatus = "failed";
+          res.json({
+            adapterType: type,
+            status: "fail",
+            checks: [
+              ...(sandboxIdentityCheck ? [sandboxIdentityCheck] : []),
+              ...environmentEnvChecks,
+              claudeCommandCheck,
+            ],
+            testedAt: new Date().toISOString(),
+          } satisfies AdapterEnvironmentTestResult);
+          return;
+        }
         // A claude_local Test on the Claude subscription lane runs the claude CLI
         // signed in on this server (with a real model request). That lane is for
         // the server owner's own use only, so refuse it before probing when the
@@ -3294,7 +3320,7 @@ export function agentRoutes(
         if (
           type === "claude_local" &&
           !aiBinding &&
-          isClaudeSubscriptionLaneRun({ config: effectiveAdapterConfig, target: executionTarget })
+          isClaudeSubscriptionLaneTestProbe({ config: effectiveAdapterConfig, target: executionTarget })
         ) {
           const eligibility = await resolveClaudeSubscriptionEligibility(db);
           if (!eligibility.allowed) {

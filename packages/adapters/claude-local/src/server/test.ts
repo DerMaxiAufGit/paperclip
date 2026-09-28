@@ -36,7 +36,12 @@ import { buildClaudeProbePermissionArgs, claudeSandboxPermissionEnv } from "./pe
 import { prepareSandboxClaudeProbeRuntime } from "./claude-config.js";
 import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { resolveClaudeExecutionEngineForRun, testClaudeAcpEnvironment } from "./acp.js";
-import { withoutClaudeSubscriptionTokens } from "./credential-policy.js";
+import {
+  claudeLocalTestProbeConfig,
+  isClaudeSubscriptionLaneRun,
+  resolveClaudeSubscriptionEndpointViolation,
+  withoutClaudeSubscriptionTokens,
+} from "./credential-policy.js";
 import {
   buildAdapterTestTargetCheck,
   buildClaudeLoginRequiredHint,
@@ -62,6 +67,23 @@ function localExecutablesMatch(
   return trustedCommand === runtimeCommand;
 }
 
+/**
+ * The local CLI probe child gets only part of the adapter env
+ * (`claudeLocalTestProbeConfig`), so it runs on the server's Claude sign-in
+ * whenever that part holds no API credential, even when the agent's runs are
+ * metered (a Vertex- or Foundry-only agent). Such a probe must pass the same
+ * endpoint check as a subscription-lane run, on the env and args the probe
+ * child gets. The server gates it the same way (`isClaudeSubscriptionLaneRun`
+ * with `localTestProbe`).
+ */
+function resolveLocalProbeEndpointViolation(
+  config: Record<string, unknown>,
+  target: AdapterEnvironmentTestContext["executionTarget"],
+): string | null {
+  if (!isClaudeSubscriptionLaneRun({ config, target, localTestProbe: true })) return null;
+  return resolveClaudeSubscriptionEndpointViolation(claudeLocalTestProbeConfig(config));
+}
+
 export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
@@ -69,14 +91,19 @@ export async function testEnvironment(
     config: parseObject(ctx.config),
     executionTarget: ctx.executionTarget,
   });
-  if (engineSelection.unavailableReason) {
+  const unavailableReason =
+    engineSelection.unavailableReason ??
+    (engineSelection.engine === "cli"
+      ? resolveLocalProbeEndpointViolation(parseObject(ctx.config), ctx.executionTarget)
+      : null);
+  if (unavailableReason) {
     return {
       adapterType: "claude_local",
       status: "fail",
       checks: [{
         code: "adapter_engine_unavailable",
         level: "error",
-        message: engineSelection.unavailableReason,
+        message: unavailableReason,
       }],
       testedAt: new Date().toISOString(),
     };
@@ -222,6 +249,18 @@ export async function testEnvironment(
       code: "claude_subscription_mode_possible",
       level: "info",
       message: "ANTHROPIC_API_KEY is not set; Claude uses the sign-in of the claude CLI on the Paperclip host.",
+    });
+  }
+  if (
+    !targetIsRemote &&
+    !isClaudeSubscriptionLaneRun({ config, target }) &&
+    isClaudeSubscriptionLaneRun({ config, target, localTestProbe: true })
+  ) {
+    checks.push({
+      code: "claude_probe_uses_cli_sign_in",
+      level: "info",
+      message:
+        "The Test probe does not get the agent env's Vertex or Foundry setting, so it runs on the sign-in of the claude CLI on the Paperclip host. Agent runs still use that setting.",
     });
   }
 

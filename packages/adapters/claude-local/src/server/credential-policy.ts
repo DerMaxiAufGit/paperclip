@@ -520,6 +520,95 @@ export function withoutClaudeSubscriptionTokens<T>(env: Record<string, T>): Reco
 }
 
 /**
+ * The environment variable names that a local Claude adapter-test probe may
+ * take from the untrusted adapter configuration (see `probe-env.ts`). Every
+ * other key is denied. The list holds the documented Claude, Anthropic API
+ * auth, and AWS Bedrock variables that the probe needs to reach the real
+ * credential the agent run uses. It never holds a Claude subscription token:
+ * the local `claude` binary uses its own sign-in. The Vertex and Foundry
+ * provider flags are not in it, so a probe for an agent that bills through
+ * them runs on the server's sign-in; `isClaudeSubscriptionLaneRun` with
+ * `localTestProbe` classifies the probe on this list, so the lane gates apply.
+ */
+const LOCAL_PROBE_ALLOWED_CALLER_ENV_KEYS = [
+  // Claude and Anthropic API auth.
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "CLAUDE_CONFIG_DIR",
+  // AWS Bedrock inference.
+  "CLAUDE_CODE_USE_BEDROCK",
+  "ANTHROPIC_BEDROCK_BASE_URL",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_PROFILE",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+] as const;
+
+function readEnvCaseInsensitive(source: Record<string, unknown>, key: string): string | undefined {
+  const direct = source[key];
+  if (typeof direct === "string") return direct;
+  const upper = key.toUpperCase();
+  for (const [candidateKey, candidateValue] of Object.entries(source)) {
+    if (candidateKey.toUpperCase() === upper && typeof candidateValue === "string") {
+      return candidateValue;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The part of the untrusted adapter env that a local environment Test probe
+ * child gets: the allowlisted keys (read in any case, written in upper case)
+ * with a non-empty value that is not a subscription token. The child runs with
+ * `trustedEnv` (the server env) under it. The probe env builder and the probe's
+ * lane classification both use this one function, so the lane is decided on
+ * exactly the env the `claude` child sees.
+ *
+ * Without an API credential the child runs on the server's Claude sign-in,
+ * which the `claude` binary sends to `ANTHROPIC_BASE_URL`, so a caller base URL
+ * is kept only when the child gets an API credential (from these values or the
+ * trusted env it inherits), or when it names api.anthropic.com.
+ */
+export function pickLocalProbeCallerEnv(
+  callerEnv: Record<string, unknown>,
+  trustedEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const source = withoutClaudeSubscriptionTokens(callerEnv);
+  const env: Record<string, string> = {};
+  for (const key of LOCAL_PROBE_ALLOWED_CALLER_ENV_KEYS) {
+    const value = readEnvCaseInsensitive(source, key);
+    if (value !== undefined && value.trim().length > 0) env[key] = value;
+  }
+  if (
+    env.ANTHROPIC_BASE_URL !== undefined &&
+    !isClaudeSubscriptionApiEndpoint(env.ANTHROPIC_BASE_URL) &&
+    !claudeRunHasApiCredential({ config: { env }, targetIsRemote: false, hostEnv: trustedEnv })
+  ) {
+    delete env.ANTHROPIC_BASE_URL;
+  }
+  return env;
+}
+
+/**
+ * The adapter config as the local environment Test probe child sees it: the
+ * caller's args and settings, with only the env it gets
+ * (`pickLocalProbeCallerEnv`). Classify the probe and run its endpoint check
+ * on this config, never on the agent's full config.
+ */
+export function claudeLocalTestProbeConfig(
+  config: Record<string, unknown>,
+  trustedEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> {
+  return { ...config, env: pickLocalProbeCallerEnv(parseObject(config.env), trustedEnv) };
+}
+
+/**
  * True when a claude_local run is on the Claude subscription lane: it runs on
  * this server (local target) with no API credential in the env the `claude`
  * CLI uses (after the inline `--settings` env, which can take one away), so
@@ -527,6 +616,11 @@ export function withoutClaudeSubscriptionTokens<T>(env: Record<string, T>): Reco
  * `engine=acp` run is not on the lane (the ACP credential gate refuses it
  * without an API key). This is the lane the owner-only and trigger-source
  * gates guard.
+ *
+ * With `localTestProbe`, it classifies the local environment Test probe of
+ * that config instead of an agent run: the probe child gets only part of the
+ * adapter env (`claudeLocalTestProbeConfig`), so for example a Vertex- or
+ * Foundry-only agent is metered, but its CLI probe runs on the sign-in.
  */
 export function isClaudeSubscriptionLaneRun(input: {
   config: Record<string, unknown>;
@@ -534,11 +628,16 @@ export function isClaudeSubscriptionLaneRun(input: {
   target?: AdapterExecutionTarget | null;
   targetIsRemote?: boolean;
   hostEnv?: NodeJS.ProcessEnv;
+  /** Classify the local environment Test probe on the env its child gets. */
+  localTestProbe?: boolean;
 }): boolean {
   if (input.targetIsRemote === true || input.target?.kind === "remote") return false;
   const rawEngine = typeof input.config.engine === "string" ? input.config.engine.trim().toLowerCase() : "";
   if (rawEngine === "acp") return false;
-  return isLocalCliSubscriptionRun(input.config, input.hostEnv);
+  const config = input.localTestProbe
+    ? claudeLocalTestProbeConfig(input.config, input.hostEnv ?? process.env)
+    : input.config;
+  return isLocalCliSubscriptionRun(config, input.hostEnv);
 }
 
 /**

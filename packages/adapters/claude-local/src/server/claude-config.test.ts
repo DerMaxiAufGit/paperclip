@@ -416,6 +416,34 @@ describe("prepareSandboxClaudeProbeRuntime config-seed staging", () => {
     }
   });
 
+  it("never stages Claude Code's .claude.json copies or the backups folder of a managed AI connection's config dir", async () => {
+    // A managed AI connection's config dir is a live Claude config dir: claude
+    // writes `backups/.claude.json.backup.<ms>` there, and older versions left
+    // `.claude.json.backup` and timestamped copies next to `.claude.json`.
+    const root = await makeRoot("paperclip-claude-seed-backups-");
+    const configDir = path.join(root, "service-home", ".claude");
+    await writeSignedInClaudeConfigDir(configDir);
+    const account = JSON.stringify({ oauthAccount: { emailAddress: "owner@example.test" }, primaryApiKey: "sk-ant-api03-HOSTCOPY" });
+    await fs.mkdir(path.join(configDir, "backups"), { recursive: true });
+    await fs.writeFile(path.join(configDir, "backups", ".claude.json.backup.1790000000000"), account);
+    await fs.writeFile(path.join(configDir, "backups", ".claude.json.corrupted.1790000000001"), account);
+    await fs.writeFile(path.join(configDir, ".claude.json.backup"), account);
+    await fs.writeFile(path.join(configDir, ".claude.json.backup.1790000000002"), account);
+    await fs.writeFile(path.join(configDir, ".Claude.json.Corrupted.1790000000003"), account);
+    const captured = captureStagedAssets(root);
+
+    await prepareSandboxClaudeProbeRuntime(
+      probeInput({ ANTHROPIC_API_KEY: "sk-ant-api03-remote", CLAUDE_CONFIG_DIR: configDir }, true),
+    );
+
+    const staged = await listRelative(captured.stagedDirs["config-seed"]!);
+    expect(staged).toEqual(["backup", "settings.json"]);
+    const archiveText = captured.archives["config-seed"]!.toString("latin1");
+    for (const marker of ["HOSTCOPY", "owner@example.test"]) {
+      expect(archiveText).not.toContain(marker);
+    }
+  });
+
   it("stages the config seed without following a symbolic link planted in it", async () => {
     // The seed is a Paperclip-managed dir of regular files. A link planted in it
     // must not pull the target's content (a host sign-in) into the sandbox.

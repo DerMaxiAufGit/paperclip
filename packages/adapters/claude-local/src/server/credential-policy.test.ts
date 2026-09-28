@@ -7,6 +7,7 @@ import {
   claudeConfigDeclaresApiCredential,
   claudeRunHasApiCredential,
   isClaudeSubscriptionLaneRun,
+  pickLocalProbeCallerEnv,
   resolveClaudeBillingIdentity,
   resolveClaudeCredentialPolicyViolation,
   resolveClaudeDefaultEngine,
@@ -464,6 +465,42 @@ describe("isClaudeSubscriptionLaneRun", () => {
         config: { managedAiConnection: { provider: "anthropic" }, env: { ANTHROPIC_API_KEY: "sk-ant-api03-x" } },
         hostEnv: EMPTY_HOST,
       }),
+    ).toBe(false);
+  });
+});
+
+describe("the local Test probe env and lane", () => {
+  it("gives the probe child only allowlisted, non-token values, in upper case", () => {
+    expect(
+      pickLocalProbeCallerEnv(
+        {
+          ANTHROPIC_API_KEY: "sk-ant-oat01-x",
+          anthropic_auth_token: "gw-token",
+          CLAUDE_CODE_USE_VERTEX: "1",
+          CLAUDE_CODE_USE_FOUNDRY: "1",
+          CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+          NODE_OPTIONS: "--require /evil.js",
+          AWS_REGION: " ",
+        },
+        EMPTY_HOST,
+      ),
+    ).toEqual({ ANTHROPIC_AUTH_TOKEN: "gw-token" });
+  });
+
+  it("classifies the probe on that env, not on the agent's full config", () => {
+    for (const env of [{ CLAUDE_CODE_USE_VERTEX: "1" }, { CLAUDE_CODE_USE_FOUNDRY: "true" }]) {
+      expect(isClaudeSubscriptionLaneRun({ config: { env }, hostEnv: EMPTY_HOST })).toBe(false);
+      expect(isClaudeSubscriptionLaneRun({ config: { env }, hostEnv: EMPTY_HOST, localTestProbe: true })).toBe(true);
+    }
+    const bedrock = { env: { CLAUDE_CODE_USE_BEDROCK: "1" } };
+    expect(isClaudeSubscriptionLaneRun({ config: bedrock, hostEnv: EMPTY_HOST, localTestProbe: true })).toBe(false);
+    // A remote or ACP probe never runs the local claude CLI on the sign-in.
+    const vertex = { env: { CLAUDE_CODE_USE_VERTEX: "1" } };
+    expect(
+      isClaudeSubscriptionLaneRun({ config: vertex, target: REMOTE_SANDBOX, hostEnv: EMPTY_HOST, localTestProbe: true }),
+    ).toBe(false);
+    expect(
+      isClaudeSubscriptionLaneRun({ config: { ...vertex, engine: "acp" }, hostEnv: EMPTY_HOST, localTestProbe: true }),
     ).toBe(false);
   });
 });

@@ -100,6 +100,7 @@ import {
   createClaudeAcpExecutor,
   resolveClaudeExecutionEngineForRun,
 } from "./acp.js";
+import { claudeConfigBackupWorkspaceExcludes } from "@paperclipai/adapter-utils/claude-config-credential-excludes";
 import { resolveClaudeBillingIdentity, withoutClaudeSubscriptionTokens } from "./credential-policy.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -575,18 +576,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const claudeConfigSeedDir = useManagedRemoteClaudeConfig
     ? config.managedAiConnection ? sharedClaudeConfigDir : await prepareClaudeConfigSeed(process.env, onLog, agent.companyId)
     : null;
-  // The sign-in files of every Claude config dir inside the workspace (the
-  // agent's CLAUDE_CONFIG_DIR, the server's, and ~/.claude when the workspace
-  // holds the home directory) are neither uploaded nor synced back.
+  // The sign-in files and backups folder of every Claude config dir inside the
+  // workspace (the agent's CLAUDE_CONFIG_DIR, the server's, and ~/.claude when
+  // the workspace holds the home directory) are neither uploaded nor synced back.
+  const remoteConfigDirExcludeInput = {
+    workspaceLocalDir: cwd,
+    configDirs: [
+      typeof configEnv.CLAUDE_CONFIG_DIR === "string" ? configEnv.CLAUDE_CONFIG_DIR : null,
+      process.env.CLAUDE_CONFIG_DIR,
+      path.join(os.homedir(), ".claude"),
+    ],
+  };
   const remoteWorkspaceExclude = executionTargetIsRemote
-    ? claudeConfigCredentialWorkspaceExcludes({
-        workspaceLocalDir: cwd,
-        configDirs: [
-          typeof configEnv.CLAUDE_CONFIG_DIR === "string" ? configEnv.CLAUDE_CONFIG_DIR : null,
-          process.env.CLAUDE_CONFIG_DIR,
-          path.join(os.homedir(), ".claude"),
-        ],
-      })
+    ? [
+        ...claudeConfigCredentialWorkspaceExcludes(remoteConfigDirExcludeInput),
+        ...claudeConfigBackupWorkspaceExcludes(remoteConfigDirExcludeInput),
+      ]
     : [];
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {

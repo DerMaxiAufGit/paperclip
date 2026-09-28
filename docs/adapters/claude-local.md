@@ -59,15 +59,23 @@ Paperclip never reads, stores, forwards, or injects a Claude sign-in:
 - The workspace file browser on a task refuses to show Claude sign-in files:
   `.credentials.json` and `credentials.json` inside any `.claude` folder or
   anywhere inside the server's `CLAUDE_CONFIG_DIR` or `~/.claude`, and
-  `.claude.json` in any folder (`denied_secret`). This also holds when the
-  workspace folder is itself a Claude config folder or contains the server's
-  `CLAUDE_CONFIG_DIR` under another name, and for a link that points to one of
-  these files. The files do not appear in lists or search either.
+  `.claude.json` in any folder (`denied_secret`). The same goes for Claude
+  Code's copies of `.claude.json` (`.claude.json.backup*` and
+  `.claude.json.corrupted*` in any folder) and for the `backups` folder of any
+  `.claude` folder and of the server's `CLAUDE_CONFIG_DIR` or `~/.claude`.
+  This also holds when the workspace folder is itself a Claude config folder
+  or contains the server's `CLAUDE_CONFIG_DIR` under another name, and for a
+  link that points to one of these files. The files do not appear in lists or
+  search either.
 - A plugin local folder can never be a Claude config folder: the server's
   `CLAUDE_CONFIG_DIR` or `~/.claude`, a folder inside one, a folder that
   contains one (such as your home folder), or any folder named `.claude`.
   Saving such a folder is refused (403). In any other local folder, plugins
   cannot read, list, write or delete a Claude sign-in file.
+- An agent's instructions folder, or an instructions file path, cannot be in
+  a Claude config folder or in a folder that contains one (422). The
+  instructions API, company exports included, never lists, reads, exports,
+  writes or deletes a Claude sign-in file (403), also through a link.
 - Paperclip does not show Claude plan usage. See
   [Claude usage on the Costs page](#claude-usage-on-the-costs-page).
 - Two database migrations delete the Claude subscription credentials that
@@ -117,7 +125,8 @@ server env, not in the claude CLI's settings.json or an apiKeyHelper, so set it
 there." The run fails with `configuration_incomplete` (reason
 `subscription_not_allowed`) and links to the agent's runtime settings. The
 Environment Test reports the same message as `claude_subscription_not_allowed`
-and does not run the `claude` probe. The sign-in status panel shows the same
+and does not run the `claude` probe when that probe would use the sign-in (see
+[Environment Test](#environment-test)). The sign-in status panel shows the same
 message and no sign-in steps. Where the lane is allowed and an agent API key
 (not the board) runs the Environment Test on it, the server fixes how the probe
 runs: it ignores the extra args, loads only the service user's own settings and
@@ -444,6 +453,14 @@ credentials. So an Anthropic model on another harness needs an API key:
   Anthropic model gets an empty agent directory, so the remote Pi's own
   settings, models, and extensions are not used for that run.
 
+Another adapter cannot run the `claude` binary itself. An agent of any adapter
+other than `claude_local` and [`process`](/adapters/process) (for example
+`codex_local`, `gemini_local`, `hermes_local` through `hermesCommand`, or a
+plugin adapter) whose command starts `claude` fails before it starts
+(`configuration_incomplete`, reason `claude_command_on_other_adapter`), on
+every target. Its Environment Test reports `claude_command_on_other_adapter`
+without running the command. Use `claude_local` to run Claude.
+
 ## Quota waits
 
 Claude ACP runs that end with a typed provider-quota error retain the quota
@@ -585,14 +602,15 @@ On both engines, a remote sandbox run never forwards the agent's
 `CLAUDE_CONFIG_DIR` path into the sandbox, also when the path is inside the
 workspace. It always uses the managed directory, seeded from the sanitized
 server settings, or, for an Anthropic AI connection, from that connection's
-config directory without its sign-in files and `.claude.json`. The config
+config directory without its sign-in files, `.claude.json`, and Claude Code's
+copies of it (the `backups` folder and `.claude.json.backup*`). The config
 seed is staged without following symbolic links, so a link in it cannot bring
 a host file into the sandbox. On every remote target (sandbox or
 SSH) and both engines, the sign-in files (`.credentials.json`,
-`credentials.json`) of every Claude config directory inside the workspace are
-neither uploaded with the workspace nor synced back. That covers the agent's
-`CLAUDE_CONFIG_DIR`, the server's `CLAUDE_CONFIG_DIR`, and `~/.claude` (when
-the workspace is the service user's home directory). A local copy of such a
+`credentials.json`) and the `backups` folder of every Claude config directory
+inside the workspace are neither uploaded with the workspace nor synced back.
+That covers the agent's `CLAUDE_CONFIG_DIR`, the server's `CLAUDE_CONFIG_DIR`,
+and `~/.claude` (when the workspace is the service user's home directory). A local copy of such a
 file is never touched by the sync-back.
 
 This differs from [`codex_local`](/adapters/codex-local), where a
@@ -616,13 +634,26 @@ Use the "Test Environment" button in the UI to validate the adapter config. It c
   remote target without an API credential reports
   `adapter_engine_unavailable`.
 - On an instance that fails the
-  [owner-only rule](#who-may-use-the-subscription), a Test on the subscription
-  lane reports `claude_subscription_not_allowed` and stops before the probe.
+  [owner-only rule](#who-may-use-the-subscription), a Test whose probe runs on
+  the subscription lane reports `claude_subscription_not_allowed` and stops
+  before the probe.
 - Claude CLI is installed and accessible
 - Working directory is absolute and available (auto-created if missing and permitted)
 - Which authentication the CLI uses: an `ANTHROPIC_API_KEY` that overrides the
   sign-in, Bedrock, or the `claude` CLI's own sign-in on the Paperclip server
 - A live hello probe (`claude --print - --output-format stream-json --verbose` with prompt `Respond with hello.`) to verify CLI readiness
+
+The Test decides the lane from what its probe gets, not from the agent's run
+settings. From the agent env, the local probe gets only the Anthropic API key
+or gateway token, Bedrock settings, `ANTHROPIC_BASE_URL`, model names and
+`CLAUDE_CONFIG_DIR`, not `CLAUDE_CODE_USE_VERTEX` or
+`CLAUDE_CODE_USE_FOUNDRY`. So for a Vertex- or Foundry-only agent on the CLI
+engine, the probe runs on the `claude` CLI sign-in of the Paperclip server
+while the agent's runs still use Vertex or Foundry. The Test reports this as
+`claude_probe_uses_cli_sign_in` (info), and the owner-only rule, the fixed
+probe for agent API keys, and the [endpoint rules](#who-may-use-the-subscription)
+apply to that probe. A Test on the ACP engine starts no `claude` CLI, so these
+rules do not apply to it.
 
 When the probe finds no valid sign-in, the Test reports
 `claude_hello_probe_auth_required`. On the Paperclip server, the hint tells

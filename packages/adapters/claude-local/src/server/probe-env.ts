@@ -1,35 +1,7 @@
 import { access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
-import { claudeRunHasApiCredential, isClaudeSubscriptionApiEndpoint } from "./credential-policy.js";
-
-/**
- * The environment variable names that a local Claude adapter-test probe may
- * take from the untrusted adapter configuration. The builder denies every
- * other key by default. The list holds the documented Claude, Anthropic API
- * auth, and AWS Bedrock variables that the probe needs to reach the real
- * credential the agent run uses. It never holds a Claude subscription token:
- * the local `claude` binary uses its own sign-in.
- */
-const LOCAL_PROBE_ALLOWED_CALLER_ENV_KEYS = [
-  // Claude and Anthropic API auth.
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_MODEL",
-  "ANTHROPIC_SMALL_FAST_MODEL",
-  "CLAUDE_CONFIG_DIR",
-  // AWS Bedrock inference.
-  "CLAUDE_CODE_USE_BEDROCK",
-  "ANTHROPIC_BEDROCK_BASE_URL",
-  "AWS_BEARER_TOKEN_BEDROCK",
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_SESSION_TOKEN",
-  "AWS_PROFILE",
-  "AWS_REGION",
-  "AWS_DEFAULT_REGION",
-] as const;
+import { pickLocalProbeCallerEnv } from "./credential-policy.js";
 
 /**
  * The proxy variable names the probe may forward. The builder reads these only
@@ -65,21 +37,6 @@ export interface LocalProbeEnvironment {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
-}
-
-function readCaseInsensitive(
-  source: Record<string, string | undefined>,
-  key: string,
-): string | undefined {
-  const direct = source[key];
-  if (typeof direct === "string") return direct;
-  const upper = key.toUpperCase();
-  for (const [candidateKey, candidateValue] of Object.entries(source)) {
-    if (candidateKey.toUpperCase() === upper && typeof candidateValue === "string") {
-      return candidateValue;
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -150,31 +107,13 @@ export async function buildLocalAdapterTestProbeEnv(input: {
   const commandName = input.commandName ?? "claude";
   const command = await resolveTrustedExecutable(commandName, trustedEnv);
 
-  const env: Record<string, string> = {};
-
-  // Allowlisted caller values. Read each allowed key by name so no unexpected
-  // caller key can enter the child env. Proxy and Windows interpreter keys are
-  // never in the allowlist, so a caller cannot pass them here.
-  for (const key of LOCAL_PROBE_ALLOWED_CALLER_ENV_KEYS) {
-    const value = readCaseInsensitive(input.callerEnv, key);
-    if (isNonEmptyString(value)) {
-      env[key] = value;
-    }
-  }
-
-  // Without an API credential the probe child runs on the server's Claude
-  // sign-in, which the `claude` binary sends to ANTHROPIC_BASE_URL. Keep a caller
-  // base URL only when the child gets an API credential (from the allowlisted
-  // caller values or the trusted env it inherits), or when it names
-  // api.anthropic.com. The adapter env's Vertex and Foundry flags never reach
-  // the child, so they do not count here.
-  if (
-    env.ANTHROPIC_BASE_URL !== undefined &&
-    !isClaudeSubscriptionApiEndpoint(env.ANTHROPIC_BASE_URL) &&
-    !claudeRunHasApiCredential({ config: { env }, targetIsRemote: false, hostEnv: trustedEnv })
-  ) {
-    delete env.ANTHROPIC_BASE_URL;
-  }
+  // Allowlisted caller values (`pickLocalProbeCallerEnv`), read by name so no
+  // unexpected caller key can enter the child env. Proxy and Windows
+  // interpreter keys are never in the allowlist, so a caller cannot pass them
+  // here. The probe's lane is classified on the same function
+  // (`isClaudeSubscriptionLaneRun` with `localTestProbe`), and it drops a caller
+  // ANTHROPIC_BASE_URL when the child would run on the server's sign-in.
+  const env: Record<string, string> = pickLocalProbeCallerEnv(input.callerEnv, trustedEnv);
 
   // Proxy values come from the trusted input only. A caller-supplied proxy key
   // in `callerEnv` is never read, so it cannot reach the child.

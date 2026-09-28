@@ -1247,6 +1247,12 @@ describe("claude_local ACP lane", () => {
     );
     await fs.writeFile(path.join(operatorConfigDir, ".credentials.json"), "host-sign-in", "utf8");
     await fs.writeFile(path.join(operatorConfigDir, "credentials.json"), "host-sign-in-2", "utf8");
+    // Claude Code keeps timestamped copies of `.claude.json` in the config
+    // dir's backups folder; the dir is not named `.claude`, so only its own
+    // exclude covers them.
+    const backupName = ".claude.json.backup.1790000000000";
+    await fs.mkdir(path.join(operatorConfigDir, "backups"), { recursive: true });
+    await fs.writeFile(path.join(operatorConfigDir, "backups", backupName), "host-backup", "utf8");
     process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home");
     process.env.PAPERCLIP_INSTANCE_ID = "test";
 
@@ -1259,14 +1265,15 @@ describe("claude_local ACP lane", () => {
       return {
         ...turn,
         result: (async () => {
-          for (const name of [".credentials.json", "credentials.json"]) {
+          for (const name of [".credentials.json", "credentials.json", `backups/${backupName}`]) {
             const staged = path.join(remoteWorkspaceCwd, ".claude-config", name);
             if (await fs.stat(staged).then(() => true, () => false)) stagedCredentialFiles.push(name);
           }
           // A sign-in written in the sandbox never syncs back to the host.
-          await fs.mkdir(path.join(remoteWorkspaceCwd, ".claude-config"), { recursive: true });
+          await fs.mkdir(path.join(remoteWorkspaceCwd, ".claude-config", "backups"), { recursive: true });
           await fs.writeFile(path.join(remoteWorkspaceCwd, ".claude-config", ".credentials.json"), "sandbox-sign-in", "utf8");
           await fs.writeFile(path.join(remoteWorkspaceCwd, ".claude-config", "credentials.json"), "sandbox-sign-in", "utf8");
+          await fs.writeFile(path.join(remoteWorkspaceCwd, ".claude-config", "backups", backupName), "sandbox-backup", "utf8");
           await fs.writeFile(path.join(remoteWorkspaceCwd, "from-sandbox.txt"), "synced", "utf8");
           return await turn.result;
         })(),
@@ -1325,6 +1332,7 @@ describe("claude_local ACP lane", () => {
     // Never synced back: the host sign-in files are untouched, other changes land.
     await expect(fs.readFile(path.join(operatorConfigDir, ".credentials.json"), "utf8")).resolves.toBe("host-sign-in");
     await expect(fs.readFile(path.join(operatorConfigDir, "credentials.json"), "utf8")).resolves.toBe("host-sign-in-2");
+    await expect(fs.readFile(path.join(operatorConfigDir, "backups", backupName), "utf8")).resolves.toBe("host-backup");
     await expect(fs.readFile(path.join(localCwd, "from-sandbox.txt"), "utf8")).resolves.toBe("synced");
   });
 

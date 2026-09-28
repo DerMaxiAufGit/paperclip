@@ -292,6 +292,9 @@ describe("claude remote execution", () => {
         "agent-claude/credentials.json",
         ".claude/.credentials.json",
         ".claude/credentials.json",
+        // Claude Code keeps timestamped `.claude.json` copies in the backups
+        // folder of the agent's config dir, which is not named `.claude`.
+        "agent-claude/backups",
       ]),
     );
     // The restore compares against a baseline that skips the same paths, so the
