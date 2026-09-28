@@ -78,7 +78,9 @@ Agent SDK overview says the same for agents built on the Agent SDK.
   added). Gateway `ANTHROPIC_AUTH_TOKEN`: `metered_api`, biller from the
   `ANTHROPIC_BASE_URL` host (`anthropic`, `openrouter`, else `unknown`).
   `ANTHROPIC_BEDROCK_BASE_URL` alone is not Bedrock. `subscription` only for a
-  local CLI run with none of these; ACP and remote targets get `unknown`.
+  local CLI run with none of these; ACP and remote targets get `unknown`. On
+  the CLI engine, a credential that the inline `--settings` env in the extra
+  args takes away does not count, as in the lane gates.
 - Run failure guidance: `ClaudeAuthRequiredRunGuidance` takes the agent's
   `adapterConfig` and the run's `contextSnapshot`. ACP engine, an API credential
   in the adapter env, a managed Anthropic connection, or a non-local run
@@ -215,6 +217,18 @@ concurrency cap.
   `resolveEnvironmentExecutionTarget` by hand: on an upstream merge that adds
   a driver with a remote target, add it there. Until then such a run counts as
   local and gets the gates, which is the fail-closed side.
+
+  A `process` agent whose command starts the `claude` binary directly gets
+  both gates as a claude_local CLI run (`claudeSubscriptionGateInput` and
+  `isProcessClaudeCommand` in `claude-subscription-target.ts`). That covers a
+  command whose basename is `claude` (any path or case, with or without
+  `.exe`/`.cmd`/`.bat`/`.ps1`); `npx`, `pnpx`, `bunx`, `npm`, `pnpm`, `yarn`,
+  `bun` or `node` with an argument before `--` (or a `--flag=value` value)
+  naming `claude`, `@anthropic-ai/claude-code`, or a file in that package; and
+  `env [flags] [NAME=VALUE]...` in front of either. The gates read the agent
+  env plus the `env` assignments. After an `env` flag such as `-i` or `-u`, a
+  server-env API key does not count. The process config's `engine` and
+  `managedAiConnection` keys are ignored.
 - **Trigger-source gate.** Even for the owner,
   `resolveClaudeSubscriptionTriggerViolation` refuses a subscription-lane run
   whose wake came from outside Paperclip (reason
@@ -250,7 +264,8 @@ concurrency cap.
     A wake names the requesting agent, not the key it used, and a bridge key
     may reassign a task of its own agent to an allowed agent, so every
     agent-requested wake from such an agent counts, including delegation from
-    the agent's own runs.
+    the agent's own runs. A routine run such an agent started or shaped counts
+    too (see the `routine_execution` rule below).
 
   A wake that no Paperclip user requested (system or agent, for example the
   recovery liveness dispatch of a stranded task) is also refused on a task that
@@ -284,10 +299,54 @@ concurrency cap.
     blockers, origin fields, creator and workspace fields all count), or an
     `issue.relations.updated` row that does not only add blockers. Any later
     activity of a Paperclip user on the task lifts the refusal. An agent's
-    activity does not.
+    activity does not, and neither does a passive user row
+    (`PASSIVE_USER_ISSUE_ACTIONS` in `claude-subscription-policy.ts`, added
+    2026-09-28): upstream's inbox markers `issue.read_marked`,
+    `issue.read_unmarked`, `issue.inbox_archived`, `issue.inbox_unarchived` and
+    `issue.inbox_touched` (IssueDetail marks a task read on every page load, so
+    before this change the owner merely opening a plugin-edited task let the
+    next system wake run it), plus `issue.conversation_opened`,
+    `issue.feedback_vote_saved`, `issue.tree_control_previewed`,
+    `issue.attribution_spoof_rejected`, `external_object.refresh_requested` and
+    every `issue.file_resource_…` row (workspace file reads, which the task page
+    also makes on its own). Upstream's own lists
+    (`ACTIVITY_GATE_IGNORED_ACTIONS` in `services/routines.ts`,
+    `ISSUE_LOCAL_INBOX_ACTIVITY_ACTIONS` in `services/issues.ts`) are not
+    exported, so the fork keeps its own list; on an upstream merge that adds a
+    passive user action on issues, add it there;
+  - a `routine_execution` task whose routine run a task bridge key may have
+    started or shaped (`task_bridge`, `routineRunMayComeFromTaskBridge`, added
+    2026-09-28). `routes/routines.ts` does not apply a task bridge key's scope:
+    the key can create a routine assigned to its own agent and run it with
+    `POST /routines/:id/run` and body `{ assigneeAgentId: <other agent>,
+    source: "manual" | "api" }`. The run's wake has no requester, so the wake
+    rule above never saw the bridge. Refused, unless a Paperclip user started
+    the run (a manual run records the user as the task's `createdByUserId`; the
+    route's `routine.run_triggered` activity row on the routine run names the
+    user or agent of a manual or api run):
+    - the run was started by an agent that held a live task bridge key at the
+      time (the task's `createdByAgentId` of a manual run, or the agent of the
+      `routine.run_triggered` row). The activity row carries the agent but not
+      the key (`logActivity` uses `agentApiKeyId` only to find the responsible
+      user), so the rule is the same as the wake rule: the agent held a task
+      bridge key that was not revoked then;
+    - a manual or api run names no user and no agent while some agent of the
+      company held a live task bridge key when the run was triggered. The route
+      writes `routine.run_triggered` only after the run is queued, so an api
+      run can start before its row exists; a pipeline stage entry
+      (`runPipelineStageEntryRoutine`, source `api`) writes none. Both fail
+      closed in a company with a live task bridge key and pass in one without.
+      A task whose routine run is gone counts as such a run;
+    - an agent that held a live task bridge key created the routine, created
+      any of its revisions, or created the trigger that fired the run. This
+      covers every source, including scheduled runs after the owner reassigned
+      the routine to another agent, because the bridge wrote the routine.
 
   Owner-driven wakes stay allowed: assignments and comments by a Paperclip
-  user, timers and heartbeats, scheduled routines, the owner's manual run of a
+  user, timers and heartbeats, scheduled routines (unless a task bridge agent
+  created or edited the routine or its trigger), routine runs a Paperclip user
+  started (the board's Run now, or an api run with a board login once its
+  `routine.run_triggered` row exists), the owner's manual run of a
   plugin-managed routine, agent delegation (except from an agent with a live
   task bridge key), linked chat users (also on a conversation a chat guest
   started), and follow-up wakes on a chat conversation a linked user started.
@@ -340,6 +399,20 @@ concurrency cap.
   config with a one-time warning, so neither the server (OpenAI model listing)
   nor `paperclipai doctor` sends it anywhere, and the next config write removes
   it from the file.
+
+  Every adapter config leaf is checked, not only `env`: the http adapter sends
+  `headers` and `payloadTemplate` to its URL, and the OpenClaw gateway sends
+  `headers` and `authToken`. Saving an adapter config refuses a subscription
+  token in any string value or object key at any depth (422; `details.path`
+  names the config path, never the value; a container nested deeper than 32
+  levels is refused with `adapter_config_too_deep`). At runtime,
+  `resolveAdapterConfigForRuntime` drops such a leaf from a config stored
+  before this check (an array element is blanked so positions do not shift)
+  and logs the company id and config path. A token counts both as a whole
+  value and inside a longer string (`sk-ant-oat`, `sk-ant-ort` or `sk-ant-sid`
+  followed by a digit), such as `Authorization: Bearer sk-ant-oat01-…` or an
+  `ANTHROPIC_CUSTOM_HEADERS` value; the same applies to env values and secret
+  values checked in `server/src/services/secrets.ts`.
 - **Subscription endpoint check.** With no API credential, the `claude` binary
   sends the server's Claude sign-in (`Authorization: Bearer sk-ant-oat…`) to
   whatever endpoint its env names (verified with claude 2.1.280).
@@ -370,6 +443,28 @@ concurrency cap.
   probe child gets an API credential or the URL names api.anthropic.com,
   because a config-only Vertex or Foundry flag passes the gate but never
   reaches the probe child.
+
+  Paperclip decides the lane from the env the `claude` binary uses. The inline
+  `--settings` env in `extraArgs`/`args` is applied over the agent and server
+  env (verified with claude 2.1.283: `{"env":{"ANTHROPIC_API_KEY":""}}` makes
+  the binary drop the key and use the server's sign-in). A settings-env entry
+  for `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+  `CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`/`_FOUNDRY` whose value does not count by
+  itself (empty, whitespace, `0`, a token, a non-string) takes that credential
+  away, so the run is on the subscription lane: the endpoint check, owner-only
+  gate and trigger-source gate apply. The settings never add a credential, and
+  an `apiKeyHelper` in them does not count, because the binary ignores the
+  whole `--settings` JSON when any field fails its schema and skips a
+  `--settings` token that is another flag's value. A CLI run on any target is
+  refused before launch when an inline `--settings` value is not valid JSON,
+  or when its env carries a subscription token key or value. The ACP engine
+  never gets these args, so they do not affect it.
+
+  The process adapter runs the same check before it spawns a command that
+  starts `claude` (see the owner-only bullet) on the subscription lane
+  (`resolveProcessClaudeSubscriptionRefusal`). It reads the agent env, the
+  `env` wrapper assignments, and inline `--settings` JSON in `args`. The run
+  fails with `adapter_engine_unavailable` and nothing is spawned.
 - **Third-party harness guard.** Only the official `claude` binary may use a
   Claude subscription (`packages/adapter-utils/src/claude-subscription-harness-guard.ts`).
   Hermes (provider `anthropic`, or `auto` when `~/.hermes/config.yaml` selects
@@ -456,13 +551,21 @@ concurrency cap.
   from. Agent delegation is allowed, so an external trigger that first wakes an
   API-key agent can reach a subscription-lane agent through a delegated task,
   and a task the owner creates can carry text from outside.
-- Paperclip decides the subscription lane from the agent and server env only.
+- Paperclip decides the subscription lane from the agent and server env, and
+  from an inline `--settings` env, which can only take a credential away.
   A claude_local agent that bills through an `apiKeyHelper` or an API key or
   Bedrock/Vertex/Foundry flag in the `claude` CLI's own `settings.json` counts
   as subscription-lane, so the owner-only and trigger-source gates refuse it
   where they apply; the refusal message and docs tell users to move the setting
-  into the agent env. An explicit "API-billed" agent flag, or a key-name-only
-  scan of `settings.json`, would need a product decision.
+  into the agent env. An Anthropic API key or `apiKeyHelper` kept only in an
+  inline `--settings` JSON in the extra args counts as subscription-lane too
+  (same fix). An explicit "API-billed" agent flag, or a key-name-only scan of
+  `settings.json`, would need a product decision. A `--settings <file>` path
+  is not read for classification either: a settings file named in the extra
+  args that blanks `ANTHROPIC_API_KEY` and sets `ANTHROPIC_BASE_URL` can still
+  move an API-key agent onto the owner's sign-in without the gates. Closing
+  that means refusing `--settings` files or reading them at launch, the same
+  product decision as for the endpoint check below.
 - Third-party harnesses count only an Anthropic key in the agent or server env.
   A key kept in the harness's own store (`~/.hermes/.env` or `config.yaml`,
   OpenCode `auth.json`/`opencode.json`, Pi `auth.json`) no longer counts, which
@@ -489,18 +592,49 @@ concurrency cap.
   because the agent asked for the confirmation and merging needs write access
   to the repository.
 - The plugin-edit check reads `activity_log`. Any activity row of a Paperclip
-  user on the task lifts it, including rows the issue service writes for a
+  user on the task lifts it, apart from the passive rows in
+  `PASSIVE_USER_ISSUE_ACTIONS`, including rows the issue service writes for a
   user that a plugin names as its acting user (for example
   `issue.thread_interaction_expired` after a plugin comment with
-  `actorUserId`). A plugin edit made through a path that logs no activity is
-  not seen.
+  `actorUserId`). The passive list is a denylist kept by hand: a passive user
+  action upstream adds later lifts the refusal until it is added. A plugin edit
+  made through a path that logs no activity is not seen.
 - The task bridge check cannot tell which key an agent used, so it refuses
   every agent-requested wake of an agent that holds a live task bridge key,
-  including delegation from that agent's own runs. Delegation by an agent that
+  including delegation from that agent's own runs, and every routine run such
+  an agent started, created, edited or scheduled. Delegation by an agent that
   has no such key is allowed as before, even when a bridge started the chain.
+  In a company with a live task bridge key, a routine api run whose
+  `routine.run_triggered` row is not written yet when the run starts (a race
+  with the route), and every pipeline stage entry run, is refused on the
+  subscription lane; the owner's board Run now is not affected, since a manual
+  run records the owner on the task. The routine rule reads the creator of the
+  routine, its revisions and its trigger; an agent deleted since then leaves no
+  creator (`on delete set null`), so its routines count as the owner's. A task
+  bridge key can also move a pipeline case or reach other upstream routes that
+  do not apply its scope; only the routine path is covered.
+- Every local agent runs as the Paperclip service user, and that user owns the
+  `claude` sign-in (`~/.claude/.credentials.json` or the OS keychain). An
+  agent with shell access (any claude_local, codex_local or other local coding
+  agent) or a `process` adapter command can therefore read the sign-in
+  directly, whatever the gates above decide about who may start a
+  subscription-lane run. Paperclip never reads the sign-in itself; keeping
+  agents away from it would need running them as a separate OS user from the
+  one that signed in to Claude.
+- Only a direct start of `claude` by a `process` agent is recognized. A shell
+  (`sh -c "claude …"`), a script, a copy or symlink of the binary under
+  another name, or any program that starts `claude` itself gets neither the
+  gates nor the endpoint check. The check also errs toward gating: `npm run
+  claude` or `node tool.js claude` counts as a Claude run.
 - Encrypted secrets under other keys can still hold a subscription token
   stored before this branch; the runtime drops the value at launch, but it stays
   stored until the owner deletes it.
+- An adapter config saved before the all-leaves check can still hold a token
+  in a non-env leaf. The runtime drops it on every run, but it stays stored
+  until the owner edits it; until then any update that saves the whole config
+  (for example changing the instructions path) is refused with the leaf's
+  path. The embedded match needs a digit after the prefix, so an encoded or
+  split token is not seen.
 - A subscription token in the config file's `llm.apiKey` stays on disk until a
   later config write changes the file. The warning comes from the shared config
   schema (`console.warn`, once per process), not from the server or CLI config

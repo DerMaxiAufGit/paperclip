@@ -23,7 +23,7 @@ import {
   resolveClaudeSubscriptionEligibility,
   resolveClaudeSubscriptionTriggerViolation,
 } from "./claude-subscription-policy.js";
-import { claudeSubscriptionTargetIsRemote } from "./claude-subscription-target.js";
+import { claudeSubscriptionGateInput, claudeSubscriptionTargetIsRemote } from "./claude-subscription-target.js";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
@@ -10776,11 +10776,13 @@ export function heartbeatService(
     agentId: string;
     issueId: string | null;
     config: Record<string, unknown>;
+    hostEnv?: NodeJS.ProcessEnv;
     targetIsRemote: boolean;
   }) {
     if (
       !isClaudeSubscriptionLaneRun({
         config: input.config,
+        hostEnv: input.hostEnv,
         targetIsRemote: input.targetIsRemote,
       })
     ) {
@@ -21419,12 +21421,14 @@ export function heartbeatService(
       // only. Refuse it before any workspace or process work when the instance
       // has other users, or when the wake came from outside the owner. A driver
       // that yields no remote target (a plugin driver) runs here, so it counts as local.
-      if (agent.adapterType === "claude_local") {
+      // A process agent whose command starts `claude` gets the same gates.
+      const claudeSubscriptionGate = claudeSubscriptionGateInput(agent.adapterType, resolvedConfig);
+      if (claudeSubscriptionGate) {
         await assertClaudeSubscriptionLaneAllowed({
           run,
           agentId: agent.id,
           issueId: issueId ?? null,
-          config: resolvedConfig,
+          ...claudeSubscriptionGate,
           targetIsRemote: claudeSubscriptionTargetIsRemote(selectedEnvironmentForConfig?.driver, agent.adapterType),
         });
       }

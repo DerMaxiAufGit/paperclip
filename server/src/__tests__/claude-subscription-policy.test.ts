@@ -19,7 +19,9 @@ import {
   issues,
   pluginManagedResources,
   plugins,
+  routineRevisions,
   routineRuns,
+  routineTriggers,
   routines,
   toolApplications,
   toolConnections,
@@ -1380,5 +1382,275 @@ describeEmbeddedPostgres("Claude subscription owner-only and trigger-source gate
       details: { mutation: "remove", blockedByIssueIds: [], sourcePluginId: pluginId },
     });
     await expect(run("system", null)).resolves.toMatchObject({ kind: "plugin" });
+
+    // Opening the task logs the owner's read marker (IssueDetail marks it read
+    // on every load) and other passive rows; none of them lifts the refusal.
+    await pluginUpdate({ assigneeAgentId: agentId, status: "todo" });
+    for (const action of [
+      "issue.read_marked",
+      "issue.read_unmarked",
+      "issue.inbox_archived",
+      "issue.inbox_unarchived",
+      "issue.inbox_touched",
+      "issue.conversation_opened",
+      "issue.feedback_vote_saved",
+      "issue.file_resource_availability",
+      "issue.file_resource_content_read",
+      "issue.file_resource_download_denied",
+      "issue.tree_control_previewed",
+      "issue.attribution_spoof_rejected",
+      "external_object.refresh_requested",
+    ]) {
+      await activity({ actorType: "user", action, details: {} });
+      await expect(run("system", null)).resolves.toMatchObject({ kind: "plugin" });
+    }
+    // The owner's comment does.
+    await activity({ actorType: "user", action: "issue.comment_added", details: { identifier: "PAP-1" } });
+    await expect(run("system", null)).resolves.toBeNull();
+  });
+
+  it("refuses routine runs that a task bridge agent triggered or authored", async () => {
+    const { companyId, agentId } = await insertCompany();
+    async function insertAgent(name: string) {
+      const id = randomUUID();
+      await db.insert(agents).values({
+        id,
+        companyId,
+        name,
+        role: "engineer",
+        status: "idle",
+        adapterType: "hermes_gateway",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      return id;
+    }
+    async function insertKey(input: { agentId: string; scope: Record<string, unknown>; revokedAt?: Date }) {
+      const id = randomUUID();
+      await db.insert(agentApiKeys).values({
+        id,
+        agentId: input.agentId,
+        companyId,
+        name: "key",
+        keyHash: `hash-${id}`,
+        scopeConfig: input.scope as never,
+        revokedAt: input.revokedAt ?? null,
+      });
+      return id;
+    }
+    const bridgeAgentId = await insertAgent("Hermes bridge");
+    await insertKey({ agentId: bridgeAgentId, scope: { kind: "task_bridge", projectId: randomUUID() } });
+    const peerAgentId = await insertAgent("Peer");
+    await insertKey({ agentId: peerAgentId, scope: { kind: "standard" } });
+
+    async function insertRoutine(input: { assigneeAgentId: string; createdByAgentId?: string; createdByUserId?: string }) {
+      const id = randomUUID();
+      await db.insert(routines).values({
+        id,
+        companyId,
+        title: "Routine",
+        assigneeAgentId: input.assigneeAgentId,
+        createdByAgentId: input.createdByAgentId ?? null,
+        createdByUserId: input.createdByUserId ?? null,
+      });
+      return id;
+    }
+
+    // A routine run's task and its routine.dispatch wake. `trigger` is the
+    // routine.run_triggered activity row routes/routines.ts writes after the run.
+    async function routineDispatch(input: {
+      routineId: string;
+      source: "manual" | "schedule" | "api";
+      triggerId?: string;
+      createdByUserId?: string;
+      createdByAgentId?: string;
+      trigger?: { actorType: "user" | "agent"; actorId: string };
+    }) {
+      const routineRunId = randomUUID();
+      await db.insert(routineRuns).values({
+        id: routineRunId,
+        companyId,
+        routineId: input.routineId,
+        triggerId: input.triggerId ?? null,
+        source: input.source,
+      });
+      const issueId = randomUUID();
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: `Routine ${input.source}`,
+        status: "todo",
+        assigneeAgentId: agentId,
+        originKind: "routine_execution",
+        originId: input.routineId,
+        originRunId: routineRunId,
+        originFingerprint: randomUUID(),
+        createdByUserId: input.createdByUserId ?? null,
+        createdByAgentId: input.createdByAgentId ?? null,
+      } as never);
+      if (input.trigger) {
+        await db.insert(activityLog).values({
+          companyId,
+          actorType: input.trigger.actorType,
+          actorId: input.trigger.actorId,
+          agentId: input.trigger.actorType === "agent" ? input.trigger.actorId : null,
+          action: "routine.run_triggered",
+          entityType: "routine_run",
+          entityId: routineRunId,
+          details: { routineId: input.routineId, source: input.source, status: "issue_created" },
+        });
+      }
+      const runId = randomUUID();
+      await wake({
+        companyId,
+        agentId,
+        runId,
+        requestedByActorType: input.source === "schedule" ? "system" : null,
+        payload: { issueId, mutation: "create" },
+      });
+      return resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: runId, companyId, contextSnapshot: { issueId, source: "routine.dispatch" } },
+        issueId,
+      });
+    }
+
+    // The bridge agent runs its own routine with the subscription agent as the
+    // assignee (runRoutineSchema accepts assigneeAgentId and source).
+    const bridgeRunRoutineId = await insertRoutine({ assigneeAgentId: bridgeAgentId, createdByUserId: "owner" });
+    await expect(
+      routineDispatch({
+        routineId: bridgeRunRoutineId,
+        source: "api",
+        trigger: { actorType: "agent", actorId: bridgeAgentId },
+      }),
+    ).resolves.toMatchObject({ kind: "task_bridge", message: CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE });
+    await expect(
+      routineDispatch({
+        routineId: bridgeRunRoutineId,
+        source: "manual",
+        trigger: { actorType: "agent", actorId: bridgeAgentId },
+      }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+    // A manual run names the agent on its task even before the activity row exists.
+    await expect(
+      routineDispatch({ routineId: bridgeRunRoutineId, source: "manual", createdByAgentId: bridgeAgentId }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+    // An api run whose trigger is not recorded (yet) is refused while the
+    // company holds a live task bridge key.
+    await expect(routineDispatch({ routineId: bridgeRunRoutineId, source: "api" })).resolves.toMatchObject({
+      kind: "task_bridge",
+    });
+    await expect(routineDispatch({ routineId: bridgeRunRoutineId, source: "manual" })).resolves.toMatchObject({
+      kind: "task_bridge",
+    });
+
+    // Owner-driven runs of an owner routine stay allowed.
+    const ownerRoutineId = await insertRoutine({ assigneeAgentId: agentId, createdByUserId: "owner" });
+    await expect(
+      routineDispatch({ routineId: ownerRoutineId, source: "manual", createdByUserId: "owner" }),
+    ).resolves.toBeNull();
+    await expect(
+      routineDispatch({ routineId: ownerRoutineId, source: "api", trigger: { actorType: "user", actorId: "owner" } }),
+    ).resolves.toBeNull();
+    await expect(routineDispatch({ routineId: ownerRoutineId, source: "schedule" })).resolves.toBeNull();
+    // So do runs by an agent without a task bridge key.
+    await expect(
+      routineDispatch({ routineId: ownerRoutineId, source: "api", trigger: { actorType: "agent", actorId: peerAgentId } }),
+    ).resolves.toBeNull();
+    await expect(
+      routineDispatch({ routineId: ownerRoutineId, source: "manual", createdByAgentId: peerAgentId }),
+    ).resolves.toBeNull();
+
+    // A routine the bridge agent created (and the owner later assigned to the
+    // subscription agent): every run the owner did not start by hand.
+    const bridgeRoutineId = await insertRoutine({ assigneeAgentId: agentId, createdByAgentId: bridgeAgentId });
+    await expect(routineDispatch({ routineId: bridgeRoutineId, source: "schedule" })).resolves.toMatchObject({
+      kind: "task_bridge",
+    });
+    await expect(
+      routineDispatch({ routineId: bridgeRoutineId, source: "api", trigger: { actorType: "agent", actorId: peerAgentId } }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+    await expect(
+      routineDispatch({ routineId: bridgeRoutineId, source: "manual", createdByUserId: "owner" }),
+    ).resolves.toBeNull();
+
+    // A routine the bridge agent edited, or whose schedule it added.
+    const editedRoutineId = await insertRoutine({ assigneeAgentId: agentId, createdByUserId: "owner" });
+    await db.insert(routineRevisions).values({
+      companyId,
+      routineId: editedRoutineId,
+      revisionNumber: 2,
+      title: "Routine",
+      snapshot: {} as never,
+      createdByAgentId: bridgeAgentId,
+    });
+    await expect(routineDispatch({ routineId: editedRoutineId, source: "schedule" })).resolves.toMatchObject({
+      kind: "task_bridge",
+    });
+    const scheduledRoutineId = await insertRoutine({ assigneeAgentId: agentId, createdByUserId: "owner" });
+    const bridgeTriggerId = randomUUID();
+    await db.insert(routineTriggers).values({
+      id: bridgeTriggerId,
+      companyId,
+      routineId: scheduledRoutineId,
+      kind: "schedule",
+      cronExpression: "0 * * * *",
+      timezone: "UTC",
+      createdByAgentId: bridgeAgentId,
+    });
+    await expect(
+      routineDispatch({ routineId: scheduledRoutineId, source: "schedule", triggerId: bridgeTriggerId }),
+    ).resolves.toMatchObject({ kind: "task_bridge" });
+  });
+
+  it("allows routine runs without a recorded trigger while no task bridge key is live", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const bridgeAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: bridgeAgentId,
+      companyId,
+      name: "Former bridge",
+      role: "engineer",
+      status: "idle",
+      adapterType: "hermes_gateway",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(agentApiKeys).values({
+      agentId: bridgeAgentId,
+      companyId,
+      name: "key",
+      keyHash: `hash-${randomUUID()}`,
+      scopeConfig: { kind: "task_bridge", projectId: randomUUID() } as never,
+      revokedAt: new Date(Date.now() - 60_000),
+    });
+    const routineId = randomUUID();
+    await db.insert(routines).values({ id: routineId, companyId, title: "Pipeline stage", assigneeAgentId: agentId });
+    // A pipeline stage entry runs its routine with source api and no
+    // routine.run_triggered row.
+    const routineRunId = randomUUID();
+    await db.insert(routineRuns).values({ id: routineRunId, companyId, routineId, source: "api" });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Pipeline stage",
+      status: "todo",
+      assigneeAgentId: agentId,
+      originKind: "routine_execution",
+      originId: routineId,
+      originRunId: routineRunId,
+      originFingerprint: randomUUID(),
+    } as never);
+    const runId = randomUUID();
+    await wake({ companyId, agentId, runId, payload: { issueId, mutation: "create" } });
+    await expect(
+      resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: runId, companyId, contextSnapshot: { issueId, source: "routine.dispatch" } },
+        issueId,
+      }),
+    ).resolves.toBeNull();
   });
 });

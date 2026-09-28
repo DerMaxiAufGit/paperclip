@@ -99,4 +99,5 @@ export {
   claudeRunHasApiCredential,
   isClaudeSubscriptionLaneRun,
   resolveClaudeDefaultEngine,
+  resolveClaudeSubscriptionEndpointViolation,
 } from "./credential-policy.js";

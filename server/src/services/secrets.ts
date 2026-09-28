@@ -38,6 +38,7 @@ import type {
 import {
   CLASS3_STATIC_LEASE_ALLOWLIST,
   CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+  CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PREFIXES,
   createSecretProviderConfigSchema,
   deriveProjectUrlKey,
   envBindingSchema,
@@ -119,12 +120,131 @@ const FALLBACK_ADAPTER_SCHEMA_SECRET_FIELDS: Readonly<Record<string, readonly st
  * sees it. A secret bound under a token env key is not resolved at all.
  */
 function isDroppedClaudeSubscriptionToken(companyId: string, configPath: string, value: string): boolean {
-  if (!isClaudeSubscriptionTokenValue(value)) return false;
+  if (!carriesClaudeSubscriptionToken(value)) return false;
+  logDroppedClaudeSubscriptionToken(companyId, configPath);
+  return true;
+}
+
+function logDroppedClaudeSubscriptionToken(companyId: string, configPath: string): void {
   logger.warn(
     { companyId, configPath },
     "Dropped a Claude subscription token from a resolved config; delete the stored value",
   );
-  return true;
+}
+
+// A token inside a longer string, such as `Bearer sk-ant-oat01-…` in a header,
+// an env value like ANTHROPIC_CUSTOM_HEADERS, or a JSON payload template. The
+// version digits after the prefix keep text that only names a prefix
+// ("sk-ant-oat tokens") out of it. The prefixes are plain `sk-ant-xxx`
+// strings, so they need no regex escaping.
+const EMBEDDED_CLAUDE_SUBSCRIPTION_TOKEN_RE = new RegExp(
+  `(?:${CLAUDE_SUBSCRIPTION_TOKEN_VALUE_PREFIXES.join("|")})\\d`,
+  "i",
+);
+
+function carriesClaudeSubscriptionToken(value: string): boolean {
+  return isClaudeSubscriptionTokenValue(value) || EMBEDDED_CLAUDE_SUBSCRIPTION_TOKEN_RE.test(value);
+}
+
+/**
+ * Every adapter config leaf, not only `env`, can reach a process or a remote
+ * endpoint: the http adapter sends `headers` and `payloadTemplate` to its URL,
+ * and the OpenClaw gateway sends `headers` and `authToken`. The walk checks
+ * every string value and object key. Adapter configs are a few levels deep, so
+ * a container nested past this bound is refused on save and dropped at runtime
+ * instead of going unchecked.
+ */
+const ADAPTER_CONFIG_TOKEN_WALK_MAX_DEPTH = 32;
+// Stands in for an object key that carries a token, so a path never logs it.
+const TOKEN_KEY_PATH_SEGMENT = "[token key]";
+
+type AdapterConfigTokenFinding = { kind: "token" | "too_deep"; path: string };
+
+function adapterConfigChildPath(parentPath: string, key: string, keyCarriesToken: boolean): string {
+  const segment = keyCarriesToken ? TOKEN_KEY_PATH_SEGMENT : key;
+  return parentPath ? `${parentPath}.${segment}` : segment;
+}
+
+/** The first leaf that carries a token, or the first container past the depth bound. */
+function findClaudeSubscriptionTokenInAdapterConfig(
+  value: unknown,
+  path = "",
+  depth = 0,
+): AdapterConfigTokenFinding | null {
+  if (typeof value === "string") return carriesClaudeSubscriptionToken(value) ? { kind: "token", path } : null;
+  if (typeof value !== "object" || value === null) return null;
+  if (depth > ADAPTER_CONFIG_TOKEN_WALK_MAX_DEPTH) return { kind: "too_deep", path };
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const found = findClaudeSubscriptionTokenInAdapterConfig(value[index], `${path}[${index}]`, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    const keyCarriesToken = carriesClaudeSubscriptionToken(key);
+    const childPath = adapterConfigChildPath(path, key, keyCarriesToken);
+    if (keyCarriesToken) return { kind: "token", path: childPath };
+    const found = findClaudeSubscriptionTokenInAdapterConfig(item, childPath, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+const DROPPED_ADAPTER_CONFIG_LEAF = Symbol("dropped adapter config leaf");
+
+/**
+ * Copy-on-write: returns `value` itself when nothing carries a token. An object
+ * entry that carries one is removed; an array element is blanked to "" so the
+ * positions of the other elements (for example CLI args) do not shift.
+ */
+function withoutClaudeSubscriptionTokenLeaves(
+  companyId: string,
+  value: unknown,
+  path: string,
+  depth: number,
+): unknown {
+  if (typeof value === "string") {
+    if (!carriesClaudeSubscriptionToken(value)) return value;
+    logDroppedClaudeSubscriptionToken(companyId, path);
+    return DROPPED_ADAPTER_CONFIG_LEAF;
+  }
+  if (typeof value !== "object" || value === null) return value;
+  if (depth > ADAPTER_CONFIG_TOKEN_WALK_MAX_DEPTH) {
+    logger.warn({ companyId, configPath: path }, "Dropped an adapter config value nested too deeply to check");
+    return DROPPED_ADAPTER_CONFIG_LEAF;
+  }
+  if (Array.isArray(value)) {
+    let copy: unknown[] | null = null;
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+      const next = withoutClaudeSubscriptionTokenLeaves(companyId, item, `${path}[${index}]`, depth + 1);
+      if (next === item) continue;
+      copy ??= value.slice();
+      copy[index] = next === DROPPED_ADAPTER_CONFIG_LEAF ? "" : next;
+    }
+    return copy ?? value;
+  }
+  let copy: Record<string, unknown> | null = null;
+  for (const [key, item] of Object.entries(value)) {
+    const keyCarriesToken = carriesClaudeSubscriptionToken(key);
+    const childPath = adapterConfigChildPath(path, key, keyCarriesToken);
+    let next: unknown;
+    if (keyCarriesToken) {
+      logDroppedClaudeSubscriptionToken(companyId, childPath);
+      next = DROPPED_ADAPTER_CONFIG_LEAF;
+    } else {
+      next = withoutClaudeSubscriptionTokenLeaves(companyId, item, childPath, depth + 1);
+    }
+    if (next === item) continue;
+    copy ??= { ...(value as Record<string, unknown>) };
+    if (next === DROPPED_ADAPTER_CONFIG_LEAF) {
+      delete copy[key];
+    } else {
+      copy[key] = next;
+    }
+  }
+  return copy ?? value;
 }
 
 const USER_SECRET_DEFINITION_KEY_UNIQUE_CONSTRAINT = "user_secret_definitions_company_key_uq";
@@ -1707,7 +1827,7 @@ export function secretService(db: Db | DbTransaction) {
   // company or user secret, whatever the secret is named. Every create and
   // rotate path that writes a value calls this first.
   function assertNotClaudeSubscriptionTokenSecretValue(value: string | null | undefined): void {
-    if (!isClaudeSubscriptionTokenValue(value)) return;
+    if (typeof value !== "string" || !carriesClaudeSubscriptionToken(value)) return;
     throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
       code: "claude_subscription_token_unsupported",
     });
@@ -1744,8 +1864,9 @@ export function secretService(db: Db | DbTransaction) {
       const binding = canonicalizeBinding(parsed.data as EnvBinding);
       if (binding.type === "plain") {
         // A subscription token value (`sk-ant-oat…`) is refused under any key,
-        // for example ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN.
-        if (isClaudeSubscriptionTokenValue(binding.value)) {
+        // for example ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, and so is one
+        // inside a longer value (`ANTHROPIC_CUSTOM_HEADERS`).
+        if (carriesClaudeSubscriptionToken(binding.value)) {
           throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
             code: "claude_subscription_token_unsupported",
             key,
@@ -1784,6 +1905,21 @@ export function secretService(db: Db | DbTransaction) {
     adapterConfig: Record<string, unknown>,
     opts?: NormalizeAdapterConfigOptions,
   ) {
+    // Refuse a Claude subscription token in any leaf before any secret is
+    // created or looked up. The error names the config path, never the value.
+    const tokenFinding = findClaudeSubscriptionTokenInAdapterConfig(adapterConfig);
+    if (tokenFinding?.kind === "token") {
+      throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
+        code: "claude_subscription_token_unsupported",
+        path: tokenFinding.path,
+      });
+    }
+    if (tokenFinding) {
+      throw unprocessable(`adapterConfig nests deeper than ${ADAPTER_CONFIG_TOKEN_WALK_MAX_DEPTH} levels`, {
+        code: "adapter_config_too_deep",
+        path: tokenFinding.path,
+      });
+    }
     const normalized = { ...adapterConfig };
     if (Object.prototype.hasOwnProperty.call(adapterConfig, "env")) {
       normalized.env = await normalizeEnvConfig(companyId, adapterConfig.env, opts);
@@ -5294,7 +5430,10 @@ export function secretService(db: Db | DbTransaction) {
         manifest.push(secretResolution.manifestEntry);
         secretKeys.add(key);
       }
-      return { config: resolved, secretKeys, manifest };
+      // A config stored before the save-time check can still carry a token in
+      // any other leaf (headers, payload templates, gateway tokens).
+      const config = withoutClaudeSubscriptionTokenLeaves(companyId, resolved, "", 0) as Record<string, unknown>;
+      return { config, secretKeys, manifest };
     },
   };
 }

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import {
   activityLog,
   agentApiKeys,
@@ -13,7 +13,10 @@ import {
   issues,
   pluginManagedResources,
   plugins,
+  routineRevisions,
   routineRuns,
+  routineTriggers,
+  routines,
   type Db,
 } from "@paperclipai/db";
 import {
@@ -48,7 +51,8 @@ import { readConfigFile } from "../config-file.js";
  *    public webhook trigger, or a task bridge key (the key internet-facing chat
  *    and webhook bridges use). A system or agent follow-up wake (recovery,
  *    liveness dispatch) on a task that one of these created, that a
- *    plugin-managed routine created, or that a plugin last assigned or moved is
+ *    plugin-managed routine created, that a routine run started or authored
+ *    by a task bridge agent created, or that a plugin last assigned or moved is
  *    refused too, unless a Paperclip user requested the wake.
  */
 
@@ -186,6 +190,34 @@ const TASK_BRIDGE_KEY_SCOPE_KIND = "task_bridge";
 const PLUGIN_ISSUE_CONTENT_PATCH_KEYS = ["title", "description", "priority", "labelIds", "billingCode"];
 
 /**
+ * Activity a Paperclip user logs on a task without acting on it, which
+ * therefore does not lift a plugin edit. IssueDetail marks a task read on every
+ * page load, and the task page checks workspace file references on its own.
+ * The first five are upstream's inbox markers (ACTIVITY_GATE_IGNORED_ACTIONS in
+ * services/routines.ts, ISSUE_LOCAL_INBOX_ACTIVITY_ACTIONS in services/issues.ts;
+ * neither is exported). The rest: opening an agent chat, a feedback vote on an
+ * agent's output, a tree-control preview, a refused attribution spoof, and a
+ * refresh of linked external objects. Every `issue.file_resource_…` action is a
+ * workspace file read or its refusal (routes/file-resources.ts).
+ */
+const PASSIVE_USER_ISSUE_ACTIONS = [
+  "issue.read_marked",
+  "issue.read_unmarked",
+  "issue.inbox_archived",
+  "issue.inbox_unarchived",
+  "issue.inbox_touched",
+  "issue.conversation_opened",
+  "issue.feedback_vote_saved",
+  "issue.tree_control_previewed",
+  "issue.attribution_spoof_rejected",
+  "external_object.refresh_requested",
+];
+const PASSIVE_USER_ISSUE_ACTION_PREFIX = "issue.file_resource_";
+
+/** The activity row routes/routines.ts writes after `POST /routines/:id/run`. */
+const ROUTINE_RUN_TRIGGERED_ACTION = "routine.run_triggered";
+
+/**
  * Plugin wake sources: `plugin.issue.requestWakeup(s)` for plugin issue
  * wakeups, and `plugin:<pluginKey>…` for comments, interaction responses and
  * approval decisions a plugin relays on behalf of a user.
@@ -204,6 +236,153 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+/**
+ * Whether any of the agents held a task bridge key that was not revoked at the
+ * time given with it. A wake, or an activity row, names the agent, not the key
+ * it used, so every agent action at such a time may have come from the bridge.
+ */
+async function agentsHeldTaskBridgeKey(
+  db: Db,
+  companyId: string,
+  checks: Array<{ agentId: string | null; at: Date }>,
+): Promise<boolean> {
+  const valid = checks.filter((check): check is { agentId: string; at: Date } =>
+    typeof check.agentId === "string" && UUID_RE.test(check.agentId),
+  );
+  if (valid.length === 0) return false;
+  const bridgeKeys = await db
+    .select({ agentId: agentApiKeys.agentId, revokedAt: agentApiKeys.revokedAt })
+    .from(agentApiKeys)
+    .where(
+      and(
+        eq(agentApiKeys.companyId, companyId),
+        inArray(agentApiKeys.agentId, [...new Set(valid.map((check) => check.agentId))]),
+        sql`${agentApiKeys.scopeConfig}->>'kind' = ${TASK_BRIDGE_KEY_SCOPE_KIND}`,
+      ),
+    );
+  return valid.some((check) =>
+    bridgeKeys.some((key) => key.agentId === check.agentId && (!key.revokedAt || key.revokedAt > check.at)),
+  );
+}
+
+/** Whether any agent of the company held a task bridge key that was not revoked at `at`. */
+async function companyHeldTaskBridgeKey(db: Db, companyId: string, at: Date): Promise<boolean> {
+  const rows = await db
+    .select({ id: agentApiKeys.id })
+    .from(agentApiKeys)
+    .where(
+      and(
+        eq(agentApiKeys.companyId, companyId),
+        sql`${agentApiKeys.scopeConfig}->>'kind' = ${TASK_BRIDGE_KEY_SCOPE_KIND}`,
+        or(isNull(agentApiKeys.revokedAt), gt(agentApiKeys.revokedAt, at)),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+/**
+ * Whether a routine run's task may come from a task bridge key.
+ *
+ * A task bridge key acts as its agent, and routes/routines.ts does not apply
+ * the key's scope: the key can create a routine assigned to its own agent and
+ * run it with any other agent as the assignee (`POST /routines/:id/run` with
+ * `assigneeAgentId`). The run's wake then has no requester, so the wake rule
+ * never sees the bridge. Only a run a Paperclip user started is exempt: a
+ * manual run records the user as the task's creator, and the route's
+ * `routine.run_triggered` activity row names the user or agent that started a
+ * manual or api run (written after the run, so it can still be missing when
+ * the run starts). Refused when:
+ * - an agent that held a live task bridge key started the run (the task's
+ *   creator agent of a manual run, or the agent of the activity row);
+ * - a manual or api run names no user or agent (not recorded yet, or a path
+ *   that records none, such as a pipeline stage entry) while an agent of the
+ *   company held a live task bridge key, since the bridge may have started it;
+ * - an agent that held a live task bridge key created the routine, edited it
+ *   (any revision), or created the trigger that fired it, for every run no
+ *   user started, including scheduled runs after the owner reassigned it.
+ */
+async function routineRunMayComeFromTaskBridge(
+  db: Db,
+  companyId: string,
+  input: {
+    routineRun: {
+      id: string;
+      source: string;
+      routineId: string;
+      triggerId: string | null;
+      triggeredAt: Date;
+    } | null;
+    routineIds: string[];
+    createdByUserId: string | null;
+    createdByAgentId: string | null;
+  },
+): Promise<boolean> {
+  const { routineRun } = input;
+  const triggerRows = routineRun
+    ? await db
+        .select({
+          actorType: activityLog.actorType,
+          actorId: activityLog.actorId,
+          agentId: activityLog.agentId,
+          createdAt: activityLog.createdAt,
+        })
+        .from(activityLog)
+        .where(
+          and(
+            eq(activityLog.companyId, companyId),
+            eq(activityLog.entityType, "routine_run"),
+            eq(activityLog.entityId, routineRun.id),
+            eq(activityLog.action, ROUTINE_RUN_TRIGGERED_ACTION),
+          ),
+        )
+    : [];
+  const userStarted = input.createdByUserId !== null || triggerRows.some((row) => row.actorType === "user");
+  const triggerAgents = [
+    ...(input.createdByAgentId ? [{ agentId: input.createdByAgentId, at: routineRun?.triggeredAt ?? new Date() }] : []),
+    ...triggerRows
+      .filter((row) => row.actorType === "agent")
+      .map((row) => ({ agentId: row.agentId ?? row.actorId, at: row.createdAt })),
+  ];
+  if (await agentsHeldTaskBridgeKey(db, companyId, triggerAgents)) return true;
+  if (userStarted) return false;
+
+  const startedBySomeone = triggerAgents.length > 0;
+  const manualOrApi = !routineRun || routineRun.source === "manual" || routineRun.source === "api";
+  if (
+    manualOrApi &&
+    !startedBySomeone &&
+    (await companyHeldTaskBridgeKey(db, companyId, routineRun?.triggeredAt ?? new Date()))
+  ) {
+    return true;
+  }
+
+  if (input.routineIds.length === 0) return false;
+  const [routineAuthors, revisionAuthors, triggerAuthors] = await Promise.all([
+    db
+      .select({ agentId: routines.createdByAgentId, at: routines.createdAt })
+      .from(routines)
+      .where(and(eq(routines.companyId, companyId), inArray(routines.id, input.routineIds))),
+    db
+      .select({ agentId: routineRevisions.createdByAgentId, at: routineRevisions.createdAt })
+      .from(routineRevisions)
+      .where(
+        and(
+          eq(routineRevisions.companyId, companyId),
+          inArray(routineRevisions.routineId, input.routineIds),
+          isNotNull(routineRevisions.createdByAgentId),
+        ),
+      ),
+    routineRun?.triggerId && UUID_RE.test(routineRun.triggerId)
+      ? db
+          .select({ agentId: routineTriggers.createdByAgentId, at: routineTriggers.createdAt })
+          .from(routineTriggers)
+          .where(and(eq(routineTriggers.companyId, companyId), eq(routineTriggers.id, routineRun.triggerId)))
+      : Promise.resolve([]),
+  ]);
+  return agentsHeldTaskBridgeKey(db, companyId, [...routineAuthors, ...revisionAuthors, ...triggerAuthors]);
 }
 
 interface WakeRequestFacts {
@@ -443,8 +622,9 @@ async function resolveChatWakes(
  *
  * A system or agent wake on a task that came from outside Paperclip (a plugin's
  * task, a plugin-managed routine's task, an email conversation, a chat
- * conversation an unlinked person started, a routine's public webhook, or a
- * task bridge key), or on a task a plugin last assigned or moved, is refused,
+ * conversation an unlinked person started, a routine's public webhook, a task
+ * bridge key, or a routine run a task bridge agent started or authored), or on
+ * a task a plugin last assigned or moved, is refused,
  * because such a wake (for example the recovery liveness dispatch of a
  * stranded task) only continues the outside trigger. A wake a Paperclip user
  * requested is owner-driven; a chat wake counts as the user's only when every
@@ -549,39 +729,17 @@ export async function resolveClaudeSubscriptionTriggerViolation(
   // A task bridge key acts as its agent, and may assign the tasks of its agent
   // to other agents, so a wake requested by an agent that held a live task
   // bridge key when the wake was requested may have come from the bridge.
-  const agentActorIds = [
-    ...new Set(
-      wakes
-        .filter((wake) => wake.requestedByActorType === "agent")
-        .map((wake) => wake.requestedByActorId)
-        .filter((id): id is string => typeof id === "string" && UUID_RE.test(id)),
-    ),
-  ];
-  if (agentActorIds.length > 0) {
-    const bridgeKeys = await db
-      .select({ agentId: agentApiKeys.agentId, revokedAt: agentApiKeys.revokedAt })
-      .from(agentApiKeys)
-      .where(
-        and(
-          eq(agentApiKeys.companyId, input.run.companyId),
-          inArray(agentApiKeys.agentId, agentActorIds),
-          sql`${agentApiKeys.scopeConfig}->>'kind' = ${TASK_BRIDGE_KEY_SCOPE_KIND}`,
-        ),
-      );
-    const bridgeRequested = wakes.some(
-      (wake) =>
-        wake.requestedByActorType === "agent" &&
-        bridgeKeys.some(
-          (key) => key.agentId === wake.requestedByActorId && (!key.revokedAt || key.revokedAt > wake.requestedAt),
-        ),
-    );
-    if (bridgeRequested) return violation("task_bridge");
-  }
+  const agentWakes = wakes
+    .filter((wake) => wake.requestedByActorType === "agent")
+    .map((wake) => ({ agentId: wake.requestedByActorId, at: wake.requestedAt }));
+  if (await agentsHeldTaskBridgeKey(db, input.run.companyId, agentWakes)) return violation("task_bridge");
 
   // The origin of the run's task. A plugin's task, an email conversation, a
   // chat conversation an unlinked person started, a task a routine's public
-  // webhook or a plugin-managed routine created, and a task a task bridge key
-  // created all come from outside Paperclip; a system or agent wake on them
+  // webhook or a plugin-managed routine created, a task a task bridge key
+  // created, and a routine task a task bridge agent may have started or
+  // authored (routineRunMayComeFromTaskBridge) all come from outside
+  // Paperclip; a system or agent wake on them
   // (such as the recovery liveness dispatch) only continues that trigger. A
   // later wake by a Paperclip user (the owner commenting on the task) is
   // owner-driven and allowed.
@@ -594,6 +752,7 @@ export async function resolveClaudeSubscriptionTriggerViolation(
         originRunId: issues.originRunId,
         sourceTrust: issues.sourceTrust,
         createdByUserId: issues.createdByUserId,
+        createdByAgentId: issues.createdByAgentId,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, input.run.companyId)))
@@ -612,7 +771,13 @@ export async function resolveClaudeSubscriptionTriggerViolation(
       const routineRun =
         originRunId && UUID_RE.test(originRunId)
           ? await db
-              .select({ source: routineRuns.source, routineId: routineRuns.routineId })
+              .select({
+                id: routineRuns.id,
+                source: routineRuns.source,
+                routineId: routineRuns.routineId,
+                triggerId: routineRuns.triggerId,
+                triggeredAt: routineRuns.triggeredAt,
+              })
               .from(routineRuns)
               .where(and(eq(routineRuns.id, originRunId), eq(routineRuns.companyId, input.run.companyId)))
               .then((rows) => rows[0] ?? null)
@@ -642,6 +807,16 @@ export async function resolveClaudeSubscriptionTriggerViolation(
           .limit(1);
         if (managed.length > 0) return violation("plugin");
       }
+      if (
+        await routineRunMayComeFromTaskBridge(db, input.run.companyId, {
+          routineRun,
+          routineIds,
+          createdByUserId: readString(origin?.createdByUserId),
+          createdByAgentId: readString(origin?.createdByAgentId),
+        })
+      ) {
+        return violation("task_bridge");
+      }
     }
 
     // A plugin can assign, move or unblock any task of its company
@@ -650,7 +825,8 @@ export async function resolveClaudeSubscriptionTriggerViolation(
     // dispatch then runs it; the plugin's activity row (with the edit under
     // `patch`) is the only trace. The task stays external until the owner acts
     // on it: refused while the newest such plugin edit is later than every
-    // activity of a Paperclip user on the task.
+    // activity of a Paperclip user on the task, apart from passive rows such as
+    // the read marker that opening the task logs (PASSIVE_USER_ISSUE_ACTIONS).
     const pluginContentKeys = sql.join(
       PLUGIN_ISSUE_CONTENT_PATCH_KEYS.map((key) => sql`${key}`),
       sql`, `,
@@ -664,7 +840,11 @@ export async function resolveClaudeSubscriptionTriggerViolation(
           eq(activityLog.entityId, issueId),
           eq(activityLog.companyId, input.run.companyId),
           or(
-            eq(activityLog.actorType, "user"),
+            and(
+              eq(activityLog.actorType, "user"),
+              notInArray(activityLog.action, PASSIVE_USER_ISSUE_ACTIONS),
+              sql`not starts_with(${activityLog.action}, ${PASSIVE_USER_ISSUE_ACTION_PREFIX})`,
+            ),
             and(
               eq(activityLog.actorType, "plugin"),
               eq(activityLog.action, "issue.updated"),

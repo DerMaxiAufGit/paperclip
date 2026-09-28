@@ -13,11 +13,16 @@ import {
   resolveCommandForLogs,
   runChildProcess,
 } from "../utils.js";
+import { resolveProcessClaudeSubscriptionRefusal } from "../../services/claude-subscription-target.js";
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, config, onLog, onMeta, authToken } = ctx;
   const command = asString(config.command, "");
   if (!command) throw new Error("Process adapter missing command");
+  // A command that starts `claude` with no API credential uses this server's
+  // Claude sign-in; refuse, before spawning, a config that sends it elsewhere.
+  const claudeSubscriptionRefusal = resolveProcessClaudeSubscriptionRefusal(config);
+  if (claudeSubscriptionRefusal) return claudeSubscriptionRefusal;
 
   const args = asStringArray(config.args);
   const cwd = asString(config.cwd, process.cwd());

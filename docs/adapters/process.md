@@ -32,6 +32,15 @@ The `process` adapter executes arbitrary shell commands. Use it for simple scrip
 3. The process runs to completion
 4. Exit code determines success/failure
 
+## Commands That Run Claude Code
+
+A command that starts the `claude` binary directly (for example `claude`,
+`npx @anthropic-ai/claude-code`, or `env NAME=VALUE claude`) without an
+Anthropic API key in the agent or server env uses the server's Claude sign-in.
+Such an agent follows the Claude subscription rules of the
+[`claude_local` adapter](/adapters/claude-local): the server owner only, only
+wakes the owner drives, and only the `api.anthropic.com` endpoint.
+
 ## Example
 
 An agent that runs a Python script:

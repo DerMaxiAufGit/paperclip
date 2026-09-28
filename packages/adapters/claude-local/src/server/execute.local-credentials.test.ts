@@ -99,7 +99,7 @@ describe("claude local CLI lane credentials", () => {
   });
 
   describe("CLI-lane billing label", () => {
-    async function runLocalCli(env: Record<string, string>) {
+    async function runLocalCli(env: Record<string, string>, extraConfig: Record<string, unknown> = {}) {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-local-billing-"));
       cleanupDirs.push(root);
       const workspace = path.join(root, "workspace");
@@ -138,6 +138,7 @@ describe("claude local CLI lane credentials", () => {
           cwd: workspace,
           env,
           promptTemplate: "Follow the paperclip heartbeat.",
+          ...extraConfig,
         },
         context: {},
         authToken: "run-jwt-token",
@@ -162,6 +163,18 @@ describe("claude local CLI lane credentials", () => {
 
     it("labels a local CLI run with no API credential a subscription run", async () => {
       const result = await runLocalCli({});
+      expect(result.exitCode).toBe(0);
+      expect(result.billingType).toBe("subscription");
+      expect(result.biller).toBe("anthropic");
+    });
+
+    it("labels a run whose inline --settings env blanks the agent's API key a subscription run", async () => {
+      // The claude binary applies the --settings env over the agent env, so it
+      // drops the key and uses the server's sign-in; the ledger must say so.
+      const result = await runLocalCli(
+        { ANTHROPIC_API_KEY: "sk-ant-api03-test-key" },
+        { extraArgs: ["--settings", '{"env":{"ANTHROPIC_API_KEY":""}}'] },
+      );
       expect(result.exitCode).toBe(0);
       expect(result.billingType).toBe("subscription");
       expect(result.biller).toBe("anthropic");

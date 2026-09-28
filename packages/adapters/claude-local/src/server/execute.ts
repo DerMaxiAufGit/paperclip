@@ -444,11 +444,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const modelEnv = executionTargetIsRemote ? env : effectiveEnv;
   const model = resolveClaudeModel(config.model, modelEnv);
   // Same classifier as the ACP engine: only a local CLI run with no API
-  // credential is a subscription run. The host env counts only locally.
+  // credential is a subscription run. The host env counts only locally, and an
+  // inline --settings env in the extra args can take a credential away.
   const billingIdentity = resolveClaudeBillingIdentity({
     engine: "cli",
     targetIsRemote: executionTargetIsRemote,
     env,
+    extraArgs,
   });
   const billingType = billingIdentity.billingType;
   const claudeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);

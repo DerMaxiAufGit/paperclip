@@ -56,18 +56,86 @@ function isApiCredentialValue(value: string): boolean {
 /**
  * Settings that select a cloud provider but that the ACP child does not inherit
  * from the host environment (see `ACPX_INHERITED_PROVIDER_ENV_KEYS.claude` in
- * adapter-utils). They count only when the adapter env sets them, because the
- * adapter env always reaches the child. A host-only value would let the gate
- * pass while the child still falls back to the service user's Claude sign-in.
+ * adapter-utils). On the ACP engine, and while the engine is not chosen yet,
+ * they count only when the adapter env sets them, because the adapter env
+ * always reaches the child. A host-only value would let the gate pass while the
+ * child still falls back to the service user's Claude sign-in.
  */
 const CONFIG_ENV_ONLY_PROVIDER_FLAGS = ["CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] as const;
 
+export const CLAUDE_INLINE_SETTINGS_INVALID_MESSAGE =
+  "The --settings value in the agent's extra args is not valid JSON; fix or remove it.";
+
 /**
- * True when the run authenticates with a non-subscription credential. The
+ * The inline `--settings` JSON in a CLI run's `extraArgs`/`args`. The `claude`
+ * binary applies its `env` over the process env, so an entry there can take a
+ * credential away from the agent or server env: with
+ * `{"env":{"ANTHROPIC_API_KEY":""}}` the binary drops the key and sends the
+ * server's Claude sign-in instead (verified with claude 2.1.283). A value that
+ * does not start with `{` is a settings file path, which is not read (see the
+ * plan's grey area). The ACP child never gets these args.
+ */
+interface ClaudeInlineSettings {
+  /** The `env` object of each inline `--settings` JSON, in order. */
+  envs: Record<string, unknown>[];
+  /** An inline `--settings` value is not valid JSON. */
+  invalid: boolean;
+}
+
+const NO_INLINE_SETTINGS: ClaudeInlineSettings = { envs: [], invalid: false };
+
+function claudeCliArgs(config: Record<string, unknown>): string[] {
+  return [...asStringArray(config.extraArgs), ...asStringArray(config.args)];
+}
+
+function readClaudeInlineSettings(args: readonly string[]): ClaudeInlineSettings {
+  const envs: Record<string, unknown>[] = [];
+  let invalid = false;
+  for (const value of readHarnessCliFlagValues(args, ["--settings"])) {
+    if (!value.startsWith("{")) continue;
+    try {
+      envs.push(parseObject(parseObject(JSON.parse(value)).env));
+    } catch {
+      invalid = true;
+    }
+  }
+  return { envs, invalid };
+}
+
+/**
+ * True when the inline `--settings` env may take `key` away: an entry for it,
+ * in any case, whose value does not count by itself (`""`, whitespace, `"0"`, a
+ * subscription token, or a non-string the binary turns into a string). Settings
+ * that are not valid JSON take every credential away. The settings can only
+ * take a credential away, never add one: claude 2.1.283 ignores the whole
+ * `--settings` JSON when any field fails its settings schema, and skips a
+ * `--settings` token that is the value of another flag, so a key the settings
+ * add may never reach the binary, which then uses the server's sign-in. An
+ * `apiKeyHelper` in the settings does not count for the same reason.
+ */
+function inlineSettingsTakeAway(
+  settings: ClaudeInlineSettings,
+  key: string,
+  counts: (value: string) => boolean,
+): boolean {
+  if (settings.invalid) return true;
+  return settings.envs.some((env) =>
+    Object.entries(env).some(
+      ([rawKey, value]) =>
+        rawKey.trim().toUpperCase() === key && !(typeof value === "string" && counts(value.trim())),
+    ),
+  );
+}
+
+/**
+ * True when the run authenticates with a non-subscription credential, by the
+ * same classifier as the billing label (`resolveClaudeBillingIdentity`). The
  * adapter config env wins over the host env, the same way the launch env is
  * merged. The host env only counts for a local target without a managed AI
  * connection, because a remote target and a managed connection never inherit
- * the host credentials.
+ * the host credentials. On the CLI engine the inline `--settings` env can take
+ * a credential away. Without `engine`, the credential must count for both
+ * engines.
  *
  * `ANTHROPIC_BEDROCK_BASE_URL` alone does not count: without
  * `CLAUDE_CODE_USE_BEDROCK` Claude Code ignores it and uses its own sign-in.
@@ -76,27 +144,13 @@ export function claudeRunHasApiCredential(input: {
   config: Record<string, unknown>;
   targetIsRemote: boolean;
   hostEnv?: NodeJS.ProcessEnv;
+  engine?: ClaudeCredentialPolicyEngine;
 }): boolean {
-  const envConfig = parseObject(input.config.env);
-  const considerHostEnv = !input.targetIsRemote && !input.config.managedAiConnection;
-  const hostEnv = considerHostEnv ? input.hostEnv ?? process.env : {};
-  const readConfigured = (key: string): string | null => {
-    const configured = envConfig[key];
-    return typeof configured === "string" ? configured.trim() : null;
-  };
-  const read = (key: string): string => {
-    const configured = readConfigured(key);
-    if (configured !== null) return configured;
-    const inherited = hostEnv[key];
-    return typeof inherited === "string" ? inherited.trim() : "";
-  };
-  if (isApiCredentialValue(read("ANTHROPIC_API_KEY"))) return true;
-  if (isApiCredentialValue(read("ANTHROPIC_AUTH_TOKEN"))) return true;
-  if (providerFlagSet(read("CLAUDE_CODE_USE_BEDROCK"))) return true;
-  for (const flag of CONFIG_ENV_ONLY_PROVIDER_FLAGS) {
-    if (providerFlagSet(readConfigured(flag) ?? "")) return true;
-  }
-  return false;
+  const engines: ClaudeCredentialPolicyEngine[] = input.engine ? [input.engine] : ["cli", "acp"];
+  return engines.every((engine) => {
+    const { billingType } = resolveClaudeConfigBillingIdentity({ ...input, engine });
+    return billingType === "api" || billingType === "metered_api";
+  });
 }
 
 /**
@@ -104,7 +158,9 @@ export function claudeRunHasApiCredential(input: {
  * Anthropic API credential on this server uses ACP, which needs no global
  * `claude` binary (the Agent SDK ships with Paperclip). Every other run uses
  * the CLI engine: a subscription only through the `claude` binary signed in on
- * this server, and a remote target through the CLI installed there.
+ * this server, and a remote target through the CLI installed there. A
+ * credential that the inline `--settings` env takes away keeps the run on the
+ * CLI engine, where `isClaudeSubscriptionLaneRun` puts it on the lane too.
  */
 export function resolveClaudeDefaultEngine(input: {
   config: Record<string, unknown>;
@@ -234,23 +290,19 @@ function claudeSubscriptionEndpointMessage(finding: ClaudeSubscriptionEnvFinding
  * requests, or null when it may start. It reads the adapter config env (agent,
  * project, environment and routine env, and issue overrides) and the env of an
  * inline `--settings` JSON in `extraArgs`/`args`, which the binary applies over
- * its process env. The server's own process env is the operator's and is not
- * checked. The caller decides that the run is on the subscription lane.
+ * its process env; those settings must also pass
+ * `claudeInlineSettingsViolation`. The server's own process env is the
+ * operator's and is not checked. The caller decides that the run is on the
+ * subscription lane.
  */
 export function resolveClaudeSubscriptionEndpointViolation(config: Record<string, unknown>): string | null {
   const envFinding = findClaudeSubscriptionEnvFinding(parseObject(config.env));
   if (envFinding) return claudeSubscriptionEndpointMessage(envFinding, "the agent env");
-  const extraArgs = [...asStringArray(config.extraArgs), ...asStringArray(config.args)];
-  for (const value of readHarnessCliFlagValues(extraArgs, ["--settings"])) {
-    if (!value.startsWith("{")) continue;
-    let settings: unknown;
-    try {
-      settings = JSON.parse(value);
-    } catch {
-      // The binary refuses a --settings value that is not valid JSON.
-      continue;
-    }
-    const settingsFinding = findClaudeSubscriptionEnvFinding(parseObject(parseObject(settings).env));
+  const settings = readClaudeInlineSettings(claudeCliArgs(config));
+  const settingsViolation = claudeInlineSettingsViolation(settings);
+  if (settingsViolation) return settingsViolation;
+  for (const env of settings.envs) {
+    const settingsFinding = findClaudeSubscriptionEnvFinding(env);
     if (settingsFinding) {
       return claudeSubscriptionEndpointMessage(settingsFinding, "the --settings env in the agent's extra args");
     }
@@ -259,17 +311,30 @@ export function resolveClaudeSubscriptionEndpointViolation(config: Record<string
 }
 
 /**
+ * The refusal message for a CLI run, on any target, whose inline `--settings`
+ * is not valid JSON (the credential classifier cannot read it, and the binary
+ * refuses it too), or whose settings env would hand the `claude` binary a
+ * Claude subscription token (a token key with a value, or a token value).
+ */
+function claudeInlineSettingsViolation(settings: ClaudeInlineSettings): string | null {
+  if (settings.invalid) return CLAUDE_INLINE_SETTINGS_INVALID_MESSAGE;
+  for (const env of settings.envs) {
+    for (const [rawKey, value] of Object.entries(env)) {
+      const blank = typeof value === "string" && value.trim() === "";
+      if ((isClaudeSubscriptionTokenEnvKey(rawKey) && !blank) || isClaudeSubscriptionTokenValue(value)) {
+        return `Paperclip never passes a Claude sign-in to the claude CLI. Remove ${rawKey.trim()} from the --settings env in the agent's extra args.`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * True when a local CLI run has no API credential, so the `claude` binary uses
- * the sign-in of the user Paperclip runs as. A managed AI connection never
- * inherits the host credentials.
+ * the sign-in of the user Paperclip runs as.
  */
 function isLocalCliSubscriptionRun(config: Record<string, unknown>, hostEnv: NodeJS.ProcessEnv | undefined): boolean {
-  const identity = resolveClaudeBillingIdentity({
-    engine: "cli",
-    targetIsRemote: false,
-    env: parseObject(config.env),
-    hostEnv: config.managedAiConnection ? {} : hostEnv,
-  });
+  const identity = resolveClaudeConfigBillingIdentity({ config, engine: "cli", targetIsRemote: false, hostEnv });
   return identity.billingType === "subscription";
 }
 
@@ -278,6 +343,9 @@ function isLocalCliSubscriptionRun(config: Record<string, unknown>, hostEnv: Nod
  * environment Test. Returns the user-facing error message when the run must
  * not start, or null when it may start.
  *
+ * - CLI engine (any target): the inline `--settings` JSON in the extra args
+ *   must be valid JSON and must not carry a subscription token
+ *   (`claudeInlineSettingsViolation`).
  * - Local CLI engine: allowed; the `claude` binary uses its own sign-in. On the
  *   subscription lane (no API credential) the config must not point it away
  *   from api.anthropic.com (`resolveClaudeSubscriptionEndpointViolation`).
@@ -291,12 +359,23 @@ export function resolveClaudeCredentialPolicyViolation(input: {
   hostEnv?: NodeJS.ProcessEnv;
 }): string | null {
   const targetIsRemote = input.target?.kind === "remote";
-  if (!targetIsRemote && input.engine === "cli") {
-    return isLocalCliSubscriptionRun(input.config, input.hostEnv)
-      ? resolveClaudeSubscriptionEndpointViolation(input.config)
-      : null;
+  if (input.engine === "cli") {
+    const settingsViolation = claudeInlineSettingsViolation(readClaudeInlineSettings(claudeCliArgs(input.config)));
+    if (settingsViolation) return settingsViolation;
+    if (!targetIsRemote) {
+      return isLocalCliSubscriptionRun(input.config, input.hostEnv)
+        ? resolveClaudeSubscriptionEndpointViolation(input.config)
+        : null;
+    }
   }
-  if (claudeRunHasApiCredential({ config: input.config, targetIsRemote, hostEnv: input.hostEnv })) {
+  if (
+    claudeRunHasApiCredential({
+      config: input.config,
+      targetIsRemote,
+      hostEnv: input.hostEnv,
+      engine: input.engine,
+    })
+  ) {
     return null;
   }
   return targetIsRemote ? CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE : CLAUDE_ACP_API_KEY_REQUIRED_MESSAGE;
@@ -358,13 +437,17 @@ function claudeGatewayBiller(baseUrl: string): string {
  *
  * `env` is the run's adapter env and wins over `hostEnv`, as in the launch env.
  * The host env counts only for a local target. The ACP child never inherits a
- * host Vertex or Foundry flag, so on ACP those count only from `env`.
+ * host Vertex or Foundry flag, so on ACP those count only from `env`. On the
+ * CLI engine the inline `--settings` env in `extraArgs` can take a credential
+ * away (see `inlineSettingsTakeAway`).
  */
 export function resolveClaudeBillingIdentity(input: {
   engine: ClaudeCredentialPolicyEngine;
   targetIsRemote: boolean;
   env: Record<string, unknown>;
   hostEnv?: NodeJS.ProcessEnv;
+  /** The claude CLI's extra args, read on the CLI engine only. */
+  extraArgs?: readonly string[];
 }): ClaudeBillingIdentity {
   const hostEnv = input.targetIsRemote ? {} : input.hostEnv ?? process.env;
   const readConfigured = (key: string): string | null => {
@@ -379,8 +462,12 @@ export function resolveClaudeBillingIdentity(input: {
   };
   const configEnvOnly = (key: string): boolean =>
     input.engine === "acp" && (CONFIG_ENV_ONLY_PROVIDER_FLAGS as readonly string[]).includes(key);
+  const settings = input.engine === "cli" ? readClaudeInlineSettings(input.extraArgs ?? []) : NO_INLINE_SETTINGS;
+  const credential = (key: string, value: string, counts: (value: string) => boolean): boolean =>
+    counts(value) && !inlineSettingsTakeAway(settings, key, counts);
   const providerFlag = (key: string): boolean =>
-    providerFlagSet(configEnvOnly(key) ? readConfigured(key) ?? "" : read(key));
+    credential(key, configEnvOnly(key) ? readConfigured(key) ?? "" : read(key), providerFlagSet);
+  const apiCredential = (key: string): boolean => credential(key, read(key), isApiCredentialValue);
   const identity = (billingType: ClaudeBillingType, biller = "anthropic"): ClaudeBillingIdentity => ({
     provider: "anthropic",
     biller,
@@ -390,11 +477,31 @@ export function resolveClaudeBillingIdentity(input: {
   if (providerFlag("CLAUDE_CODE_USE_BEDROCK")) return identity("metered_api", CLAUDE_BEDROCK_BILLER);
   if (providerFlag("CLAUDE_CODE_USE_VERTEX")) return identity("metered_api", CLAUDE_VERTEX_BILLER);
   if (providerFlag("CLAUDE_CODE_USE_FOUNDRY")) return identity("metered_api", CLAUDE_FOUNDRY_BILLER);
-  if (isApiCredentialValue(read("ANTHROPIC_API_KEY"))) return identity("api");
-  if (isApiCredentialValue(read("ANTHROPIC_AUTH_TOKEN"))) {
+  if (apiCredential("ANTHROPIC_API_KEY")) return identity("api");
+  if (apiCredential("ANTHROPIC_AUTH_TOKEN")) {
     return identity("metered_api", claudeGatewayBiller(read("ANTHROPIC_BASE_URL")));
   }
   return input.engine === "cli" && !input.targetIsRemote ? identity("subscription") : identity("unknown");
+}
+
+/**
+ * `resolveClaudeBillingIdentity` for a claude_local adapter config: the one
+ * classifier behind `claudeRunHasApiCredential`, the subscription lane and its
+ * endpoint check. A managed AI connection never inherits the host credentials.
+ */
+function resolveClaudeConfigBillingIdentity(input: {
+  config: Record<string, unknown>;
+  engine: ClaudeCredentialPolicyEngine;
+  targetIsRemote: boolean;
+  hostEnv?: NodeJS.ProcessEnv;
+}): ClaudeBillingIdentity {
+  return resolveClaudeBillingIdentity({
+    engine: input.engine,
+    targetIsRemote: input.targetIsRemote,
+    env: parseObject(input.config.env),
+    hostEnv: input.config.managedAiConnection ? {} : input.hostEnv,
+    extraArgs: claudeCliArgs(input.config),
+  });
 }
 
 /**
@@ -414,10 +521,12 @@ export function withoutClaudeSubscriptionTokens<T>(env: Record<string, T>): Reco
 
 /**
  * True when a claude_local run is on the Claude subscription lane: it runs on
- * this server (local target) with no API credential, so the `claude` CLI uses
- * the sign-in of the user Paperclip runs as. An explicit `engine=acp` run is not
- * on the lane (the ACP credential gate refuses it without an API key). This is
- * the lane the owner-only and trigger-source gates guard.
+ * this server (local target) with no API credential in the env the `claude`
+ * CLI uses (after the inline `--settings` env, which can take one away), so
+ * the CLI uses the sign-in of the user Paperclip runs as. An explicit
+ * `engine=acp` run is not on the lane (the ACP credential gate refuses it
+ * without an API key). This is the lane the owner-only and trigger-source
+ * gates guard.
  */
 export function isClaudeSubscriptionLaneRun(input: {
   config: Record<string, unknown>;
@@ -436,13 +545,15 @@ export function isClaudeSubscriptionLaneRun(input: {
  * True when a stored (not yet resolved) claude_local adapter config names an
  * API credential: a set `ANTHROPIC_API_KEY` or gateway `ANTHROPIC_AUTH_TOKEN`
  * binding (a literal that is not a subscription token, or a secret reference),
- * or a Bedrock, Vertex or Foundry flag. Used where secrets are not resolved,
- * for example to pick safe defaults when a chat endpoint is created. It does
- * not read the host env.
+ * or a Bedrock, Vertex or Foundry flag, that the inline `--settings` env does
+ * not take away. Used where secrets are not resolved, for example to pick safe
+ * defaults when a chat endpoint is created. It does not read the host env.
  */
 export function claudeConfigDeclaresApiCredential(config: Record<string, unknown>): boolean {
-  if (config.managedAiConnection) return true;
   const env = parseObject(config.env);
+  const settings = readClaudeInlineSettings(claudeCliArgs(config));
+  const kept = (key: string, counts: (value: string) => boolean): boolean =>
+    !inlineSettingsTakeAway(settings, key, counts);
   const bindingIsCredential = (binding: unknown): boolean => {
     if (typeof binding === "string") return isApiCredentialValue(binding.trim());
     const record = parseObject(binding);
@@ -456,11 +567,13 @@ export function claudeConfigDeclaresApiCredential(config: Record<string, unknown
     const value = typeof binding === "string" ? binding : record.type === "plain" ? record.value : null;
     return typeof value === "string" && providerFlagSet(value.trim());
   };
+  // A managed Anthropic connection injects ANTHROPIC_API_KEY at run time.
   return (
-    bindingIsCredential(env.ANTHROPIC_API_KEY) ||
-    bindingIsCredential(env.ANTHROPIC_AUTH_TOKEN) ||
-    flagSet(env.CLAUDE_CODE_USE_BEDROCK) ||
-    flagSet(env.CLAUDE_CODE_USE_VERTEX) ||
-    flagSet(env.CLAUDE_CODE_USE_FOUNDRY)
+    ((Boolean(config.managedAiConnection) || bindingIsCredential(env.ANTHROPIC_API_KEY)) &&
+      kept("ANTHROPIC_API_KEY", isApiCredentialValue)) ||
+    (bindingIsCredential(env.ANTHROPIC_AUTH_TOKEN) && kept("ANTHROPIC_AUTH_TOKEN", isApiCredentialValue)) ||
+    (flagSet(env.CLAUDE_CODE_USE_BEDROCK) && kept("CLAUDE_CODE_USE_BEDROCK", providerFlagSet)) ||
+    (flagSet(env.CLAUDE_CODE_USE_VERTEX) && kept("CLAUDE_CODE_USE_VERTEX", providerFlagSet)) ||
+    (flagSet(env.CLAUDE_CODE_USE_FOUNDRY) && kept("CLAUDE_CODE_USE_FOUNDRY", providerFlagSet))
   );
 }

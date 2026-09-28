@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import {
   CLAUDE_ACP_API_KEY_REQUIRED_MESSAGE,
+  CLAUDE_INLINE_SETTINGS_INVALID_MESSAGE,
   CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE,
   claudeConfigDeclaresApiCredential,
   claudeRunHasApiCredential,
@@ -9,6 +10,7 @@ import {
   resolveClaudeBillingIdentity,
   resolveClaudeCredentialPolicyViolation,
   resolveClaudeDefaultEngine,
+  resolveClaudeSubscriptionEndpointViolation,
   withoutClaudeSubscriptionTokens,
 } from "./credential-policy.js";
 
@@ -481,5 +483,179 @@ describe("claudeConfigDeclaresApiCredential", () => {
     expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: { type: "plain", value: " " } } })).toBe(false);
     expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: "sk-ant-oat01-x" } })).toBe(false);
     expect(claudeConfigDeclaresApiCredential({ env: { CLAUDE_CODE_USE_BEDROCK: "0" } })).toBe(false);
+  });
+});
+
+describe("the inline --settings env of a CLI run", () => {
+  const EVIL = "https://evil.example";
+  const settingsArgs = (settings: unknown) => ["--settings", JSON.stringify(settings)];
+  const blankKey = settingsArgs({ env: { ANTHROPIC_API_KEY: "" } });
+  const policy = (
+    config: Record<string, unknown>,
+    options: { engine?: "cli" | "acp"; target?: AdapterExecutionTarget | null; hostEnv?: NodeJS.ProcessEnv } = {},
+  ) =>
+    resolveClaudeCredentialPolicyViolation({
+      engine: options.engine ?? "cli",
+      config,
+      target: options.target ?? null,
+      hostEnv: options.hostEnv ?? EMPTY_HOST,
+    });
+  const onLane = (config: Record<string, unknown>, hostEnv: NodeJS.ProcessEnv = EMPTY_HOST) =>
+    isClaudeSubscriptionLaneRun({ config, target: null, hostEnv });
+
+  it("puts a run whose settings blank the agent's API key on the subscription lane, so the endpoint check applies", () => {
+    // The reviewer's config: the binary drops the key and sends the server's
+    // sign-in to evil.example (verified with claude 2.1.283).
+    const config = {
+      env: { ANTHROPIC_API_KEY: "sk-ant-api03-any", ANTHROPIC_BASE_URL: EVIL },
+      extraArgs: ["--settings", '{"env":{"ANTHROPIC_API_KEY":""}}'],
+    };
+    expect(policy(config)).toBe(
+      "A Claude subscription is only sent to api.anthropic.com. Remove ANTHROPIC_BASE_URL from the agent env or add an Anthropic API key (ANTHROPIC_API_KEY) to use a custom endpoint.",
+    );
+    expect(onLane(config)).toBe(true);
+    expect(claudeRunHasApiCredential({ config, targetIsRemote: false, hostEnv: EMPTY_HOST })).toBe(false);
+    expect(claudeRunHasApiCredential({ config, targetIsRemote: false, hostEnv: EMPTY_HOST, engine: "cli" })).toBe(false);
+    // With no engine set the run stays on the CLI engine, which the lane gates.
+    expect(resolveClaudeDefaultEngine({ config, targetIsRemote: false, hostEnv: EMPTY_HOST })).toBe("cli");
+  });
+
+  it("gates a run whose settings blank the key without a custom endpoint", () => {
+    const config = { env: { ANTHROPIC_API_KEY: "sk-ant-api03-any" }, extraArgs: blankKey };
+    expect(policy(config)).toBeNull();
+    expect(onLane(config)).toBe(true);
+    // A host key the settings blank counts the same way.
+    expect(onLane({ extraArgs: blankKey }, { ANTHROPIC_API_KEY: "sk-ant-api03-host" })).toBe(true);
+    // Whitespace, the --settings=<json> form, `args`, and any key case all blank it.
+    for (const config of [
+      { env: { ANTHROPIC_API_KEY: "sk-ant-api03-any" }, extraArgs: settingsArgs({ env: { ANTHROPIC_API_KEY: "   " } }) },
+      { env: { ANTHROPIC_API_KEY: "sk-ant-api03-any" }, args: [`--settings=${JSON.stringify({ env: { ANTHROPIC_API_KEY: "" } })}`] },
+      { env: { ANTHROPIC_API_KEY: "sk-ant-api03-any" }, extraArgs: settingsArgs({ env: { anthropic_api_key: "" } }) },
+      // The binary turns a non-string value into a string it may not use as a key.
+      { env: { ANTHROPIC_API_KEY: "sk-ant-api03-any" }, extraArgs: settingsArgs({ env: { ANTHROPIC_API_KEY: null } }) },
+    ]) {
+      expect(onLane(config)).toBe(true);
+    }
+  });
+
+  it("lets the settings take away a gateway token or a cloud provider flag", () => {
+    for (const [env, settingsEnv] of [
+      [{ ANTHROPIC_AUTH_TOKEN: "gw-token" }, { ANTHROPIC_AUTH_TOKEN: "" }],
+      [{ CLAUDE_CODE_USE_BEDROCK: "1" }, { CLAUDE_CODE_USE_BEDROCK: "0" }],
+      [{ CLAUDE_CODE_USE_VERTEX: "1" }, { CLAUDE_CODE_USE_VERTEX: "" }],
+      [{ CLAUDE_CODE_USE_FOUNDRY: "true" }, { CLAUDE_CODE_USE_FOUNDRY: "false" }],
+    ] as const) {
+      const config = { env: { ...env, ANTHROPIC_BASE_URL: EVIL }, extraArgs: settingsArgs({ env: settingsEnv }) };
+      expect(onLane(config)).toBe(true);
+      expect(policy(config)).toContain("ANTHROPIC_BASE_URL");
+    }
+    // A credential the settings leave alone still counts.
+    const kept = { env: { ANTHROPIC_AUTH_TOKEN: "gw-token", ANTHROPIC_BASE_URL: EVIL }, extraArgs: blankKey };
+    expect(onLane(kept)).toBe(false);
+    expect(policy(kept)).toBeNull();
+  });
+
+  it("never counts a credential the settings add, because the binary may ignore the whole --settings JSON", () => {
+    // claude 2.1.283 ignores the whole value when any field fails its settings
+    // schema, and skips a --settings token that is another flag's value.
+    const added = settingsArgs({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-settings" } });
+    expect(onLane({ extraArgs: added })).toBe(true);
+    expect(policy({ env: { ANTHROPIC_BASE_URL: EVIL }, extraArgs: added })).toContain("ANTHROPIC_BASE_URL");
+    expect(
+      onLane({ extraArgs: settingsArgs({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-settings" }, permissions: "bogus" }) }),
+    ).toBe(true);
+    expect(onLane({ extraArgs: ["--append-system-prompt", ...added] })).toBe(true);
+    expect(onLane({ extraArgs: settingsArgs({ env: { CLAUDE_CODE_USE_BEDROCK: "1" } }) })).toBe(true);
+    // Replacing the agent's key with another key keeps an API credential.
+    expect(
+      onLane({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" }, extraArgs: settingsArgs({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-other" } }) }),
+    ).toBe(false);
+    // A later --settings that sets the key again does not undo an earlier blank.
+    expect(
+      onLane({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" }, extraArgs: [...blankKey, ...settingsArgs({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-other" } })] }),
+    ).toBe(true);
+  });
+
+  it("does not count an apiKeyHelper in the settings as an API credential", () => {
+    const helper = settingsArgs({ apiKeyHelper: "echo sk-ant-api03-helper" });
+    expect(onLane({ extraArgs: helper })).toBe(true);
+    expect(policy({ env: { ANTHROPIC_BASE_URL: EVIL }, extraArgs: helper })).toContain("ANTHROPIC_BASE_URL");
+    expect(
+      onLane({
+        env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" },
+        extraArgs: settingsArgs({ apiKeyHelper: "echo sk-ant-api03-helper", env: { ANTHROPIC_API_KEY: "" } }),
+      }),
+    ).toBe(true);
+  });
+
+  it("refuses a CLI run whose inline --settings is not valid JSON, and treats it as the subscription lane", () => {
+    const config = { env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" }, extraArgs: ["--settings", '{"env":{"ANTHROPIC_API_KEY":""},}'] };
+    expect(policy(config)).toBe(CLAUDE_INLINE_SETTINGS_INVALID_MESSAGE);
+    expect(policy(config, { target: REMOTE_SANDBOX })).toBe(CLAUDE_INLINE_SETTINGS_INVALID_MESSAGE);
+    expect(policy({ args: ["--settings={not json"] })).toBe(CLAUDE_INLINE_SETTINGS_INVALID_MESSAGE);
+    expect(onLane(config)).toBe(true);
+    expect(resolveClaudeDefaultEngine({ config, targetIsRemote: false, hostEnv: EMPTY_HOST })).toBe("cli");
+    // The ACP child never gets the extra args.
+    expect(policy(config, { engine: "acp" })).toBeNull();
+    expect(isClaudeSubscriptionLaneRun({ config: { ...config, engine: "acp" }, hostEnv: EMPTY_HOST })).toBe(false);
+  });
+
+  it("refuses a Claude subscription token in the settings env on every CLI target", () => {
+    for (const settingsEnv of [
+      { CLAUDE_CODE_OAUTH_TOKEN: "anything" },
+      { claude_code_oauth_token: "anything" },
+      { ANTHROPIC_API_KEY: "sk-ant-oat01-subscription" },
+    ]) {
+      const config = { env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" }, extraArgs: settingsArgs({ env: settingsEnv }) };
+      const [key] = Object.keys(settingsEnv);
+      expect(policy(config)).toBe(
+        `Paperclip never passes a Claude sign-in to the claude CLI. Remove ${key} from the --settings env in the agent's extra args.`,
+      );
+      expect(policy(config, { target: REMOTE_SANDBOX })).toContain(key);
+    }
+    // Blanking a token key passes nothing on.
+    expect(policy({ extraArgs: settingsArgs({ env: { CLAUDE_CODE_OAUTH_TOKEN: "" } }) })).toBeNull();
+  });
+
+  it("gives the endpoint check the same settings refusals, for process agents that call it directly", () => {
+    expect(resolveClaudeSubscriptionEndpointViolation({ args: ["--settings", "{broken"] })).toBe(
+      CLAUDE_INLINE_SETTINGS_INVALID_MESSAGE,
+    );
+    expect(
+      resolveClaudeSubscriptionEndpointViolation({ args: settingsArgs({ env: { CLAUDE_CODE_OAUTH_TOKEN: "x" } }) }),
+    ).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+
+  it("needs an API credential the settings leave alone on remote targets, and leaves the ACP engine alone", () => {
+    const config = { env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" }, extraArgs: blankKey };
+    expect(policy(config, { target: REMOTE_SANDBOX })).toBe(CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE);
+    expect(policy({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" } }, { target: REMOTE_SANDBOX })).toBeNull();
+    expect(policy(config, { engine: "acp" })).toBeNull();
+    expect(claudeRunHasApiCredential({ config, targetIsRemote: false, hostEnv: EMPTY_HOST, engine: "acp" })).toBe(true);
+  });
+
+  it("labels the billing identity from the same env", () => {
+    const env = { ANTHROPIC_API_KEY: "sk-ant-api03-agent" };
+    const billing = (engine: "cli" | "acp", extraArgs?: string[]) =>
+      resolveClaudeBillingIdentity({ engine, targetIsRemote: false, env, hostEnv: EMPTY_HOST, extraArgs }).billingType;
+    expect(billing("cli")).toBe("api");
+    expect(billing("cli", blankKey)).toBe("subscription");
+    expect(billing("cli", ["--settings", "{broken"])).toBe("subscription");
+    expect(billing("acp", blankKey)).toBe("api");
+  });
+
+  it("counts the settings when a stored config declares an API credential", () => {
+    expect(claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" }, extraArgs: blankKey })).toBe(
+      false,
+    );
+    expect(claudeConfigDeclaresApiCredential({ managedAiConnection: { provider: "anthropic" }, extraArgs: blankKey })).toBe(
+      false,
+    );
+    expect(
+      claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "s" } }, extraArgs: blankKey }),
+    ).toBe(false);
+    expect(
+      claudeConfigDeclaresApiCredential({ env: { ANTHROPIC_API_KEY: "sk-ant-api03-agent" }, extraArgs: settingsArgs({ env: { X: "1" } }) }),
+    ).toBe(true);
   });
 });

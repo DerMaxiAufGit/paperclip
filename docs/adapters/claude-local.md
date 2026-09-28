@@ -117,6 +117,14 @@ subscription-lane run, and the owner-only and trigger-source rules refuse it
 when they apply. Move that setting into the agent env (as a secret for a key)
 so Paperclip sees the API credential.
 
+The same applies to an inline `--settings` JSON in the agent's extra args:
+keep API keys and `CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`/`_FOUNDRY` in the agent
+env, not there. The `claude` CLI applies that JSON's `env` over the agent env,
+so settings there can only take a credential away (for example
+`{"env":{"ANTHROPIC_API_KEY":""}}` puts the run on the subscription lane);
+they never add one, and an `apiKeyHelper` there does not count. A run whose
+inline `--settings` value is not valid JSON fails before it starts.
+
 **Trigger source.** Even for the owner, a subscription-lane run fails before it
 starts when its wake came from outside Paperclip:
 
@@ -139,7 +147,24 @@ bridge key, an email conversation, a chat conversation that a chat guest
 started, a task a routine's public webhook created, and a task whose assignee,
 status or blockers a plugin changed last. A wake that a Paperclip user
 requests on such a task, such as the owner's comment, is allowed, and any later
-activity of a Paperclip user on a plugin-edited task lifts that refusal.
+action of a Paperclip user on a plugin-edited task lifts that refusal. Opening
+or reading the task does not count: read and inbox markers, file previews,
+feedback votes, tree-control previews and external-object refreshes leave the
+refusal in place.
+
+A task bridge key can also reach an agent through a routine: it can run a
+routine of its own agent with another agent as the assignee. So the task of a
+routine run is refused too, unless a Paperclip user started the run by hand
+(Run now on the board, or an API run with a board login):
+
+- an agent that holds a live task bridge key started the run;
+- the run was started by hand or through the API, but Paperclip has no record
+  of who started it (yet), and some agent of the company holds a live task
+  bridge key. A pipeline stage entry is such a run. A company with no live task
+  bridge key is not affected;
+- an agent that holds a live task bridge key created or edited the routine, or
+  created the trigger that fired it. This also covers the routine's scheduled
+  runs after the owner assigned it to another agent.
 
 The run fails with `configuration_incomplete` (reason
 `claude_subscription_external_trigger`, with `trigger` set to `chat_guest`,
@@ -149,12 +174,12 @@ subscription runs are for the server owner only; give this agent an Anthropic
 API key."
 
 These wakes stay allowed: assignments and comments by a Paperclip user, timers
-and heartbeats, scheduled routines, the owner's manual run of a plugin-managed
-routine, delegation between agents (except from an agent with a live task
-bridge key), chat messages from linked chat users (also on a conversation a
-chat guest started), and follow-up wakes on a chat conversation that a linked
-user started. A new chat endpoint for an agent on the
-subscription lane starts with unlinked people turned off.
+and heartbeats, scheduled routines, routine runs the owner starts, the owner's
+manual run of a plugin-managed routine, delegation between agents (except from
+an agent with a live task bridge key), chat messages from linked chat users
+(also on a conversation a chat guest started), and follow-up wakes on a chat
+conversation that a linked user started. A new chat endpoint for an agent on
+the subscription lane starts with unlinked people turned off.
 
 **Endpoint.** The `claude` CLI sends the server's sign-in to whatever endpoint
 its env names. A subscription-lane run therefore fails before it starts
@@ -340,7 +365,8 @@ Do not use `claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`,
 `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_TOKEN`,
 or a `sk-ant-oat`, `sk-ant-ort`, or `sk-ant-sid` value. Paperclip
 rejects them in configurations and secrets and removes them from every process
-it starts.
+it starts. That covers every adapter config field, such as headers, and a
+token inside a longer value, such as `Bearer sk-ant-oat01-…`.
 
 ## Other adapters on the same server
 
