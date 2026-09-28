@@ -1,6 +1,10 @@
 import path from "node:path";
 import { GIT_ARCHIVE_EXCLUDES } from "./git-workspace-sync.js";
 import {
+  claudeSignInWorkspaceExcludes,
+  withClaudeSignInWorkspaceExcludes,
+} from "./claude-config-credential-excludes.js";
+import {
   type SshRemoteExecutionSpec,
   prepareWorkspaceForSshExecution,
   runSshCommand,
@@ -139,7 +143,10 @@ export async function prepareRemoteManagedRuntime(input: {
     : baseWorkspaceRemoteDir;
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
 
-  const workspaceExclude = [...new Set(input.workspaceExclude ?? [])].filter((entry) => entry.length > 0);
+  // Fork policy: the Claude sign-in files of the workspace are merged into the
+  // caller's excludes for every adapter (see claude-config-credential-excludes.ts).
+  const workspaceExclude = withClaudeSignInWorkspaceExcludes(input.workspaceLocalDir, input.workspaceExclude)
+    .filter((entry) => entry.length > 0);
   const preparedWorkspace = syncWorkspace
     ? await prepareWorkspaceForSshExecution({
         spec: input.spec,
@@ -153,7 +160,9 @@ export async function prepareRemoteManagedRuntime(input: {
   // the restore, which reuses its excludes) also skips each excluded path at any
   // depth (`*/<path>`). Otherwise the restore would read a nested file tar left
   // out as deleted remotely and remove it locally.
-  const baselineWorkspaceExclude = workspaceExclude.flatMap((entry) => [entry, `*/${entry}`]);
+  const baselineWorkspaceExclude = workspaceExclude.flatMap((entry) =>
+    entry.startsWith("*/") ? [entry] : [entry, `*/${entry}`],
+  );
   const baselineSnapshot = preparedWorkspace
     ? await captureDirectorySnapshot(input.workspaceLocalDir, {
         exclude: preparedWorkspace.gitBacked
@@ -220,6 +229,7 @@ export async function prepareRemoteManagedRuntime(input: {
       const exclude = mergeExcludes(
         REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES,
         referencedSourceIgnoreExcludeEntries(ignoreResolution),
+        claudeSignInWorkspaceExcludes({ workspaceLocalDir: localPath }),
       );
       await syncDirectoryToSsh({
         spec: input.spec,

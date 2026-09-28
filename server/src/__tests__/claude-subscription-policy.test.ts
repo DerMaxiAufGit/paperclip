@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
+  agentApiKeys,
   agentWakeupRequests,
   agents,
   authUsers,
@@ -15,6 +17,7 @@ import {
   createDb,
   instanceUserRoles,
   issues,
+  pluginManagedResources,
   plugins,
   routineRuns,
   routines,
@@ -837,8 +840,9 @@ describeEmbeddedPostgres("Claude subscription owner-only and trigger-source gate
       }),
     ).resolves.toBeNull();
 
-    // A linked user's chat message does not lift the origin check: a chat
-    // conversation an unlinked person started stays external.
+    // The owner's own linked chat message is the owner's wake, also on a chat
+    // conversation an unlinked person started (the owner's comment from the
+    // Paperclip UI runs there too).
     const guestIssueId = await originIssue({
       companyId,
       agentId,
@@ -856,6 +860,20 @@ describeEmbeddedPostgres("Claude subscription owner-only and trigger-source gate
         requestedByActorType: "user",
         requestedByActorId: "owner",
         normalizedEvent: { kind: "mention", principal: { externalId: "U-owner" } },
+      }),
+    ).resolves.toBeNull();
+    // A chat wake attributed to the owner from an account that is not linked
+    // to the owner stays external there.
+    await expect(
+      chatMessageRun({
+        companyId,
+        agentId,
+        endpointId,
+        principalId: teammatePrincipalId,
+        issueId: guestIssueId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        normalizedEvent: { kind: "mention", principal: { externalId: "U-teammate" } },
       }),
     ).resolves.toMatchObject({ kind: "chat_guest" });
   });
@@ -973,5 +991,394 @@ describeEmbeddedPostgres("Claude subscription owner-only and trigger-source gate
         issueId,
       }),
     ).resolves.toMatchObject({ kind: "chat_guest" });
+  });
+
+  it("allows retried and coalesced chat wakes from the owner's linked accounts", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const endpointId = await insertChatEndpoint(companyId, agentId, "github");
+    const issueId = await originIssue({
+      companyId,
+      agentId,
+      originKind: "chat_channel",
+      originId: `${endpointId}:github:acme/app:10:1`,
+    });
+    const ownerPrincipalId = await chatPrincipal({
+      companyId,
+      endpointId,
+      provider: "github",
+      externalId: "4001",
+      linkedUserId: "owner",
+    });
+    // The owner's own pull request, pushed by the owner's linked account.
+    const deliveryId = randomUUID();
+    await db.insert(chatDeliveries).values({
+      id: deliveryId,
+      companyId,
+      endpointId,
+      principalId: ownerPrincipalId,
+      providerEventId: `event-${deliveryId}`,
+      deduplicationKey: `dedupe-${deliveryId}`,
+      eventKind: "mention",
+      normalizedEvent: githubAutomaticEvent({ author: "4001", sender: "4001", guest: false, responsibleUserId: "owner" }),
+      state: "processed",
+    });
+
+    // A board retry of the owner's failed chat run.
+    const retryActionId = randomUUID();
+    await db.insert(chatActions).values({
+      id: retryActionId,
+      companyId,
+      endpointId,
+      principalId: ownerPrincipalId,
+      kind: "failed_run_retry",
+      providerActionId: `failed_run_retry:${randomUUID()}`,
+      status: "issued",
+      payload: {
+        version: 1,
+        issueId,
+        agentId,
+        principalId: ownerPrincipalId,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+        sources: [{ actionId: randomUUID(), deliveryId, commentId: randomUUID() }],
+        initiatedByUserId: "owner",
+      },
+    });
+    const retryRunId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: retryActionId,
+      companyId,
+      agentId,
+      source: "on_demand",
+      reason: "retry_failed_run",
+      requestedByActorType: "user",
+      requestedByActorId: "owner",
+      payload: { issueId },
+      runId: retryRunId,
+    });
+    await expect(
+      resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: retryRunId, companyId, wakeupRequestId: retryActionId, contextSnapshot: { issueId } },
+        issueId,
+      }),
+    ).resolves.toBeNull();
+
+    // The owner's chat receipt coalesced into a deferred owner wake.
+    const ownerWakeId = await wake({
+      companyId,
+      agentId,
+      runId: randomUUID(),
+      requestedByActorType: "user",
+      requestedByActorId: "owner",
+      payload: { issueId, mutation: "comment" },
+    });
+    const coalescedActionId = randomUUID();
+    await db.insert(chatActions).values({
+      id: coalescedActionId,
+      companyId,
+      endpointId,
+      deliveryId,
+      principalId: ownerPrincipalId,
+      kind: "inbound_wakeup",
+      providerActionId: `inbound_wakeup:${deliveryId}`,
+      status: "processed",
+      payload: {
+        version: 1,
+        issueId,
+        agentId,
+        commentId: randomUUID(),
+        sessionGeneration: 1,
+        requestedByActorType: "user",
+        requestedByActorId: "owner",
+      },
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: coalescedActionId,
+      companyId,
+      agentId,
+      source: "automation",
+      status: "coalesced",
+      requestedByActorType: "user",
+      requestedByActorId: "owner",
+      payload: { issueId, coalescedIntoWakeupRequestId: ownerWakeId },
+    });
+    const [ownerWake] = await db
+      .select({ runId: agentWakeupRequests.runId })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, ownerWakeId));
+    await expect(
+      resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: ownerWake!.runId!, companyId, wakeupRequestId: ownerWakeId, contextSnapshot: { issueId } },
+        issueId,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("refuses the tasks of a plugin-managed routine, whatever the run source", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const pluginId = randomUUID();
+    const pluginKey = `acme-${pluginId.slice(0, 8)}`;
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey,
+      packageName: "@acme/plugin",
+      version: "1.0.0",
+      manifestJson: {} as never,
+    });
+    const managedRoutineId = randomUUID();
+    await db.insert(routines).values({ id: managedRoutineId, companyId, title: "Managed", assigneeAgentId: agentId });
+    await db.insert(pluginManagedResources).values({
+      companyId,
+      pluginId,
+      pluginKey,
+      resourceKind: "routine",
+      resourceKey: "sync",
+      resourceId: managedRoutineId,
+    });
+    const ownerRoutineId = randomUUID();
+    await db.insert(routines).values({ id: ownerRoutineId, companyId, title: "Owner", assigneeAgentId: agentId });
+
+    // A routine run's task (origin routine_execution, as routines.ts creates it
+    // when the managed issue template does not mark it as a plugin operation)
+    // and its routine.dispatch wake.
+    async function routineDispatch(input: {
+      routineId: string;
+      source: "manual" | "schedule" | "api";
+      originId?: string;
+      createdByUserId?: string;
+    }) {
+      const routineRunId = randomUUID();
+      await db.insert(routineRuns).values({ id: routineRunId, companyId, routineId: input.routineId, source: input.source });
+      const issueId = randomUUID();
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: `Routine ${input.source}`,
+        status: "todo",
+        assigneeAgentId: agentId,
+        originKind: "routine_execution",
+        originId: input.originId ?? input.routineId,
+        originRunId: routineRunId,
+        originFingerprint: randomUUID(),
+        createdByUserId: input.createdByUserId ?? null,
+      } as never);
+      const runId = randomUUID();
+      await wake({
+        companyId,
+        agentId,
+        runId,
+        requestedByActorType: input.source === "schedule" ? "system" : null,
+        payload: { issueId, mutation: "create" },
+      });
+      return resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: runId, companyId, contextSnapshot: { issueId, source: "routine.dispatch" } },
+        issueId,
+      });
+    }
+
+    // ctx.routines.managed.run: a manual run without a user, which a plugin
+    // webhook can drive.
+    await expect(routineDispatch({ routineId: managedRoutineId, source: "manual" })).resolves.toMatchObject({
+      kind: "plugin",
+      message: CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE,
+    });
+    // The managed routine's own triggers.
+    await expect(routineDispatch({ routineId: managedRoutineId, source: "schedule" })).resolves.toMatchObject({
+      kind: "plugin",
+    });
+    await expect(routineDispatch({ routineId: managedRoutineId, source: "api" })).resolves.toMatchObject({
+      kind: "plugin",
+    });
+    // A managed issue template that sets its own origin id.
+    await expect(
+      routineDispatch({ routineId: managedRoutineId, source: "manual", originId: `${pluginKey}:sync` }),
+    ).resolves.toMatchObject({ kind: "plugin" });
+    // The owner running the managed routine by hand from the board.
+    await expect(
+      routineDispatch({ routineId: managedRoutineId, source: "manual", createdByUserId: "owner" }),
+    ).resolves.toBeNull();
+    // A routine no plugin manages.
+    await expect(routineDispatch({ routineId: ownerRoutineId, source: "manual" })).resolves.toBeNull();
+    await expect(routineDispatch({ routineId: ownerRoutineId, source: "api" })).resolves.toBeNull();
+  });
+
+  it("refuses wakes that come through a task bridge key", async () => {
+    const { companyId, agentId } = await insertCompany();
+    async function insertAgent(name: string) {
+      const id = randomUUID();
+      await db.insert(agents).values({
+        id,
+        companyId,
+        name,
+        role: "engineer",
+        status: "idle",
+        adapterType: "hermes_gateway",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      return id;
+    }
+    async function insertKey(input: { agentId: string; scope: Record<string, unknown>; revokedAt?: Date }) {
+      const id = randomUUID();
+      await db.insert(agentApiKeys).values({
+        id,
+        agentId: input.agentId,
+        companyId,
+        name: "key",
+        keyHash: `hash-${id}`,
+        scopeConfig: input.scope as never,
+        revokedAt: input.revokedAt ?? null,
+      });
+      return id;
+    }
+    const bridgeAgentId = await insertAgent("Hermes bridge");
+    const bridgeKeyId = await insertKey({
+      agentId: bridgeAgentId,
+      scope: { kind: "task_bridge", projectId: randomUUID(), allowedAssigneeAgentIds: [agentId] },
+    });
+    const run = async (issueId: string, requestedByActorType: "user" | "agent" | "system", requestedByActorId: string | null) => {
+      const runId = randomUUID();
+      await wake({
+        companyId,
+        agentId,
+        runId,
+        requestedByActorType,
+        requestedByActorId,
+        payload: { issueId, mutation: "create" },
+      });
+      return resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: runId, companyId, contextSnapshot: { issueId, source: "issue.create" } },
+        issueId,
+      });
+    };
+
+    // A task the bridge created (routes/issues.ts sets origin task_bridge with
+    // the key's id), woken by its assignment, and later by recovery.
+    const bridgeIssueId = await originIssue({ companyId, agentId, originKind: "task_bridge", originId: bridgeKeyId });
+    await expect(run(bridgeIssueId, "agent", bridgeAgentId)).resolves.toMatchObject({
+      kind: "task_bridge",
+      message: CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE,
+    });
+    await expect(run(bridgeIssueId, "system", null)).resolves.toMatchObject({ kind: "task_bridge" });
+    // The owner's comment on it is owner-driven.
+    await expect(run(bridgeIssueId, "user", "owner")).resolves.toBeNull();
+
+    // An owner task that the bridge key reassigned: the key may mutate a task
+    // assigned to its own agent and assign it to an allowed agent.
+    const ownerIssueId = await originIssue({ companyId, agentId, originKind: "manual" });
+    await expect(run(ownerIssueId, "agent", bridgeAgentId)).resolves.toMatchObject({ kind: "task_bridge" });
+
+    // Delegation by agents without a live task bridge key stays allowed.
+    const peerAgentId = await insertAgent("Peer");
+    await insertKey({ agentId: peerAgentId, scope: { kind: "standard" } });
+    await insertKey({
+      agentId: peerAgentId,
+      scope: { kind: "task_bridge", projectId: randomUUID() },
+      revokedAt: new Date(Date.now() - 60_000),
+    });
+    await expect(run(ownerIssueId, "agent", peerAgentId)).resolves.toBeNull();
+  });
+
+  it("refuses wakes no user requested on a task a plugin last assigned or moved", async () => {
+    const { companyId, agentId } = await insertCompany();
+    const pluginId = randomUUID();
+    const issueId = await originIssue({ companyId, agentId, originKind: "manual" });
+    let clock = Date.now() - 60_000;
+    async function activity(input: { actorType: "plugin" | "user" | "agent"; action: string; details: Record<string, unknown> }) {
+      clock += 1_000;
+      await db.insert(activityLog).values({
+        companyId,
+        actorType: input.actorType,
+        actorId: input.actorType === "plugin" ? pluginId : input.actorType === "user" ? "owner" : randomUUID(),
+        action: input.action,
+        entityType: "issue",
+        entityId: issueId,
+        details: input.details,
+        createdAt: new Date(clock),
+      });
+    }
+    // The plugin-host-services issues.update activity row.
+    const pluginUpdate = (patch: Record<string, unknown>) =>
+      activity({
+        actorType: "plugin",
+        action: "issue.updated",
+        details: {
+          identifier: "PAP-1",
+          patch,
+          _previous: { status: "done", assigneeAgentId: null, assigneeUserId: null },
+          sourcePluginId: pluginId,
+          sourcePluginKey: "acme",
+        },
+      });
+    const run = async (requestedByActorType: "user" | "agent" | "system", requestedByActorId: string | null) => {
+      const runId = randomUUID();
+      await wake({
+        companyId,
+        agentId,
+        runId,
+        requestedByActorType,
+        requestedByActorId,
+        payload: { issueId, mutation: "assigned_todo_liveness_dispatch" },
+      });
+      return resolveClaudeSubscriptionTriggerViolation(db, {
+        run: { id: runId, companyId, contextSnapshot: { issueId, source: "issue.assigned_todo_liveness_dispatch" } },
+        issueId,
+      });
+    };
+
+    // A plugin edit that neither assigns nor moves the task.
+    await pluginUpdate({ title: "Renamed" });
+    await expect(run("system", null)).resolves.toBeNull();
+
+    // The plugin assigns the owner's task to the agent; the recovery liveness
+    // dispatch, and an agent's wake, only continue that change.
+    await pluginUpdate({ assigneeAgentId: agentId, status: "todo" });
+    await expect(run("system", null)).resolves.toMatchObject({
+      kind: "plugin",
+      message: CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE,
+    });
+    await expect(run("agent", randomUUID())).resolves.toMatchObject({ kind: "plugin" });
+    // An agent's later activity does not lift it.
+    await activity({ actorType: "agent", action: "issue.updated", details: { status: "in_progress" } });
+    await expect(run("system", null)).resolves.toMatchObject({ kind: "plugin" });
+    // The owner's own wake is owner-driven.
+    await expect(run("user", "owner")).resolves.toBeNull();
+
+    // Later owner activity on the task lifts it.
+    await activity({ actorType: "user", action: "issue.comment_added", details: { identifier: "PAP-1" } });
+    await expect(run("system", null)).resolves.toBeNull();
+
+    // A plugin that only moves the task (or unassigns it) counts again.
+    await pluginUpdate({ status: "todo" });
+    await expect(run("system", null)).resolves.toMatchObject({ kind: "plugin" });
+    await activity({ actorType: "user", action: "issue.updated", details: { status: "todo" } });
+    await pluginUpdate({ assigneeAgentId: null });
+    await expect(run("system", null)).resolves.toMatchObject({ kind: "plugin" });
+
+    // Any plugin edit beyond the task's text, priority, labels or billing code
+    // can start work or rewrite what this gate reads (creator, origin, blockers).
+    for (const patch of [{ createdByUserId: "owner" }, { originRunId: randomUUID() }, { blockedByIssueIds: [] }]) {
+      await activity({ actorType: "user", action: "issue.updated", details: { status: "todo" } });
+      await expect(run("system", null)).resolves.toBeNull();
+      await pluginUpdate(patch);
+      await expect(run("system", null)).resolves.toMatchObject({ kind: "plugin" });
+    }
+
+    // Removing blockers through the relations API can unblock the task; adding
+    // one cannot.
+    await activity({ actorType: "user", action: "issue.updated", details: { status: "todo" } });
+    await activity({
+      actorType: "plugin",
+      action: "issue.relations.updated",
+      details: { mutation: "add", blockedByIssueIds: [randomUUID()], sourcePluginId: pluginId },
+    });
+    await expect(run("system", null)).resolves.toBeNull();
+    await activity({
+      actorType: "plugin",
+      action: "issue.relations.updated",
+      details: { mutation: "remove", blockedByIssueIds: [], sourcePluginId: pluginId },
+    });
+    await expect(run("system", null)).resolves.toMatchObject({ kind: "plugin" });
   });
 });

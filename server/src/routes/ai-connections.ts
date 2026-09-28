@@ -2,7 +2,7 @@ import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
 import { CLAUDE_SIGN_IN_IMPORT_UNSUPPORTED } from "../services/local-ai-credentials.js";
 import { localAiLoginService } from "../services/local-ai-login.js";
 import { z } from "zod";
-import { Router, type Request } from "express";
+import { Router, type NextFunction, type Request, type Response as ExpressResponse } from "express";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   type Db,
@@ -13,7 +13,9 @@ import {
   agents,
 } from "@paperclipai/db";
 import {
+  CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
   createAiConnectionSchema,
+  isClaudeSubscriptionTokenValue,
   aiConnectionLoginIntentSchema,
   localAiConnectionSchema,
   localAiLoginStartSchema,
@@ -132,12 +134,27 @@ export async function canInstallSharedAiConnectionForNewAgent(
     connection.creator === userId || await accessService(db).hasPermission(companyId, "user", userId, "tools:manage_connections");
 }
 
+/** A Claude subscription token is never an API key; it is refused before it is sent anywhere. */
+function assertNotClaudeSubscriptionApiKey(key: unknown) {
+  if (isClaudeSubscriptionTokenValue(key))
+    throw unprocessable(CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE, {
+      code: "claude_subscription_token_unsupported",
+    });
+}
+
+/** Runs before body validation, so a pasted token gets the 422 and its message, not a generic 400. */
+function rejectClaudeSubscriptionApiKey(req: Request, _res: ExpressResponse, next: NextFunction) {
+  assertNotClaudeSubscriptionApiKey((req.body as { apiKey?: unknown } | undefined)?.apiKey);
+  next();
+}
+
 /** Fixed provider endpoints; credentials are never sent to a caller-supplied URL or through a redirect. */
 export async function validateAiApiKey(
   provider: AiProvider,
   key: string,
   request: typeof fetch = fetch,
 ) {
+  assertNotClaudeSubscriptionApiKey(key);
   const endpoints = {
     anthropic: "https://api.anthropic.com/v1/models?limit=1",
     openai: "https://api.openai.com/v1/models",
@@ -265,6 +282,7 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
   );
   router.post(
     "/companies/:companyId/ai-connections",
+    rejectClaudeSubscriptionApiKey,
     validate(createAiConnectionSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;

@@ -23,6 +23,7 @@ import {
   resolveClaudeSubscriptionEligibility,
   resolveClaudeSubscriptionTriggerViolation,
 } from "./claude-subscription-policy.js";
+import { claudeSubscriptionTargetIsRemote } from "./claude-subscription-target.js";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
@@ -21416,14 +21417,15 @@ export function heartbeatService(
       // A claude_local run on the Claude subscription lane (the claude CLI signed
       // in on this server, no API credential) is for the server owner's own use
       // only. Refuse it before any workspace or process work when the instance
-      // has other users, or when the wake came from outside the owner.
+      // has other users, or when the wake came from outside the owner. A driver
+      // that yields no remote target (a plugin driver) runs here, so it counts as local.
       if (agent.adapterType === "claude_local") {
         await assertClaudeSubscriptionLaneAllowed({
           run,
           agentId: agent.id,
           issueId: issueId ?? null,
           config: resolvedConfig,
-          targetIsRemote: (selectedEnvironmentForConfig?.driver ?? "local") !== "local",
+          targetIsRemote: claudeSubscriptionTargetIsRemote(selectedEnvironmentForConfig?.driver, agent.adapterType),
         });
       }
       if (secretManifest.length > 0) {

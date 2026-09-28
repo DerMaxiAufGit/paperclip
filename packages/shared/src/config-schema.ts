@@ -8,6 +8,10 @@ import {
   STORAGE_PROVIDERS,
 } from "./constants.js";
 import { validateConfiguredBindMode } from "./network-bind.js";
+import {
+  CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+  isClaudeSubscriptionTokenValue,
+} from "./validators/secret.js";
 
 export const configMetaSchema = z.object({
   version: z.literal(1),
@@ -15,10 +19,38 @@ export const configMetaSchema = z.object({
   source: z.enum(["onboard", "configure", "doctor"]),
 }).passthrough();
 
+// llm.apiKey never holds a Claude subscription token (Paperclip never stores
+// or forwards one). llmConfigSchema refuses it. A config file that already
+// holds one still loads, because a config validation error stops the server
+// from starting: the whole-config schema drops the token (the next config
+// write removes it from the file) and warns once per process.
 export const llmConfigSchema = z.object({
   provider: z.enum(["claude", "openai"]),
-  apiKey: z.string().optional(),
+  apiKey: z
+    .string()
+    .refine((value) => !isClaudeSubscriptionTokenValue(value), {
+      message: CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+    })
+    .optional(),
 }).passthrough();
+
+let warnedClaudeSubscriptionTokenLlmApiKey = false;
+
+function withoutClaudeSubscriptionTokenApiKey<T extends { apiKey?: string }>(llm: T): T {
+  if (!isClaudeSubscriptionTokenValue(llm.apiKey)) return llm;
+  if (!warnedClaudeSubscriptionTokenLlmApiKey) {
+    warnedClaudeSubscriptionTokenLlmApiKey = true;
+    console.warn(
+      `Ignoring llm.apiKey in the Paperclip config: ${CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE} Remove it from the config file.`,
+    );
+  }
+  const { apiKey: _token, ...rest } = llm;
+  return rest as T;
+}
+
+const loadedLlmConfigSchema = llmConfigSchema
+  .extend({ apiKey: z.string().optional() })
+  .overwrite(withoutClaudeSubscriptionTokenApiKey);
 
 export const databaseBackupConfigSchema = z.object({
   enabled: z.boolean().default(true),
@@ -110,7 +142,7 @@ export const updatesConfigSchema = z.object({
 export const paperclipConfigSchema = z
   .object({
     $meta: configMetaSchema,
-    llm: llmConfigSchema.optional(),
+    llm: loadedLlmConfigSchema.optional(),
     database: databaseConfigSchema,
     logging: loggingConfigSchema,
     server: serverConfigSchema,

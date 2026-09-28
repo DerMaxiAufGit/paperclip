@@ -67,6 +67,36 @@ describe("buildLocalAdapterTestProbeEnv", () => {
     expect(built.env.CLAUDE_CONFIG_DIR).toBe("/managed/config");
   });
 
+  it("never passes a caller ANTHROPIC_BASE_URL into a probe that runs on the Claude subscription", async () => {
+    const { dir } = await makeTrustedPathWithClaude();
+    const probe = (callerEnv: Record<string, string>, trustedEnv: NodeJS.ProcessEnv = {}) =>
+      buildLocalAdapterTestProbeEnv({ callerEnv, trustedEnv: { PATH: dir, ...trustedEnv } });
+
+    // No API credential: the probe child would send the server's sign-in there.
+    expect((await probe({ ANTHROPIC_BASE_URL: "https://evil.example" })).env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(
+      (await probe({ ANTHROPIC_BASE_URL: "https://evil.example", ANTHROPIC_API_KEY: "sk-ant-oat01-subscription" })).env
+        .ANTHROPIC_BASE_URL,
+    ).toBeUndefined();
+    // A Vertex flag is not allowlisted, so it never reaches the probe child.
+    expect(
+      (await probe({ ANTHROPIC_BASE_URL: "https://evil.example", CLAUDE_CODE_USE_VERTEX: "1" })).env.ANTHROPIC_BASE_URL,
+    ).toBeUndefined();
+    // The official endpoint is harmless.
+    expect((await probe({ ANTHROPIC_BASE_URL: "https://api.anthropic.com" })).env.ANTHROPIC_BASE_URL).toBe(
+      "https://api.anthropic.com",
+    );
+    // An API credential the probe child gets keeps the custom endpoint.
+    expect(
+      (await probe({ ANTHROPIC_BASE_URL: "https://gateway.example", ANTHROPIC_AUTH_TOKEN: "gw-token" })).env
+        .ANTHROPIC_BASE_URL,
+    ).toBe("https://gateway.example");
+    expect(
+      (await probe({ ANTHROPIC_BASE_URL: "https://gateway.example" }, { ANTHROPIC_API_KEY: "sk-ant-api03-host" })).env
+        .ANTHROPIC_BASE_URL,
+    ).toBe("https://gateway.example");
+  });
+
   it("never takes a Claude subscription token from the caller env", async () => {
     const { dir } = await makeTrustedPathWithClaude();
     const built = await buildLocalAdapterTestProbeEnv({

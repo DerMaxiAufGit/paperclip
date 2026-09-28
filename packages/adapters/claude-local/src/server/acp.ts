@@ -45,6 +45,11 @@ import {
 } from "./claude-config.js";
 import { buildAdapterTestTargetCheck } from "./probe-diagnostics.js";
 import { createWorkspaceRestoreTeardown } from "@paperclipai/adapter-utils/workspace-restore-teardown";
+import {
+  CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES,
+  claudeConfigCredentialWorkspaceExcludes,
+  workspaceRelativePosixPath as workspaceRelativePath,
+} from "@paperclipai/adapter-utils/claude-config-credential-excludes";
 import { extractClaudeRetryNotBefore, isClaudeProviderQuotaError } from "./parse.js";
 import {
   resolveClaudeBillingIdentity,
@@ -212,44 +217,10 @@ export function resolveClaudeAcpBillingIdentity(
   });
 }
 
-/**
- * File names under which Claude Code stores a Claude sign-in in its config dir
- * (`CLAUDE_CONFIG_DIR`, default `~/.claude`). A remote target runs only with an
- * Anthropic API key, so these files are never staged into a sandbox and never
- * synced back from one.
- */
-export const CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES = [".credentials.json", "credentials.json"] as const;
-
-function workspaceRelativePath(workspaceLocalDir: string, candidate: string): string | null {
-  if (!candidate || !path.isAbsolute(candidate)) return null;
-  const relative = path.relative(path.resolve(workspaceLocalDir), path.resolve(candidate));
-  if (relative.length === 0) return "";
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-  return relative.split(path.sep).join(path.posix.sep);
-}
-
-/**
- * Workspace-relative paths of the Claude sign-in files of every Claude config
- * dir that lives inside the staged workspace: the agent's explicit
- * `CLAUDE_CONFIG_DIR`, the server's own `CLAUDE_CONFIG_DIR`, and the default
- * `~/.claude` (when the workspace contains the home directory). The remote ACP
- * lane excludes them from both the workspace upload and the teardown sync-back.
- */
-export function claudeConfigCredentialWorkspaceExcludes(input: {
-  workspaceLocalDir: string;
-  configDirs: ReadonlyArray<string | null | undefined>;
-}): string[] {
-  const excludes = new Set<string>();
-  for (const configDir of input.configDirs) {
-    const trimmed = typeof configDir === "string" ? configDir.trim() : "";
-    const relative = workspaceRelativePath(input.workspaceLocalDir, trimmed);
-    if (relative === null) continue;
-    for (const name of CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES) {
-      excludes.add(relative ? `${relative}/${name}` : name);
-    }
-  }
-  return [...excludes];
-}
+// The Claude sign-in file names and the per-config-dir workspace excludes live
+// in adapter-utils, whose generic remote staging applies the Claude sign-in
+// excludes to every adapter; re-exported for the Claude CLI lane and tests.
+export { CLAUDE_CONFIG_CREDENTIAL_FILE_NAMES, claudeConfigCredentialWorkspaceExcludes };
 
 /**
  * Claude remote managed-home seed for the runner-backed remote sandbox ACP lane.

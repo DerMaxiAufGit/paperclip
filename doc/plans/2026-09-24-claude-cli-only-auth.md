@@ -202,8 +202,19 @@ concurrency cap.
   environment Test route (check `claude_subscription_not_allowed`, no probe),
   and in the auth-signal route (status `absent`, reason
   `subscription_not_allowed`, which the sign-in panel shows as the owner-only
-  message without sign-in steps). Board chat already runs only on
-  `local_trusted`.
+  message without sign-in steps). Board chat runs only on `local_trusted` and
+  only for the board; an agent key gets 403 before the `claude` CLI is
+  spawned. The heartbeat treats a run as remote, and so outside both gates,
+  only when its environment driver really gives the adapter a remote execution
+  target: ssh or sandbox, for adapters that support remote managed
+  environments (`claudeSubscriptionTargetIsRemote` in
+  `server/src/services/claude-subscription-target.ts`, which mirrors
+  `resolveEnvironmentExecutionTarget`). Any other driver, such as a plugin
+  environment driver, resolves to no target and runs the adapter on this
+  server, so both gates apply. The helper copies the driver branches of
+  `resolveEnvironmentExecutionTarget` by hand: on an upstream merge that adds
+  a driver with a remote target, add it there. Until then such a run counts as
+  local and gets the gates, which is the fail-closed side.
 - **Trigger-source gate.** Even for the owner,
   `resolveClaudeSubscriptionTriggerViolation` refuses a subscription-lane run
   whose wake came from outside Paperclip (reason
@@ -216,28 +227,72 @@ concurrency cap.
     requester type; so does a GitHub automatic review whose delivery is marked
     `githubAuthority.guest` or whose pull request author or event sender is not
     linked to the user (chat-channels attributes these to the configured
-    responsible user). Such chat-attributed user wakes also get the task-origin
-    check below;
+    responsible user). A chat wake that passes these link checks counts as the
+    user's own wake, the same as the user's comment from the Paperclip UI, so
+    it skips the task-origin check below. This b4138da46 rule was restored on
+    2026-09-28, after an interim change had sent every chat wake through the
+    origin check, which refused the owner's own linked-chat message on a
+    conversation a chat guest had started;
   - `email`: an inbound email (requester `agentmail`, reason `email_received`,
     or a run context that names an email endpoint without a user wake);
   - `plugin`: `agents.invoke`, plugin agent sessions and plugin issue wakeups,
     which is also how plugin webhooks reach agents, and the comments,
     interaction responses and approval decisions a plugin relays for a user
-    (context source `plugin:<pluginKey>…`);
+    (context source `plugin:<pluginKey>…`). Those relayed wakes also carry the
+    plugin's `pluginId` in their wake payload, so the marker survives a later
+    wake (for example the agent's timer wake) that coalesces into the run and
+    replaces the context `source`;
   - `routine_webhook`: a task created by a routine's public webhook trigger
-    (routine run source `webhook`).
+    (routine run source `webhook`);
+  - `task_bridge`: a wake requested by an agent that held a `task_bridge` agent
+    API key which was not revoked when the wake was requested. These keys serve
+    internet-facing chat and webhook bridges (for example a Hermes gateway).
+    A wake names the requesting agent, not the key it used, and a bridge key
+    may reassign a task of its own agent to an allowed agent, so every
+    agent-requested wake from such an agent counts, including delegation from
+    the agent's own runs.
 
   A wake that no Paperclip user requested (system or agent, for example the
   recovery liveness dispatch of a stranded task) is also refused on a task that
-  came from outside: origin `plugin:…` (plugin tasks, including a
-  plugin-managed routine's `plugin:<key>:operation` task, `plugin`), a
-  `chat_channel` email conversation (origin id `email:…` or `email-send:…`,
-  `email`), a `chat_channel` conversation a chat guest started (the issue
-  carries `sourceTrust`, `chat_guest`), and a routine webhook task. Owner-driven
-  wakes stay allowed: assignments and comments by a Paperclip user, timers and
-  heartbeats, scheduled routines, agent delegation, linked chat users, and
-  follow-up wakes on a chat conversation a linked user started. A new chat endpoint for a claude_local agent on the subscription
-  lane starts with `allowUnlinkedPeople: false`.
+  came from outside:
+  - origin `plugin:…` (plugin tasks, including a plugin-managed routine's
+    `plugin:<key>:operation` task, `plugin`);
+  - a `routine_execution` task of a plugin-managed routine (`plugin`). The
+    routine comes from the task's routine run, or from its origin id, because
+    the managed issue template may set its own origin id. A
+    `plugin_managed_resources` row with `resource_kind` `routine` marks it. This
+    covers every run source, since the plugin's `ctx.routines.managed.run` is
+    recorded as a manual run without a user and a plugin webhook can drive it.
+    The one exception is a manual run a Paperclip user started from the board
+    (the task's `createdByUserId` is set);
+  - a `task_bridge` task, created through a task bridge key (origin id = key
+    id, `task_bridge`);
+  - a `chat_channel` email conversation (origin id `email:…` or `email-send:…`,
+    `email`);
+  - a `chat_channel` conversation a chat guest started (the issue carries
+    `sourceTrust`, `chat_guest`);
+  - a routine webhook task (`routine_webhook`);
+  - a task a plugin last assigned, moved or unblocked (`plugin`). A plugin can
+    change the assignee or status of any task in its company through
+    `issues.update` without changing the task's origin, and the recovery
+    liveness dispatch then runs the task. The only trace is the plugin's
+    `activity_log` row. The gate reads, in one query on the issue's activity
+    rows, the newest row that is either a Paperclip user's activity or a plugin
+    edit, and refuses when that row is the plugin edit. A plugin edit is an
+    `issue.updated` row whose `patch` sets any field other than title,
+    description, priority, labels or billing code (so assignee, status,
+    blockers, origin fields, creator and workspace fields all count), or an
+    `issue.relations.updated` row that does not only add blockers. Any later
+    activity of a Paperclip user on the task lifts the refusal. An agent's
+    activity does not.
+
+  Owner-driven wakes stay allowed: assignments and comments by a Paperclip
+  user, timers and heartbeats, scheduled routines, the owner's manual run of a
+  plugin-managed routine, agent delegation (except from an agent with a live
+  task bridge key), linked chat users (also on a conversation a chat guest
+  started), and follow-up wakes on a chat conversation a linked user started.
+  A new chat endpoint for a claude_local agent on the subscription lane starts
+  with `allowUnlinkedPeople: false`.
 - **Token blocking by value and by widened key names.** Subscription token
   keys are `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
   `ANTHROPIC_TOKEN`, the refresh-token sign-in `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`
@@ -259,6 +314,62 @@ concurrency cap.
   managed AI connection whose stored value is a token is refused; a token never
   counts as an API credential under `ANTHROPIC_API_KEY` or
   `ANTHROPIC_AUTH_TOKEN`.
+
+  Runtime secret resolution (`resolveEnvBindings` and
+  `resolveAdapterConfigForRuntime` in `server/src/services/secrets.ts`) never
+  resolves a secret bound under a token key, and drops any resolved value that
+  is a token: a company or user secret, a legacy plain value, or an adapter
+  schema secret field such as the Hermes gateway `apiKey`. That covers every
+  caller: the heartbeat, the environment Test, skills list/sync and the
+  auth-signal key checks. A dropped entry gets no `secretKeys` or manifest
+  entry, and the server logs a warning naming the company and config path,
+  never the value. The heartbeat's `dropResolvedClaudeSubscriptionTokens`
+  stays as defence in depth.
+
+  `POST /companies/:companyId/ai-connections` refuses an `apiKey` that is a
+  token value, for any provider, with 422 and
+  `CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE`, before body validation,
+  authorization, storage or any provider call. `validateAiApiKey` refuses it
+  too, which also covers re-verifying a stored key when an agent adopts a
+  managed connection; `createAiConnectionSchema` has the same refinement.
+
+  `paperclipai onboard` and `paperclipai configure` refuse a token at the LLM
+  API key prompt, and `llmConfigSchema.apiKey` refuses one. A config file that
+  already holds one in `llm.apiKey` still loads, because a validation error
+  would stop the server from starting; the token is dropped from the loaded
+  config with a one-time warning, so neither the server (OpenAI model listing)
+  nor `paperclipai doctor` sends it anywhere, and the next config write removes
+  it from the file.
+- **Subscription endpoint check.** With no API credential, the `claude` binary
+  sends the server's Claude sign-in (`Authorization: Bearer sk-ant-oat…`) to
+  whatever endpoint its env names (verified with claude 2.1.280).
+  `resolveClaudeSubscriptionEndpointViolation` in `credential-policy.ts`,
+  called from the local-CLI branch of `resolveClaudeCredentialPolicyViolation`
+  for subscription-lane runs only, refuses a run whose adapter config env sets
+  any of:
+  - `ANTHROPIC_BASE_URL` or `CLAUDE_CODE_API_BASE_URL` to anything other than
+    `https://api.anthropic.com` (URL host exactly `api.anthropic.com`, the
+    binary's own first-party test; an unparseable value is refused);
+  - `ANTHROPIC_UNIX_SOCKET`;
+  - `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, or
+    `NODE_TLS_REJECT_UNAUTHORIZED` other than `1`;
+  - `BUN_INSPECT*`, `BUN_OPTIONS`, `LD_PRELOAD`, `LD_AUDIT` or
+    `DYLD_INSERT_LIBRARIES`;
+  - `NODE_OPTIONS` with a debugger, code-loading, `--env-file` or
+    `--tls-keylog` flag.
+
+  The adapter config env covers the agent, project, environment and routine
+  env and issue overrides. The same rules apply to the `env` of an inline
+  `--settings` JSON in `extraArgs`/`args`. Keys match in any case, and an
+  unresolved binding under a checked key fails closed. The server's own
+  process env is the operator's and is not checked. The run fails with
+  `adapter_engine_unavailable` before launch; the environment Test reports the
+  same message and runs no probe. API-key, gateway (`ANTHROPIC_AUTH_TOKEN`)
+  and Bedrock/Vertex/Foundry runs keep custom endpoints. The local Test probe
+  builder (`probe-env.ts`) drops a caller `ANTHROPIC_BASE_URL` unless the
+  probe child gets an API credential or the URL names api.anthropic.com,
+  because a config-only Vertex or Foundry flag passes the gate but never
+  reaches the probe child.
 - **Third-party harness guard.** Only the official `claude` binary may use a
   Claude subscription (`packages/adapter-utils/src/claude-subscription-harness-guard.ts`).
   Hermes (provider `anthropic`, or `auto` when `~/.hermes/config.yaml` selects
@@ -303,6 +414,25 @@ concurrency cap.
   files. The SSH transport now honours `workspaceExclude` for its tar upload
   and its restore baseline (matched at any depth, so the restore never reads an
   excluded local file as deleted).
+- **Remote staging never forwards a Claude sign-in, for every adapter.** The
+  generic staging layer (`prepareSandboxManagedRuntime`, which
+  `prepareCommandManagedRuntime` also uses, and `prepareRemoteManagedRuntime`
+  for SSH) merges `claudeSignInWorkspaceExcludes` from
+  `packages/adapter-utils/src/claude-config-credential-excludes.ts` into the
+  caller's workspace excludes, for both the upload and the sync-back. They
+  cover the sign-in files (`.credentials.json`, `credentials.json`) of any
+  `.claude` dir at any depth and any `.claude.json` at any depth, plus, when
+  they sit inside the workspace, the sign-in files and `.claude.json` of the
+  server's `CLAUDE_CONFIG_DIR`, the sign-in files of `~/.claude`, and
+  `~/.claude.json`. So a codex_local, opencode_local, pi_local, gemini_local,
+  grok_local, kimi_local or cursor run on an SSH or sandbox target no longer
+  uploads the owner's Claude sign-in when its workspace holds the service
+  user's home or the server's `CLAUDE_CONFIG_DIR`. The sync-back never reads
+  such a file as deleted (a persisted restore baseline gets the same excludes
+  merged in, so a baseline captured before this change cannot delete the host
+  file) and never copies one created remotely back to the host. Referenced
+  projects staged next to the workspace get the same excludes. claude_local
+  keeps its own excludes for the agent's explicit `CLAUDE_CONFIG_DIR` on top.
 - **Follow-up migration.** `0286_remove_claude_subscription_tokens_from_env.sql`
   removes, from issue assignee overrides and `hire_agent` approval payloads
   (both missed by 0285) and again from agent, environment, project, routine and
@@ -349,6 +479,86 @@ concurrency cap.
   inspected; Hermes non-Anthropic runs keep the real `CLAUDE_CONFIG_DIR`.
 - The trigger-source gate lets system follow-up wakes through on a chat
   conversation a linked user started, even after a chat guest posted in it.
+  The owner's own linked-chat message runs on a conversation a chat guest
+  started, and that run reads the whole conversation, including the guest's
+  messages.
+- GitHub PR-merge confirmations are accepted. When an agent's own
+  `request_confirmation` is accepted by a merge on GitHub, the
+  `system:pr-merged` and `merged_pull_request_sweep` paths wake that agent with
+  a system wake. The gate accepts this as an event in the owner's repository,
+  because the agent asked for the confirmation and merging needs write access
+  to the repository.
+- The plugin-edit check reads `activity_log`. Any activity row of a Paperclip
+  user on the task lifts it, including rows the issue service writes for a
+  user that a plugin names as its acting user (for example
+  `issue.thread_interaction_expired` after a plugin comment with
+  `actorUserId`). A plugin edit made through a path that logs no activity is
+  not seen.
+- The task bridge check cannot tell which key an agent used, so it refuses
+  every agent-requested wake of an agent that holds a live task bridge key,
+  including delegation from that agent's own runs. Delegation by an agent that
+  has no such key is allowed as before, even when a bridge started the chain.
 - Encrypted secrets under other keys can still hold a subscription token
   stored before this branch; the runtime drops the value at launch, but it stays
   stored until the owner deletes it.
+- A subscription token in the config file's `llm.apiKey` stays on disk until a
+  later config write changes the file. The warning comes from the shared config
+  schema (`console.warn`, once per process), not from the server or CLI config
+  loaders.
+- The `env` block of a `claude` settings file overrides the process env
+  (verified: a workspace `.claude/settings.json` with `ANTHROPIC_BASE_URL`
+  redirected a `--print` run even with a different value in the process env).
+  The endpoint check reads only the agent env and inline `--settings` JSON, not
+  the service user's `~/.claude/settings.json`, a project's
+  `.claude/settings.json` or `.claude/settings.local.json` in the run's
+  workspace, or a `--settings <file>` path. So a settings file that the agent
+  writes, or that a checked-out repository contains, can still send the
+  subscription elsewhere. Closing this would need `--setting-sources user`
+  plus a refusal of `--settings` files, or reading those files at launch;
+  either is a product decision. The agent also runs shell commands as the
+  service user and can read the sign-in file itself; the endpoint check closes
+  only the config-only channel that needs no cooperation from the agent.
+- Left out of the endpoint check on purpose:
+  - Proxies (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`,
+    `CLAUDE_CODE_PROXY_*`, `CLAUDE_CODE_HTTP(S)_PROXY`): while certificate
+    checks are on, a proxy only relays the encrypted connection, and the TLS
+    overrides that would let it read requests are refused. An operator who
+    turns off certificate checks in the server's own env lets an agent-env
+    proxy read the sign-in.
+  - Provider base URLs (`ANTHROPIC_BEDROCK_BASE_URL`,
+    `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL`,
+    `ANTHROPIC_AWS_BASE_URL`, `ANTHROPIC_GOOGLE_CLOUD_BASE_URL`,
+    `ANTHROPIC_BEDROCK_MANTLE_BASE_URL`): used only with their provider flag,
+    and those clients never attach the Claude sign-in (checked in the 2.1.280
+    client code).
+  - `CLAUDE_CODE_CUSTOM_OAUTH_URL`: the binary accepts only Anthropic-owned
+    hosts. `USE_LOCAL_OAUTH`, `USE_STAGING_OAUTH`, `CLAUDE_LOCAL_OAUTH_*`:
+    production builds ignore them.
+  - `SESSION_INGRESS_URL`, `AGENT_PROXY_URL`, `CLAUDE_BRIDGE_*`,
+    `CLAUDE_REMOTE_TOOLS_BRIDGE_URL`, `CLAUDE_CODE_ARTIFACT*_BASE_URL`,
+    `CLAUDE_CODE_MEMORY_API_BASE_URL`: used by Anthropic-hosted remote
+    sessions and Remote Control with their own session tokens, which Paperclip
+    strips; not shown to carry the sign-in in a `--print` run.
+  - `SSLKEYLOGFILE`: the bundled Bun runtime writes no key log (verified).
+    `LD_LIBRARY_PATH`: common legitimate use, and it needs a planted library.
+  - `NODE_USE_SYSTEM_CA` and `CLAUDE_CODE_CERT_STORE`: the system certificate
+    store is controlled by root once `SSL_CERT_FILE` and `SSL_CERT_DIR` are
+    refused. `CLAUDE_CODE_CLIENT_CERT`/`_KEY` and `ANTHROPIC_CUSTOM_HEADERS`
+    add a client certificate or headers but do not expose the bearer token.
+- The bundled claude 2.1.280 knows provider flags that Paperclip's classifier
+  does not count (`CLAUDE_CODE_USE_ANTHROPIC_AWS`,
+  `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, `CLAUDE_CODE_USE_MANTLE`) and
+  credentials it does not count (`ANTHROPIC_AWS_API_KEY`,
+  `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_AUTH_TOKEN`, and
+  `AWS_BEARER_TOKEN_BEDROCK` without `CLAUDE_CODE_USE_BEDROCK`). A run that
+  relies only on these counts as subscription-lane, so the owner-only,
+  trigger-source and endpoint rules apply to it. That is stricter, not a leak.
+- Remote staging filters only the working-tree overlay and plain uploads. A
+  Claude sign-in file committed to the workspace's git history still travels
+  with the git-history clone (sandbox) or bundle (SSH). A durable seed archive
+  persisted before this change is replayed as-is. Claude Code's `.claude.json`
+  backups (`~/.claude/backups/.claude.json.backup.*`, older
+  `~/.claude.json.backup`) and the legacy `.config.json` are not excluded.
+  Runtime assets (adapter-chosen directories) are not filtered generically. A
+  native provider `syncOut` receives the exclude list as-is, and how it
+  matches the entries is up to the provider.

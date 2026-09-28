@@ -84,9 +84,9 @@ individual use. Use an API key for heavy or shared workloads.
 ## Who may use the subscription
 
 A run is on the subscription lane when it is a `claude_local` run on the
-Paperclip server with no API credential and without `engine: "acp"`. Two rules
-apply to such a run. A run with an API credential is not affected by either
-rule.
+Paperclip server with no API credential and without `engine: "acp"`. Three
+rules apply to such a run. A run with an API credential is not affected by any
+of them.
 
 **Owner only.** The subscription lane is for the server owner's own use. It is
 allowed when:
@@ -126,30 +126,53 @@ starts when its wake came from outside Paperclip:
 - a plugin: `agents.invoke`, a plugin agent session, a plugin issue wakeup, or
   a comment, interaction response, or approval decision that a plugin relays
   for a user. Plugin webhooks reach agents this way;
-- a task that a routine's public webhook trigger created.
+- a task that a routine's public webhook trigger created;
+- a wake requested by an agent that holds a live `task_bridge` API key (the
+  keys that internet-facing chat and webhook bridges use), including
+  delegation from that agent's own runs.
 
 A system or agent wake on a task that came from outside Paperclip is refused
 too, for example the recovery dispatch of a stranded task: a task a plugin
-created (origin `plugin:…`, which includes a plugin-managed routine's task), an
-email conversation, a chat conversation that a chat guest started, and a task a
-routine's public webhook created. A wake that a Paperclip user requests on such
-a task, such as the owner's comment, is allowed.
+created (origin `plugin:…`), a task of a plugin-managed routine (except a
+manual run the owner started from the board), a task created through a task
+bridge key, an email conversation, a chat conversation that a chat guest
+started, a task a routine's public webhook created, and a task whose assignee,
+status or blockers a plugin changed last. A wake that a Paperclip user
+requests on such a task, such as the owner's comment, is allowed, and any later
+activity of a Paperclip user on a plugin-edited task lifts that refusal.
 
 The run fails with `configuration_incomplete` (reason
 `claude_subscription_external_trigger`, with `trigger` set to `chat_guest`,
-`email`, `plugin`, or `routine_webhook`) and this message: "This run was
+`email`, `plugin`, `routine_webhook`, or `task_bridge`) and this message: "This run was
 started from outside Paperclip (chat guest, email, webhook or plugin). Claude
 subscription runs are for the server owner only; give this agent an Anthropic
 API key."
 
 These wakes stay allowed: assignments and comments by a Paperclip user, timers
-and heartbeats, scheduled routines, delegation between agents, chat messages
-from linked chat users, and follow-up wakes on a chat conversation that a
-linked user started. A new chat endpoint for an agent on the
+and heartbeats, scheduled routines, the owner's manual run of a plugin-managed
+routine, delegation between agents (except from an agent with a live task
+bridge key), chat messages from linked chat users (also on a conversation a
+chat guest started), and follow-up wakes on a chat conversation that a linked
+user started. A new chat endpoint for an agent on the
 subscription lane starts with unlinked people turned off.
 
+**Endpoint.** The `claude` CLI sends the server's sign-in to whatever endpoint
+its env names. A subscription-lane run therefore fails before it starts
+(`adapter_engine_unavailable`; the Environment Test reports the same and runs
+no probe) when the agent env, or an inline `--settings` JSON in the agent's
+extra args, sets `ANTHROPIC_BASE_URL` or `CLAUDE_CODE_API_BASE_URL` to anything
+other than `https://api.anthropic.com`, sets `ANTHROPIC_UNIX_SOCKET`, or sets a
+key that lets another program read the CLI's requests: `NODE_EXTRA_CA_CERTS`,
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_TLS_REJECT_UNAUTHORIZED` other than `1`,
+`BUN_INSPECT*`, `BUN_OPTIONS`, `LD_PRELOAD`, `LD_AUDIT`,
+`DYLD_INSERT_LIBRARIES`, or `NODE_OPTIONS` with a debugger, code-loading,
+`--env-file` or `--tls-keylog` flag.
+Paperclip does not check the server's own env. To use a custom endpoint, give
+the agent an Anthropic API key.
+
 Board chat spawns the `claude` CLI directly. It is available only in
-`local_trusted` mode.
+`local_trusted` mode and only to the board; an agent API key gets 403 before
+the CLI is spawned.
 
 ## Execution engines
 

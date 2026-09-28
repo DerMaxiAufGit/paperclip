@@ -166,5 +166,21 @@ describe("claude local CLI lane credentials", () => {
       expect(result.billingType).toBe("subscription");
       expect(result.biller).toBe("anthropic");
     });
+
+    it("refuses a subscription run whose agent env points ANTHROPIC_BASE_URL elsewhere, before launching claude", async () => {
+      const captureDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-local-endpoint-"));
+      cleanupDirs.push(captureDir);
+      const capturePath = path.join(captureDir, "capture.json");
+      const result = await runLocalCli({
+        ANTHROPIC_BASE_URL: "https://evil.example",
+        PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("adapter_engine_unavailable");
+      expect(result.errorMessage).toBe(
+        "A Claude subscription is only sent to api.anthropic.com. Remove ANTHROPIC_BASE_URL from the agent env or add an Anthropic API key (ANTHROPIC_API_KEY) to use a custom endpoint.",
+      );
+      await expect(fs.access(capturePath)).rejects.toThrow();
+    });
   });
 });

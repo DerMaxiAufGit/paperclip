@@ -46,6 +46,7 @@ import {
 } from "./sync-operation-schedule.js";
 import type { RuntimeSpanRunner } from "./acpx-engine/startup-timing.js";
 import { withWorkspaceRestoreDiagnostics } from "./workspace-restore-diagnostics.js";
+import { claudeSignInWorkspaceExcludes, withClaudeSignInStagingExcludes } from "./claude-config-credential-excludes.js";
 
 const execFile = promisify(execFileCallback);
 const SANDBOX_WORKSPACE_HEAVY_DIR_NAMES = [
@@ -1185,6 +1186,9 @@ export async function prepareSandboxManagedRuntime(input: {
   // another repository. Staging also verifies the captured directory identity.
   const workspaceRoot = syncWorkspace ? await captureWorkspaceSourceRoot(input.workspaceLocalDir) : null;
   if (workspaceRoot) input = { ...input, workspaceLocalDir: workspaceRoot.sourceDir };
+  // Fork policy: no adapter stages a Claude sign-in from the workspace, and the
+  // restore never touches one (see claude-config-credential-excludes.ts).
+  input = withClaudeSignInStagingExcludes(input);
 
   // The git enumeration (`git status --ignored`, the HEAD diffs, `ls-files`).
   // It reads git's own bookkeeping to decide what to include/exclude, so it is
@@ -1631,6 +1635,7 @@ export async function prepareSandboxManagedRuntime(input: {
             const exclude = mergeExcludes(
               additionalSourceBaseExclude,
               referencedSourceIgnoreExcludeEntries(ignoreResolution),
+              claudeSignInWorkspaceExcludes({ workspaceLocalDir: localPath }),
             );
             await emitRuntimeStatus(input.onRuntimeProgress, "config_sync", "Syncing referenced project to environment");
             await stageConfinedSyncIn({

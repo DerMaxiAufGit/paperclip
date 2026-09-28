@@ -1,5 +1,7 @@
-import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import {
+  activityLog,
+  agentApiKeys,
   agentWakeupRequests,
   authUsers,
   chatActions,
@@ -9,6 +11,7 @@ import {
   companyMemberships,
   instanceUserRoles,
   issues,
+  pluginManagedResources,
   plugins,
   routineRuns,
   type Db,
@@ -41,10 +44,12 @@ import { readConfigFile } from "../config-file.js";
  *    guest's pull request, or one an unlinked GitHub account pushed or
  *    reopened), an inbound email, a plugin (agents.invoke, agent sessions,
  *    plugin issue wakeups, plugin-relayed comments, interactions and approval
- *    decisions, which is also how plugin webhooks reach agents), or a routine's
- *    public webhook trigger. A system follow-up wake (recovery, liveness
- *    dispatch) on a task that one of these created is refused too, unless a
- *    Paperclip user requested the wake outside chat.
+ *    decisions, which is also how plugin webhooks reach agents), a routine's
+ *    public webhook trigger, or a task bridge key (the key internet-facing chat
+ *    and webhook bridges use). A system or agent follow-up wake (recovery,
+ *    liveness dispatch) on a task that one of these created, that a
+ *    plugin-managed routine created, or that a plugin last assigned or moved is
+ *    refused too, unless a Paperclip user requested the wake.
  */
 
 export const CLAUDE_SUBSCRIPTION_NOT_ALLOWED_REASON = "subscription_not_allowed" as const;
@@ -140,7 +145,12 @@ export async function resolveClaudeSubscriptionEligibility(
   };
 }
 
-export type ClaudeSubscriptionExternalTriggerKind = "chat_guest" | "email" | "plugin" | "routine_webhook";
+export type ClaudeSubscriptionExternalTriggerKind =
+  | "chat_guest"
+  | "email"
+  | "plugin"
+  | "routine_webhook"
+  | "task_bridge";
 
 export interface ClaudeSubscriptionTriggerViolation {
   reason: typeof CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_REASON;
@@ -160,6 +170,20 @@ const EMAIL_WAKE_REASON = "email_received";
 
 /** originId prefixes of the tasks an email conversation creates (inbound and outbound). */
 const EMAIL_ISSUE_ORIGIN_ID_PREFIXES = ["email:", "email-send:"];
+
+/**
+ * The scope kind of an agent API key for an internet-facing chat or webhook
+ * bridge (for example a Hermes gateway). Tasks such a key creates carry origin
+ * `task_bridge` with the key's id as origin id (see routes/issues.ts).
+ */
+const TASK_BRIDGE_KEY_SCOPE_KIND = "task_bridge";
+
+/**
+ * The fields of a plugin's task edit (issues.update in plugin-host-services)
+ * that neither start work nor change what this gate reads. Any other field
+ * (assignee, status, blockers, origin, creator, workspace, …) can.
+ */
+const PLUGIN_ISSUE_CONTENT_PATCH_KEYS = ["title", "description", "priority", "labelIds", "billingCode"];
 
 /**
  * Plugin wake sources: `plugin.issue.requestWakeup(s)` for plugin issue
@@ -188,6 +212,7 @@ interface WakeRequestFacts {
   requestedByActorId: string | null;
   reason: string | null;
   payload: Record<string, unknown>;
+  requestedAt: Date;
 }
 
 /** Context and payload markers a plugin-started wake always carries. */
@@ -417,13 +442,15 @@ async function resolveChatWakes(
  * and chat messages from accounts linked to the user the wake is attributed to.
  *
  * A system or agent wake on a task that came from outside Paperclip (a plugin's
- * task, an email conversation, a chat conversation an unlinked person started,
- * or a routine's public webhook) is refused, because such a wake (for example
- * the recovery liveness dispatch of a stranded task) only continues the
- * outside trigger. A wake a Paperclip user requested outside chat is
- * owner-driven. A chat wake is checked against the task's origin even when it
- * is attributed to a user, since chat-channels attributes some wakes to a
- * responsible user rather than to the person who wrote the message.
+ * task, a plugin-managed routine's task, an email conversation, a chat
+ * conversation an unlinked person started, a routine's public webhook, or a
+ * task bridge key), or on a task a plugin last assigned or moved, is refused,
+ * because such a wake (for example the recovery liveness dispatch of a
+ * stranded task) only continues the outside trigger. A wake a Paperclip user
+ * requested is owner-driven; a chat wake counts as the user's only when every
+ * chat account behind it is linked to that user (resolveChatWakes), since
+ * chat-channels attributes some wakes to a responsible user rather than to the
+ * person who wrote the message.
  */
 export async function resolveClaudeSubscriptionTriggerViolation(
   db: Db,
@@ -455,6 +482,7 @@ export async function resolveClaudeSubscriptionTriggerViolation(
         requestedByActorId: agentWakeupRequests.requestedByActorId,
         reason: agentWakeupRequests.reason,
         payload: agentWakeupRequests.payload,
+        requestedAt: agentWakeupRequests.requestedAt,
       })
       .from(agentWakeupRequests)
       .where(and(eq(agentWakeupRequests.companyId, input.run.companyId), wakeFilter))
@@ -464,6 +492,7 @@ export async function resolveClaudeSubscriptionTriggerViolation(
     requestedByActorId: row.requestedByActorId ?? null,
     reason: row.reason ?? null,
     payload: asRecord(row.payload),
+    requestedAt: row.requestedAt,
   }));
 
   const violation = (kind: ClaudeSubscriptionExternalTriggerKind): ClaudeSubscriptionTriggerViolation => ({
@@ -475,7 +504,12 @@ export async function resolveClaudeSubscriptionTriggerViolation(
   if (hasPluginMarker(context, wakes)) return violation("plugin");
 
   const chatWakes = await resolveChatWakes(db, input.run.companyId, wakes.map((wake) => wake.id));
-  const userRequested = wakes.some((wake) => wake.requestedByActorType === "user" && !chatWakes.ids.has(wake.id));
+  // A chat wake is the user's own only once resolveChatWakes has proved that
+  // every chat account behind it is linked to that user; otherwise the run is
+  // refused as chat_guest below.
+  const userRequested = wakes.some(
+    (wake) => wake.requestedByActorType === "user" && (!chatWakes.external || !chatWakes.ids.has(wake.id)),
+  );
 
   if (hasEmailMarker(context, wakes, userRequested)) return violation("email");
   if (chatWakes.external) return violation("chat_guest");
@@ -511,11 +545,45 @@ export async function resolveClaudeSubscriptionTriggerViolation(
     if (principalRows.length > 0) return violation("chat_guest");
   }
 
+  // An agent-requested wake names the requesting agent, not the key it used.
+  // A task bridge key acts as its agent, and may assign the tasks of its agent
+  // to other agents, so a wake requested by an agent that held a live task
+  // bridge key when the wake was requested may have come from the bridge.
+  const agentActorIds = [
+    ...new Set(
+      wakes
+        .filter((wake) => wake.requestedByActorType === "agent")
+        .map((wake) => wake.requestedByActorId)
+        .filter((id): id is string => typeof id === "string" && UUID_RE.test(id)),
+    ),
+  ];
+  if (agentActorIds.length > 0) {
+    const bridgeKeys = await db
+      .select({ agentId: agentApiKeys.agentId, revokedAt: agentApiKeys.revokedAt })
+      .from(agentApiKeys)
+      .where(
+        and(
+          eq(agentApiKeys.companyId, input.run.companyId),
+          inArray(agentApiKeys.agentId, agentActorIds),
+          sql`${agentApiKeys.scopeConfig}->>'kind' = ${TASK_BRIDGE_KEY_SCOPE_KIND}`,
+        ),
+      );
+    const bridgeRequested = wakes.some(
+      (wake) =>
+        wake.requestedByActorType === "agent" &&
+        bridgeKeys.some(
+          (key) => key.agentId === wake.requestedByActorId && (!key.revokedAt || key.revokedAt > wake.requestedAt),
+        ),
+    );
+    if (bridgeRequested) return violation("task_bridge");
+  }
+
   // The origin of the run's task. A plugin's task, an email conversation, a
-  // chat conversation an unlinked person started, and a task a routine's public
-  // webhook created all come from outside Paperclip; a system or agent wake on
-  // them (such as the recovery liveness dispatch) only continues that trigger.
-  // A later wake by a Paperclip user (the owner commenting on the task) is
+  // chat conversation an unlinked person started, a task a routine's public
+  // webhook or a plugin-managed routine created, and a task a task bridge key
+  // created all come from outside Paperclip; a system or agent wake on them
+  // (such as the recovery liveness dispatch) only continues that trigger. A
+  // later wake by a Paperclip user (the owner commenting on the task) is
   // owner-driven and allowed.
   const issueId = readString(input.issueId) ?? readString(context.issueId);
   if (issueId && UUID_RE.test(issueId) && !userRequested) {
@@ -525,27 +593,100 @@ export async function resolveClaudeSubscriptionTriggerViolation(
         originId: issues.originId,
         originRunId: issues.originRunId,
         sourceTrust: issues.sourceTrust,
+        createdByUserId: issues.createdByUserId,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, input.run.companyId)))
       .then((rows) => rows[0] ?? null);
     const originKind = readString(origin?.originKind);
+    const originId = readString(origin?.originId);
     if (originKind?.startsWith("plugin:")) return violation("plugin");
+    if (originKind === TASK_BRIDGE_KEY_SCOPE_KIND) return violation("task_bridge");
     if (originKind === "chat_channel") {
-      const originId = readString(origin?.originId) ?? "";
-      if (EMAIL_ISSUE_ORIGIN_ID_PREFIXES.some((prefix) => originId.startsWith(prefix))) return violation("email");
+      if (EMAIL_ISSUE_ORIGIN_ID_PREFIXES.some((prefix) => originId?.startsWith(prefix))) return violation("email");
       // chat-channels marks a conversation an unlinked person started as low trust.
       if (origin?.sourceTrust) return violation("chat_guest");
     }
-    const originRunId = readString(origin?.originRunId);
-    if (originKind === "routine_execution" && originRunId && UUID_RE.test(originRunId)) {
-      const routineRun = await db
-        .select({ source: routineRuns.source })
-        .from(routineRuns)
-        .where(and(eq(routineRuns.id, originRunId), eq(routineRuns.companyId, input.run.companyId)))
-        .then((rows) => rows[0] ?? null);
+    if (originKind === "routine_execution") {
+      const originRunId = readString(origin?.originRunId);
+      const routineRun =
+        originRunId && UUID_RE.test(originRunId)
+          ? await db
+              .select({ source: routineRuns.source, routineId: routineRuns.routineId })
+              .from(routineRuns)
+              .where(and(eq(routineRuns.id, originRunId), eq(routineRuns.companyId, input.run.companyId)))
+              .then((rows) => rows[0] ?? null)
+          : null;
       if (routineRun?.source === "webhook") return violation("routine_webhook");
+      // A plugin-managed routine: the plugin defines it and can run it at any
+      // time (ctx.routines.managed.run, which a plugin webhook can drive; it is
+      // recorded as a manual run without a user). Its tasks keep this origin
+      // unless the plugin's issue template marks them as plugin operations, and
+      // the template may set its own origin id, so the routine comes from the
+      // routine run. Only a manual run a Paperclip user started is owner-driven.
+      const routineIds = [
+        ...new Set([routineRun?.routineId, originId].filter((id): id is string => !!id && UUID_RE.test(id))),
+      ];
+      const userRanRoutine = routineRun?.source === "manual" && readString(origin?.createdByUserId) !== null;
+      if (routineIds.length > 0 && !userRanRoutine) {
+        const managed = await db
+          .select({ id: pluginManagedResources.id })
+          .from(pluginManagedResources)
+          .where(
+            and(
+              eq(pluginManagedResources.companyId, input.run.companyId),
+              eq(pluginManagedResources.resourceKind, "routine"),
+              inArray(pluginManagedResources.resourceId, routineIds),
+            ),
+          )
+          .limit(1);
+        if (managed.length > 0) return violation("plugin");
+      }
     }
+
+    // A plugin can assign, move or unblock any task of its company
+    // (issues.update and the blocker relations in plugin-host-services) without
+    // changing its origin, and a system wake such as the recovery liveness
+    // dispatch then runs it; the plugin's activity row (with the edit under
+    // `patch`) is the only trace. The task stays external until the owner acts
+    // on it: refused while the newest such plugin edit is later than every
+    // activity of a Paperclip user on the task.
+    const pluginContentKeys = sql.join(
+      PLUGIN_ISSUE_CONTENT_PATCH_KEYS.map((key) => sql`${key}`),
+      sql`, `,
+    );
+    const lastChange = await db
+      .select({ actorType: activityLog.actorType })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issueId),
+          eq(activityLog.companyId, input.run.companyId),
+          or(
+            eq(activityLog.actorType, "user"),
+            and(
+              eq(activityLog.actorType, "plugin"),
+              eq(activityLog.action, "issue.updated"),
+              sql`case when jsonb_typeof(${activityLog.details}->'patch') = 'object'
+                then exists (
+                  select 1 from jsonb_object_keys(${activityLog.details}->'patch') as patch_key
+                  where patch_key not in (${pluginContentKeys})
+                )
+                else true end`,
+            ),
+            and(
+              eq(activityLog.actorType, "plugin"),
+              eq(activityLog.action, "issue.relations.updated"),
+              sql`${activityLog.details}->>'mutation' is distinct from 'add'`,
+            ),
+          ),
+        ),
+      )
+      .orderBy(desc(activityLog.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (lastChange?.actorType === "plugin") return violation("plugin");
   }
 
   return null;

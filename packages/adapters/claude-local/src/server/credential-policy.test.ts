@@ -105,6 +105,139 @@ describe("claude credential policy", () => {
   });
 });
 
+describe("subscription endpoint check on the local CLI lane", () => {
+  const EVIL = "https://evil.example";
+
+  it("refuses a subscription-lane run whose agent env points ANTHROPIC_BASE_URL at another host", () => {
+    const message = violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: EVIL } });
+    expect(message).toBe(
+      "A Claude subscription is only sent to api.anthropic.com. Remove ANTHROPIC_BASE_URL from the agent env or add an Anthropic API key (ANTHROPIC_API_KEY) to use a custom endpoint.",
+    );
+  });
+
+  it("allows ANTHROPIC_BASE_URL only at https://api.anthropic.com", () => {
+    for (const url of ["https://api.anthropic.com", "https://api.anthropic.com/", "https://API.anthropic.com:443/v1"]) {
+      expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: url } })).toBeNull();
+    }
+    for (const url of [
+      "http://api.anthropic.com",
+      "https://api.anthropic.com:8443",
+      "https://api.anthropic.com.evil.example",
+      "https://console.anthropic.com",
+      "not a url",
+      " ",
+    ]) {
+      expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: url } })).toContain("ANTHROPIC_BASE_URL");
+    }
+    // An empty value leaves the CLI on its default endpoint.
+    expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: "" } })).toBeNull();
+  });
+
+  it("keeps custom base URLs for API-key and gateway runs", () => {
+    expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: EVIL, ANTHROPIC_API_KEY: "sk-ant-api03-key" } })).toBeNull();
+    expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: EVIL, ANTHROPIC_AUTH_TOKEN: "gw-token" } })).toBeNull();
+    expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: EVIL, CLAUDE_CODE_USE_BEDROCK: "1" } })).toBeNull();
+    // A host API key makes the local CLI run an API-key run too.
+    expect(
+      violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: EVIL }, hostEnv: { ANTHROPIC_API_KEY: "sk-ant-api03-host" } }),
+    ).toBeNull();
+  });
+
+  it("still refuses when the only credential is a subscription token or a host key a managed connection hides", () => {
+    expect(
+      violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: EVIL, ANTHROPIC_API_KEY: "sk-ant-oat01-subscription" } }),
+    ).toContain("ANTHROPIC_BASE_URL");
+    expect(
+      violation({
+        engine: "cli",
+        env: { ANTHROPIC_BASE_URL: EVIL },
+        managed: true,
+        hostEnv: { ANTHROPIC_API_KEY: "sk-ant-api03-host" },
+      }),
+    ).toContain("ANTHROPIC_BASE_URL");
+  });
+
+  it("checks only the agent env, not the server's own env", () => {
+    expect(violation({ engine: "cli", hostEnv: { ANTHROPIC_BASE_URL: EVIL, ANTHROPIC_UNIX_SOCKET: "/tmp/s" } })).toBeNull();
+  });
+
+  it("refuses ANTHROPIC_UNIX_SOCKET and CLAUDE_CODE_API_BASE_URL on the subscription lane", () => {
+    expect(violation({ engine: "cli", env: { ANTHROPIC_UNIX_SOCKET: "/tmp/claude.sock" } })).toContain(
+      "ANTHROPIC_UNIX_SOCKET",
+    );
+    expect(violation({ engine: "cli", env: { CLAUDE_CODE_API_BASE_URL: EVIL } })).toContain("CLAUDE_CODE_API_BASE_URL");
+    expect(violation({ engine: "cli", env: { CLAUDE_CODE_API_BASE_URL: "https://api.anthropic.com" } })).toBeNull();
+  });
+
+  it("refuses TLS trust overrides, debugger and code-loading keys on the subscription lane", () => {
+    for (const env of [
+      { NODE_TLS_REJECT_UNAUTHORIZED: "0" },
+      { NODE_EXTRA_CA_CERTS: "/tmp/proxy-ca.pem" },
+      { SSL_CERT_FILE: "/tmp/proxy-ca.pem" },
+      { SSL_CERT_DIR: "/tmp/certs" },
+      { BUN_INSPECT: "0.0.0.0:6499" },
+      { BUN_INSPECT_CONNECT_TO: "unix:///tmp/debug.sock" },
+      { BUN_OPTIONS: "--preload /tmp/hook.js" },
+      { LD_PRELOAD: "/tmp/hook.so" },
+      { NODE_OPTIONS: "--max-old-space-size=4096 --require /tmp/hook.js" },
+      { NODE_OPTIONS: "--inspect=0.0.0.0:9229" },
+      { NODE_OPTIONS: "--import=/tmp/hook.mjs" },
+    ]) {
+      const [key] = Object.keys(env);
+      const message = violation({ engine: "cli", env });
+      expect(message).toContain(key);
+      expect(message).toContain("api.anthropic.com");
+    }
+    expect(violation({ engine: "cli", env: { NODE_TLS_REJECT_UNAUTHORIZED: "1" } })).toBeNull();
+    expect(violation({ engine: "cli", env: { NODE_OPTIONS: "--max-old-space-size=4096" } })).toBeNull();
+    // The same keys stay allowed on an API-key run.
+    expect(
+      violation({ engine: "cli", env: { NODE_EXTRA_CA_CERTS: "/tmp/ca.pem", ANTHROPIC_API_KEY: "sk-ant-api03-key" } }),
+    ).toBeNull();
+  });
+
+  it("matches keys in any case and reads plain bindings; an unresolved binding fails closed", () => {
+    expect(violation({ engine: "cli", env: { anthropic_base_url: EVIL } })).toContain("anthropic_base_url");
+    expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: { type: "plain", value: EVIL } } })).toContain(
+      "ANTHROPIC_BASE_URL",
+    );
+    expect(
+      violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: { type: "plain", value: "https://api.anthropic.com" } } }),
+    ).toBeNull();
+    expect(
+      violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: { type: "secret_ref", secretId: "s" } } }),
+    ).toContain("ANTHROPIC_BASE_URL");
+  });
+
+  it("checks the env of an inline --settings value in the agent's extra args", () => {
+    const settings = JSON.stringify({ env: { ANTHROPIC_BASE_URL: EVIL } });
+    const run = (config: Record<string, unknown>, hostEnv: NodeJS.ProcessEnv = EMPTY_HOST) =>
+      resolveClaudeCredentialPolicyViolation({ engine: "cli", config, target: null, hostEnv });
+    expect(run({ extraArgs: ["--settings", settings] })).toBe(
+      "A Claude subscription is only sent to api.anthropic.com. Remove ANTHROPIC_BASE_URL from the --settings env in the agent's extra args or add an Anthropic API key (ANTHROPIC_API_KEY) to use a custom endpoint.",
+    );
+    expect(run({ args: [`--settings=${settings}`] })).toContain("ANTHROPIC_BASE_URL");
+    expect(run({ extraArgs: ["--settings", JSON.stringify({ env: { NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" } })] })).toContain(
+      "NODE_EXTRA_CA_CERTS",
+    );
+    expect(run({ extraArgs: ["--settings", JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } })] }))
+      .toBeNull();
+    expect(run({ extraArgs: ["--settings", settings], env: { ANTHROPIC_API_KEY: "sk-ant-api03-key" } })).toBeNull();
+    // A settings file path is not read here (see the plan's grey area).
+    expect(run({ extraArgs: ["--settings", "/etc/claude/settings.json"] })).toBeNull();
+  });
+
+  it("leaves the ACP and remote gates unchanged", () => {
+    expect(violation({ engine: "acp", env: { ANTHROPIC_BASE_URL: EVIL } })).toBe(CLAUDE_ACP_API_KEY_REQUIRED_MESSAGE);
+    expect(violation({ engine: "cli", env: { ANTHROPIC_BASE_URL: EVIL }, target: REMOTE_SANDBOX })).toBe(
+      CLAUDE_REMOTE_API_KEY_REQUIRED_MESSAGE,
+    );
+    expect(
+      violation({ engine: "acp", env: { ANTHROPIC_BASE_URL: EVIL, ANTHROPIC_API_KEY: "sk-ant-api03-key" } }),
+    ).toBeNull();
+  });
+});
+
 describe("resolveClaudeDefaultEngine", () => {
   it("uses ACP for a local run with an API key in the adapter env", () => {
     expect(

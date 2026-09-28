@@ -980,6 +980,9 @@ export function buildHostServices(
         sourceRunId: interaction.sourceRunId ?? null,
         ...(planReviewInteraction ? { planReviewInteraction } : {}),
         mutation: "interaction",
+        // Plugin marker for the Claude subscription trigger gate; unlike the
+        // context source, it survives a later wake coalescing into the run.
+        pluginId,
       },
       requestedByActorType: "user",
       requestedByActorId: args.actorUserId,
@@ -2443,6 +2446,8 @@ export function buildHostServices(
                 issueId: issue.id,
                 commentId: comment.id,
                 mutation: "comment",
+                // Plugin marker for the Claude subscription trigger gate.
+                pluginId,
               },
               requestedByActorType: "user",
               requestedByActorId: params.actorUserId,
@@ -2697,6 +2702,8 @@ export function buildHostServices(
             payload: {
               approvalId: approval.id,
               approvalStatus: approval.status,
+              // Plugin marker for the Claude subscription trigger gate.
+              pluginId,
             },
             requestedByActorType: "user",
             requestedByActorId: params.actorUserId,

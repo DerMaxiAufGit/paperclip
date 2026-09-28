@@ -1,4 +1,8 @@
 import * as p from "@clack/prompts";
+import {
+  CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+  isClaudeSubscriptionTokenValue,
+} from "@paperclipai/shared";
 import type { LlmConfig } from "../config/schema.js";
 
 export async function promptLlm(): Promise<LlmConfig | undefined> {
@@ -31,6 +35,9 @@ export async function promptLlm(): Promise<LlmConfig | undefined> {
     message: `${provider === "claude" ? "Anthropic" : "OpenAI"} API key`,
     validate: (val) => {
       if (!val) return "API key is required";
+      // Refused before onboard sends the key to the provider or configure
+      // writes it to the config file.
+      if (isClaudeSubscriptionTokenValue(val)) return CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE;
     },
   });
 

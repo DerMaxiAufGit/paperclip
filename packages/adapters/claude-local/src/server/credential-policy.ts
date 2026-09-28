@@ -1,5 +1,6 @@
+import { readHarnessCliFlagValues } from "@paperclipai/adapter-utils/claude-subscription-harness-guard";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
-import { parseObject } from "@paperclipai/adapter-utils/server-utils";
+import { asStringArray, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import {
   CLAUDE_SUBSCRIPTION_EXTERNAL_TRIGGER_MESSAGE,
   CLAUDE_SUBSCRIPTION_OWNER_ONLY_MESSAGE,
@@ -117,11 +118,169 @@ export function resolveClaudeDefaultEngine(input: {
 }
 
 /**
+ * The only host the server's Claude sign-in may be sent to. With no API
+ * credential the `claude` binary sends the sign-in's bearer token to whatever
+ * endpoint its env names, so the subscription lane refuses an agent env that
+ * points the binary elsewhere or lets another program read its requests.
+ */
+const CLAUDE_SUBSCRIPTION_API_HOST = "api.anthropic.com";
+
+/**
+ * Env keys that set the endpoint of the `claude` binary's API requests, allowed
+ * only at `https://api.anthropic.com`. `ANTHROPIC_UNIX_SOCKET`, which sends the
+ * requests to a local socket instead, is refused whatever its value.
+ */
+const CLAUDE_API_ENDPOINT_ENV_KEYS = new Set(["ANTHROPIC_BASE_URL", "CLAUDE_CODE_API_BASE_URL"]);
+const CLAUDE_API_SOCKET_ENV_KEY = "ANTHROPIC_UNIX_SOCKET";
+
+/**
+ * Env keys the subscription lane refuses whatever their value, because they let
+ * another program read the binary's requests: `NODE_EXTRA_CA_CERTS`,
+ * `SSL_CERT_FILE` and `SSL_CERT_DIR` change which TLS certificates it trusts,
+ * so a proxy could read them; `BUN_INSPECT*` opens a debugger on its Bun
+ * runtime, and `BUN_OPTIONS`, `LD_PRELOAD`, `LD_AUDIT` and
+ * `DYLD_INSERT_LIBRARIES` load code into it.
+ */
+const CLAUDE_SUBSCRIPTION_REFUSED_ENV_KEYS = new Set([
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "BUN_OPTIONS",
+  "LD_PRELOAD",
+  "LD_AUDIT",
+  "DYLD_INSERT_LIBRARIES",
+]);
+const CLAUDE_SUBSCRIPTION_REFUSED_ENV_KEY_PREFIXES = ["BUN_INSPECT"];
+
+/**
+ * `NODE_OPTIONS` flags that open a debugger on, load code or env into, or log
+ * the TLS keys of a `claude` CLI that runs on Node (an npm install). Other
+ * flags, such as `--max-old-space-size`, stay allowed.
+ */
+const NODE_OPTIONS_REFUSED_FLAGS = [
+  "-r",
+  "--require",
+  "--import",
+  "--loader",
+  "--experimental-loader",
+  "--env-file",
+  "--env-file-if-exists",
+  "--tls-keylog",
+];
+
+/** True when `value` names `https://api.anthropic.com` (any path). */
+export function isClaudeSubscriptionApiEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.host === CLAUDE_SUBSCRIPTION_API_HOST;
+  } catch {
+    return false;
+  }
+}
+
+function nodeOptionsLoadOrInspect(value: string): boolean {
+  return value.split(/\s+/).some((token) => {
+    const name = token.replace(/^["']/, "").split("=")[0]!;
+    return name.startsWith("--inspect") || name.startsWith("--debug") || NODE_OPTIONS_REFUSED_FLAGS.includes(name);
+  });
+}
+
+/**
+ * The value of an env binding: a string, or a plain binding's value. `null`
+ * means set with a value this check cannot see (an unresolved secret), which
+ * fails closed; `undefined` means unset.
+ */
+function envBindingValue(binding: unknown): string | null | undefined {
+  if (binding === undefined || binding === null) return undefined;
+  if (typeof binding === "string") return binding;
+  const record = parseObject(binding);
+  if (record.type === "plain" && typeof record.value === "string") return record.value;
+  return null;
+}
+
+type ClaudeSubscriptionEnvFinding = { key: string; kind: "endpoint" | "exposure" };
+
+function findClaudeSubscriptionEnvFinding(env: Record<string, unknown>): ClaudeSubscriptionEnvFinding | null {
+  for (const [rawKey, binding] of Object.entries(env)) {
+    const value = envBindingValue(binding);
+    if (value === undefined || value === "") continue;
+    const key = rawKey.trim();
+    const normalized = key.toUpperCase();
+    if (CLAUDE_API_ENDPOINT_ENV_KEYS.has(normalized)) {
+      if (value === null || !isClaudeSubscriptionApiEndpoint(value)) return { key, kind: "endpoint" };
+      continue;
+    }
+    if (normalized === CLAUDE_API_SOCKET_ENV_KEY) return { key, kind: "endpoint" };
+    const refused =
+      CLAUDE_SUBSCRIPTION_REFUSED_ENV_KEYS.has(normalized) ||
+      CLAUDE_SUBSCRIPTION_REFUSED_ENV_KEY_PREFIXES.some((prefix) => normalized.startsWith(prefix)) ||
+      (normalized === "NODE_TLS_REJECT_UNAUTHORIZED" && value !== "1") ||
+      (normalized === "NODE_OPTIONS" && (value === null || nodeOptionsLoadOrInspect(value)));
+    if (refused) return { key, kind: "exposure" };
+  }
+  return null;
+}
+
+function claudeSubscriptionEndpointMessage(finding: ClaudeSubscriptionEnvFinding, place: string): string {
+  const prefix = "A Claude subscription is only sent to api.anthropic.com.";
+  return finding.kind === "endpoint"
+    ? `${prefix} Remove ${finding.key} from ${place} or add an Anthropic API key (ANTHROPIC_API_KEY) to use a custom endpoint.`
+    : `${prefix} ${finding.key} lets another program read the claude CLI's requests; remove it from ${place} or add an Anthropic API key (ANTHROPIC_API_KEY) to use it.`;
+}
+
+/**
+ * The refusal message when a subscription-lane run's config points the
+ * `claude` binary away from api.anthropic.com or lets another program read its
+ * requests, or null when it may start. It reads the adapter config env (agent,
+ * project, environment and routine env, and issue overrides) and the env of an
+ * inline `--settings` JSON in `extraArgs`/`args`, which the binary applies over
+ * its process env. The server's own process env is the operator's and is not
+ * checked. The caller decides that the run is on the subscription lane.
+ */
+export function resolveClaudeSubscriptionEndpointViolation(config: Record<string, unknown>): string | null {
+  const envFinding = findClaudeSubscriptionEnvFinding(parseObject(config.env));
+  if (envFinding) return claudeSubscriptionEndpointMessage(envFinding, "the agent env");
+  const extraArgs = [...asStringArray(config.extraArgs), ...asStringArray(config.args)];
+  for (const value of readHarnessCliFlagValues(extraArgs, ["--settings"])) {
+    if (!value.startsWith("{")) continue;
+    let settings: unknown;
+    try {
+      settings = JSON.parse(value);
+    } catch {
+      // The binary refuses a --settings value that is not valid JSON.
+      continue;
+    }
+    const settingsFinding = findClaudeSubscriptionEnvFinding(parseObject(parseObject(settings).env));
+    if (settingsFinding) {
+      return claudeSubscriptionEndpointMessage(settingsFinding, "the --settings env in the agent's extra args");
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a local CLI run has no API credential, so the `claude` binary uses
+ * the sign-in of the user Paperclip runs as. A managed AI connection never
+ * inherits the host credentials.
+ */
+function isLocalCliSubscriptionRun(config: Record<string, unknown>, hostEnv: NodeJS.ProcessEnv | undefined): boolean {
+  const identity = resolveClaudeBillingIdentity({
+    engine: "cli",
+    targetIsRemote: false,
+    env: parseObject(config.env),
+    hostEnv: config.managedAiConnection ? {} : hostEnv,
+  });
+  return identity.billingType === "subscription";
+}
+
+/**
  * The single credential gate shared by the CLI engine, the ACP engine, and the
  * environment Test. Returns the user-facing error message when the run must
  * not start, or null when it may start.
  *
- * - Local CLI engine: always allowed; the `claude` binary uses its own sign-in.
+ * - Local CLI engine: allowed; the `claude` binary uses its own sign-in. On the
+ *   subscription lane (no API credential) the config must not point it away
+ *   from api.anthropic.com (`resolveClaudeSubscriptionEndpointViolation`).
  * - Remote target (either engine): needs an API credential.
  * - ACP engine (any target): needs an API credential.
  */
@@ -132,7 +291,11 @@ export function resolveClaudeCredentialPolicyViolation(input: {
   hostEnv?: NodeJS.ProcessEnv;
 }): string | null {
   const targetIsRemote = input.target?.kind === "remote";
-  if (!targetIsRemote && input.engine === "cli") return null;
+  if (!targetIsRemote && input.engine === "cli") {
+    return isLocalCliSubscriptionRun(input.config, input.hostEnv)
+      ? resolveClaudeSubscriptionEndpointViolation(input.config)
+      : null;
+  }
   if (claudeRunHasApiCredential({ config: input.config, targetIsRemote, hostEnv: input.hostEnv })) {
     return null;
   }
@@ -265,15 +428,8 @@ export function isClaudeSubscriptionLaneRun(input: {
 }): boolean {
   if (input.targetIsRemote === true || input.target?.kind === "remote") return false;
   const rawEngine = typeof input.config.engine === "string" ? input.config.engine.trim().toLowerCase() : "";
-  const engine: ClaudeCredentialPolicyEngine = rawEngine === "acp" ? "acp" : "cli";
-  if (engine === "acp") return false;
-  const identity = resolveClaudeBillingIdentity({
-    engine,
-    targetIsRemote: false,
-    env: parseObject(input.config.env),
-    hostEnv: input.config.managedAiConnection ? {} : input.hostEnv,
-  });
-  return identity.billingType === "subscription";
+  if (rawEngine === "acp") return false;
+  return isLocalCliSubscriptionRun(input.config, input.hostEnv);
 }
 
 /**

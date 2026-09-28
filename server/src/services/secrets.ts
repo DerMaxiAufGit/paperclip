@@ -109,6 +109,24 @@ const COMING_SOON_SECRET_PROVIDERS: ReadonlySet<SecretProvider> = new Set([
 const FALLBACK_ADAPTER_SCHEMA_SECRET_FIELDS: Readonly<Record<string, readonly string[]>> = {
   hermes_gateway: ["apiKey"],
 };
+
+/**
+ * Runtime resolution never hands on a Claude subscription token. A secret
+ * stored before Paperclip checked values, a value held in an external
+ * provider, or a legacy plain value can still be one, so every resolved value
+ * passes here and a token is dropped (with its secretKeys and manifest entry)
+ * before any caller (heartbeat, adapter Test, skills list/sync, auth signal)
+ * sees it. A secret bound under a token env key is not resolved at all.
+ */
+function isDroppedClaudeSubscriptionToken(companyId: string, configPath: string, value: string): boolean {
+  if (!isClaudeSubscriptionTokenValue(value)) return false;
+  logger.warn(
+    { companyId, configPath },
+    "Dropped a Claude subscription token from a resolved config; delete the stored value",
+  );
+  return true;
+}
+
 const USER_SECRET_DEFINITION_KEY_UNIQUE_CONSTRAINT = "user_secret_definitions_company_key_uq";
 const USER_SECRET_VALUE_UNIQUE_CONSTRAINT = "company_secrets_user_definition_owner_uq";
 
@@ -4721,13 +4739,16 @@ export function secretService(db: Db | DbTransaction) {
         if (!ENV_KEY_RE.test(key)) {
           throw unprocessable(`Invalid environment variable name: ${key}`);
         }
+        if (isClaudeSubscriptionTokenEnvKey(key)) continue;
         const parsed = envBindingSchema.safeParse(rawBinding);
         if (!parsed.success) {
           throw unprocessable(`Invalid environment binding for key: ${key}`);
         }
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
         if (binding.type === "plain") {
-          resolved[key] = binding.value;
+          if (!isDroppedClaudeSubscriptionToken(companyId, `env.${key}`, binding.value)) {
+            resolved[key] = binding.value;
+          }
         } else if (binding.type === "secret_ref") {
           const secretResolution = await resolveSecretValueInternal(
             companyId,
@@ -4740,6 +4761,7 @@ export function secretService(db: Db | DbTransaction) {
                 }
               : undefined,
           );
+          if (isDroppedClaudeSubscriptionToken(companyId, `env.${key}`, secretResolution.value)) continue;
           resolved[key] = secretResolution.value;
           manifest.push(secretResolution.manifestEntry);
           secretKeys.add(key);
@@ -4760,7 +4782,10 @@ export function secretService(db: Db | DbTransaction) {
                 }
               : undefined,
           );
-          if (secretResolution) {
+          if (
+            secretResolution &&
+            !isDroppedClaudeSubscriptionToken(companyId, `env.${key}`, secretResolution.value)
+          ) {
             resolved[key] = secretResolution.value;
             manifest.push(secretResolution.manifestEntry);
             secretKeys.add(key);
@@ -5124,13 +5149,16 @@ export function secretService(db: Db | DbTransaction) {
             if (!ENV_KEY_RE.test(key)) {
               throw unprocessable(`Invalid environment variable name: ${key}`);
             }
+            if (isClaudeSubscriptionTokenEnvKey(key)) continue;
             const parsed = envBindingSchema.safeParse(rawBinding);
             if (!parsed.success) {
               throw unprocessable(`Invalid environment binding for key: ${key}`);
             }
             const binding = canonicalizeBinding(parsed.data as EnvBinding);
             if (binding.type === "plain") {
-              env[key] = binding.value;
+              if (!isDroppedClaudeSubscriptionToken(companyId, `env.${key}`, binding.value)) {
+                env[key] = binding.value;
+              }
             } else if (binding.type === "secret_ref") {
               const secretResolution = await resolveSecretValueInternal(
                 companyId,
@@ -5151,6 +5179,7 @@ export function secretService(db: Db | DbTransaction) {
                       }
                   : undefined,
               );
+              if (isDroppedClaudeSubscriptionToken(companyId, `env.${key}`, secretResolution.value)) continue;
               env[key] = secretResolution.value;
               manifest.push(secretResolution.manifestEntry);
               secretKeys.add(key);
@@ -5181,7 +5210,10 @@ export function secretService(db: Db | DbTransaction) {
                       }
                   : undefined,
               );
-              if (secretResolution) {
+              if (
+                secretResolution &&
+                !isDroppedClaudeSubscriptionToken(companyId, `env.${key}`, secretResolution.value)
+              ) {
                 env[key] = secretResolution.value;
                 manifest.push(secretResolution.manifestEntry);
                 secretKeys.add(key);
@@ -5196,7 +5228,10 @@ export function secretService(db: Db | DbTransaction) {
         const parsed = envBindingSchema.safeParse(adapterConfig[key]);
         if (!parsed.success) continue;
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
-        if (binding.type === "plain") continue;
+        if (binding.type === "plain") {
+          if (isDroppedClaudeSubscriptionToken(companyId, key, binding.value)) delete resolved[key];
+          continue;
+        }
         if (binding.type === "user_secret_ref") {
           if (opts?.skipUserSecrets) {
             delete resolved[key];
@@ -5225,7 +5260,9 @@ export function secretService(db: Db | DbTransaction) {
                   }
               : undefined,
           );
-          if (secretResolution) {
+          if (secretResolution && isDroppedClaudeSubscriptionToken(companyId, key, secretResolution.value)) {
+            delete resolved[key];
+          } else if (secretResolution) {
             resolved[key] = secretResolution.value;
             manifest.push(secretResolution.manifestEntry);
             secretKeys.add(key);
@@ -5249,6 +5286,10 @@ export function secretService(db: Db | DbTransaction) {
                 }
             : undefined,
         );
+        if (isDroppedClaudeSubscriptionToken(companyId, key, secretResolution.value)) {
+          delete resolved[key];
+          continue;
+        }
         resolved[key] = secretResolution.value;
         manifest.push(secretResolution.manifestEntry);
         secretKeys.add(key);

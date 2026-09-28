@@ -7,7 +7,7 @@ import type { Db } from "@paperclipai/db";
 import type { DeploymentMode } from "@paperclipai/shared";
 import { isClaudeSubscriptionTokenEnvEntry } from "@paperclipai/shared";
 import { instanceSettingsService, issueService } from "../services/index.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
  * Strip structured action signals (`%%ACTIONS%%{...}%%/ACTIONS%%`) from a
@@ -120,6 +120,11 @@ export function boardChatRoutes(
       });
       return;
     }
+
+    // The `claude` CLI runs on the operator's own Claude sign-in, which is for
+    // the operator's own use only. An agent key (which an external trigger can
+    // drive) must not reach it through this relay; only the board may.
+    assertBoard(req);
 
     const { companyId, message, taskId } = req.body as {
       companyId?: string;

@@ -19,16 +19,29 @@ vi.mock("../services/index.js", () => ({
 
 vi.mock("node:child_process", () => ({ spawn: mockSpawn }));
 
-vi.mock("../routes/authz.js", () => ({
+// assertBoard stays real: the route must refuse non-board actors itself.
+vi.mock("../routes/authz.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../routes/authz.js")>()),
   getActorInfo: () => ({ actorId: "user-1", agentId: null, runId: null }),
   assertCompanyAccess: () => {},
 }));
 
-async function createApp(deploymentMode: "local_trusted" | "authenticated" = "local_trusted") {
+const boardActor = { type: "board", userId: "local-board", source: "local_implicit" };
+
+async function createApp(
+  deploymentMode: "local_trusted" | "authenticated" = "local_trusted",
+  actor: Record<string, unknown> = boardActor,
+) {
   const { boardChatRoutes } = await import("../routes/board-chat.js");
+  const { errorHandler } = await import("../middleware/error-handler.js");
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).actor = actor;
+    next();
+  });
   app.use("/api", boardChatRoutes({} as any, { deploymentMode }));
+  app.use(errorHandler);
   return app;
 }
 
@@ -78,6 +91,30 @@ describe("POST /api/board/chat/stream feature flag guard (PAP-137)", () => {
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: "companyId and message are required" });
+  });
+
+  it("refuses an agent key before spawning claude on the server's own sign-in", async () => {
+    mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
+    mockIssueService.list.mockResolvedValue([
+      { id: "issue-1", title: "Board Operations", status: "todo" },
+    ]);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
+    mockIssueService.listComments.mockResolvedValue([]);
+    const app = await createApp("local_trusted", {
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .post("/api/board/chat/stream")
+      .send({ companyId: "company-1", message: "hello" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Board access required");
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 });
 

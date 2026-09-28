@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+  isClaudeSubscriptionTokenValue,
+} from "./validators/secret.js";
 
 /** Runtime authentication is a separate transport, never a tool or channel. */
 export const connectionPurposeTransportSchema = z.discriminatedUnion(
@@ -197,6 +201,14 @@ export const createAiConnectionSchema = z
         message: v.provider === "anthropic" && v.method === "subscription"
           ? CLAUDE_SUBSCRIPTION_IMPORT_UNSUPPORTED_MESSAGE
           : "Unsupported sign-in method",
+      });
+    // A Claude subscription token is never an API key, for any provider; the
+    // server would otherwise send it to the provider's endpoint to verify it.
+    if (isClaudeSubscriptionTokenValue(v.apiKey))
+      ctx.addIssue({
+        code: "custom",
+        message: CLAUDE_SUBSCRIPTION_TOKEN_UNSUPPORTED_MESSAGE,
+        path: ["apiKey"],
       });
     if (
       v.method === "api_key"

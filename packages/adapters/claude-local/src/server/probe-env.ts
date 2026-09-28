@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
+import { claudeRunHasApiCredential, isClaudeSubscriptionApiEndpoint } from "./credential-policy.js";
 
 /**
  * The environment variable names that a local Claude adapter-test probe may
@@ -159,6 +160,20 @@ export async function buildLocalAdapterTestProbeEnv(input: {
     if (isNonEmptyString(value)) {
       env[key] = value;
     }
+  }
+
+  // Without an API credential the probe child runs on the server's Claude
+  // sign-in, which the `claude` binary sends to ANTHROPIC_BASE_URL. Keep a caller
+  // base URL only when the child gets an API credential (from the allowlisted
+  // caller values or the trusted env it inherits), or when it names
+  // api.anthropic.com. The adapter env's Vertex and Foundry flags never reach
+  // the child, so they do not count here.
+  if (
+    env.ANTHROPIC_BASE_URL !== undefined &&
+    !isClaudeSubscriptionApiEndpoint(env.ANTHROPIC_BASE_URL) &&
+    !claudeRunHasApiCredential({ config: { env }, targetIsRemote: false, hostEnv: trustedEnv })
+  ) {
+    delete env.ANTHROPIC_BASE_URL;
   }
 
   // Proxy values come from the trusted input only. A caller-supplied proxy key

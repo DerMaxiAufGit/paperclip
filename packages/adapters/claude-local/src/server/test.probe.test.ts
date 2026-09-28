@@ -592,8 +592,11 @@ describe("claude CLI local hello probe hardening", () => {
     "https_proxy",
     "no_proxy",
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
     "ANTHROPIC_BEDROCK_BASE_URL",
   ];
   const successStdout = [
@@ -742,6 +745,54 @@ describe("claude CLI local hello probe hardening", () => {
     const checkText = JSON.stringify(result.checks);
     expect(checkText).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
     expect(checkText).not.toContain("oauth-");
+  });
+
+  it("refuses a subscription-lane Test whose agent env redirects the claude CLI, without probing", async () => {
+    probeResult.value = { exitCode: 0, stdout: successStdout, stderr: "" };
+
+    for (const env of [{ ANTHROPIC_BASE_URL: "https://evil.example" }, { ANTHROPIC_UNIX_SOCKET: "/tmp/claude.sock" }]) {
+      const [key] = Object.keys(env);
+      const result = await testEnvironment({
+        companyId: "company-1",
+        adapterType: "claude_local",
+        config: { engine: "cli", command: "claude", env },
+        executionTarget: null,
+        environmentName: null,
+      });
+
+      expect(result.status).toBe("fail");
+      expect(result.checks).toContainEqual(expect.objectContaining({
+        code: "adapter_engine_unavailable",
+        level: "error",
+        message: `A Claude subscription is only sent to api.anthropic.com. Remove ${key} from the agent env or add an Anthropic API key (ANTHROPIC_API_KEY) to use a custom endpoint.`,
+      }));
+    }
+    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
+  });
+
+  it("never hands a probe that would run on the subscription a caller ANTHROPIC_BASE_URL", async () => {
+    // The adapter env's Vertex flag makes the run metered, but the probe child
+    // never gets that flag, so it would run on the server's sign-in.
+    probeResult.value = { exitCode: 0, stdout: successStdout, stderr: "" };
+
+    await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: {
+        engine: "cli",
+        command: "claude",
+        env: { CLAUDE_CODE_USE_VERTEX: "1", ANTHROPIC_BASE_URL: "https://evil.example" },
+      },
+      executionTarget: null,
+      environmentName: null,
+    });
+
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalled();
+    for (const call of runAdapterExecutionTargetProcess.mock.calls as unknown as unknown[][]) {
+      const env = (call[4] as { env?: Record<string, string> } | undefined)?.env ?? {};
+      expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+      expect(JSON.stringify(env)).not.toContain("evil.example");
+    }
   });
 
   it("tells the operator to sign in with the claude CLI when the local probe needs login", async () => {
